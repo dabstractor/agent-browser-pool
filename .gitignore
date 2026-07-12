@@ -1,0 +1,5 @@
+# runtime / install artifacts (not version-controlled)
+*.log
+
+# local dev symlinks / state
+.state/
