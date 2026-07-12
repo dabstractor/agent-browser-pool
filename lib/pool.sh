@@ -275,3 +275,112 @@ pool_check_master() {
              "  cp -a --reflink=always <your-chrome-profile> \"$POOL_MASTER_DIR\"" \
              "(see PRD §1.2 — the master is created once, never launched/mutated.)"
 }
+
+# _pool_atomic_write FILEPATH [CONTENT]
+#   Write CONTENT to FILEPATH atomically: write to FILEPATH.tmp (same directory
+#   → same filesystem → atomic rename) then `mv` it over FILEPATH. A concurrent
+#   reader sees old-or-new, never a half-written file (PRD §2.19, key_findings
+#   FINDING 7).
+#
+#   GOTCHA (same-FS atomicity): rename(2) is atomic ONLY when src and dst are on
+#   the SAME filesystem. The .tmp is "${filepath}.tmp" (same DIRECTORY as the
+#   target) to GUARANTEE same-FS. NEVER use mktemp (puts the file in /tmp, a
+#   different mount → cross-FS copy+unlink, NON-atomic).
+#
+#   GOTCHA (no fsync / crash-durability): we do NOT fsync (no bash builtin;
+#   coreutils `sync` is global and too slow for a per-lease primitive). A
+#   power-loss crash between the write and the rename leaves the OLD target
+#   intact plus an orphan .tmp — acceptable for a short-lived pool lease (the
+#   reaper, M5.T3, treats a stale lease as reaper-able anyway). Atomicity (no
+#   torn reads) is what matters here, not crash-durability.
+#
+#   GOTCHA (orphan .tmp cleanup): if the process is killed between the printf
+#   and the mv, an orphan <filepath>.tmp remains. This function removes only
+#   ITS OWN partial .tmp on a write failure; sweeping other stale .tmp files is
+#   a caller/startup (install.sh / doctor) concern, NOT implemented here.
+#
+#   Args:  $1=filepath, $2=content (defaults to "" if unset).
+#   Returns 0 on success. Calls pool_die (exit 1) if the tmp write or the rename
+#   fails — never silently leaves the target unchanged.
+_pool_atomic_write() {
+    local filepath="$1" content="${2:-}"
+    local tmp
+    tmp="${filepath}.tmp"
+    # printf '%s' preserves the EXACT bytes (no added newline) so file bytes ==
+    # content arg. The `if !` makes a write failure a controlled branch so the
+    # cleanup rm runs before pool_die exits.
+    if ! printf '%s' "$content" >"$tmp"; then
+        rm -f -- "$tmp" 2>/dev/null || true
+        pool_die "_pool_atomic_write: cannot write tmp file: $tmp"
+    fi
+    # mv -f overwrites without prompting (suppresses any interactive alias); --
+    # guards paths starting with '-'. `||` is set -e safe.
+    mv -f -- "$tmp" "$filepath" \
+        || pool_die "_pool_atomic_write: cannot rename tmp into place: $tmp -> $filepath"
+}
+
+# _pool_json_valid FILEPATH
+#   Predicate: is FILEPATH syntactically valid JSON? Returns 0 (valid) / 1
+#   (invalid, missing, or unreadable). NEVER calls pool_die — it is a boolean.
+#
+#   NOTE (syntax vs schema): `jq empty` exits 0 for valid objects/arrays AND for
+#   bare scalars (123, "hi") AND for empty files (all "valid JSON per RFC 8259");
+#   non-zero (2 for missing, 5 for malformed, verified jq 1.8.2) for malformed /
+#   missing / unreadable. So this is a SYNTAX check, NOT a schema check. The
+#   stricter "is this a lease OBJECT with required fields?" is M3.T1.S2's job.
+#
+#   Args:  $1=filepath.
+#   Returns 0 if `jq empty` succeeds, 1 otherwise. Never exits the process.
+_pool_json_valid() {
+    local filepath="$1"
+    # The `if` makes jq's non-zero exit a clean branch (NOT a set -e abort).
+    # stderr → /dev/null so malformed-JSON parse errors don't leak to the user.
+    if jq empty "$filepath" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+# _pool_now
+#   Echo the current Unix epoch (seconds since 1970) as digits. Used for lease
+#   acquired_at / last_seen_at (PRD §2.8). `date +%s` is a GNU coreutils
+#   extension, guaranteed on this host; exits 0 reliably (safe under set -e).
+#   Matches the idiom in key_findings.md FINDING 7 and external_deps.md.
+#
+#   Args:  none.
+#   Echoes <digits>, exit 0.
+_pool_now() {
+    date '+%s'
+}
+
+# _pool_age_str TIMESTAMP
+#   Echo a human-readable age for TIMESTAMP (epoch seconds): largest whole unit
+#   — Ns (<60), Nm (<3600), Nh (<86400), Nd (else). A future/negative diff
+#   (clock skew, bogus ts) clamps to "0s". Used by admin `status` (PRD §2.12,
+#   M7.T1.S1).
+#
+#   GOTCHA (set -e + arithmetic): a bare `(( expr ))` as a STATEMENT returns
+#   exit status 1 when the result is 0 — FATAL under set -e. EVERY `(( ))` here
+#   is inside `if`/`elif` (exempt from errexit). The `$(( ))` EXPANSION form is
+#   always safe.
+#
+#   Args:  $1=timestamp (epoch seconds).
+#   Echoes Ns/Nm/Nh/Nd (negative→"0s"), exit 0.
+_pool_age_str() {
+    local ts="$1"
+    local now diff
+    now="$(date '+%s')"          # two-statement (SC2155); date +%s always exits 0
+    diff=$(( now - ts ))         # $(( )) EXPANSION is always set -e safe
+    if (( diff < 0 )); then      # clamp future/negative to 0
+        diff=0
+    fi
+    if (( diff < 60 )); then
+        printf '%ss\n' "$diff"
+    elif (( diff < 3600 )); then
+        printf '%sm\n' "$(( diff / 60 ))"
+    elif (( diff < 86400 )); then
+        printf '%sh\n' "$(( diff / 3600 ))"
+    else
+        printf '%sd\n' "$(( diff / 86400 ))"
+    fi
+}
