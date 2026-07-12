@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Project scaffolding & path configuration",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Create directory structure, lib/pool.sh skeleton with strict bash, and resolve all configuration variables to absolute paths.",
               "subtasks": [
                 {
@@ -38,7 +38,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Config/path resolution — all env vars to absolute paths",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -54,7 +54,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "State directory setup + btrfs detection",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
