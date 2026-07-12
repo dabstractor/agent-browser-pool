@@ -185,3 +185,93 @@ pool_config_init() {
 
     return 0
 }
+
+# pool_state_init — bring the on-disk pool state dir into existence (idempotent).
+#
+# Enforces PRD §2.11 / system_context §7: the state dir does NOT exist until first
+# run (or until install.sh pre-creates it — M8.T1.S1). This function is the "first
+# run" creation path so that a fresh checkout's very first acquire just works.
+#
+# Reads POOL_LANES_DIR and POOL_LOCK_FILE (frozen by pool_config_init). Idempotent:
+# `mkdir -p` and `touch` are idempotent by design, so calling this on every acquire
+# is cheap and correct — NO "if not exists" guard is needed. Silent on success
+# (no _pool_log — prechecks must not flood the log on the happy path).
+#
+# Returns 0 on success; calls pool_die (exit 1) if mkdir/touch fails for a real
+# filesystem reason (permission denied, read-only FS, etc.).
+pool_state_init() {
+    mkdir -p -- "$POOL_LANES_DIR" \
+        || pool_die "pool_state_init: cannot create lanes dir: $POOL_LANES_DIR"
+    touch -- "$POOL_LOCK_FILE" \
+        || pool_die "pool_state_init: cannot create lock file: $POOL_LOCK_FILE"
+    return 0
+}
+
+# pool_check_btrfs — refuse a non-btrfs ephemeral root unless the escape hatch is set.
+#
+# Enforces PRD §2.7 and §2.14: a non-btrfs filesystem at POOL_EPHEMERAL_ROOT would
+# silently trigger a catastrophic 4.8 GB real copy per acquire (the CoW `cp
+# --reflink=always` would fall back to a full copy). Refuse loudly unless
+# POOL_ALLOW_SLOW_COPY=1 (normalized from AGENT_CHROME_ALLOW_SLOW_COPY by S2).
+#
+# CRITICAL GOTCHA: uses `findmnt -T` (the --target flag is MANDATORY). A bare
+# `findmnt -nno FSTYPE "$dir"` (NO -T) matches the positional arg against SOURCE
+# (a device), not the mount tree, and exits 1 on this host EVEN ON BTRFS — verified
+# 2026-07-12. The architecture doc external_deps.md §3.2 example omits -T and is
+# BROKEN; do not copy it. Always: `findmnt -nno FSTYPE -T "$POOL_EPHEMERAL_ROOT"`.
+#
+# findmnt legitimately exits 1 when the path is missing or not on a btrfs mount; the
+# `|| true` neutralizes that so set -e (propagated by S1) does not abort the capture.
+# An empty FSTYPE (missing path / findmnt failure) is treated as "not btrfs".
+#
+# Reads POOL_EPHEMERAL_ROOT and POOL_ALLOW_SLOW_COPY (frozen by pool_config_init).
+# Echoes the detected FSTYPE on success (handy for callers + tests). Returns 0 when
+# btrfs OR slow-copy allowed; calls pool_die otherwise.
+pool_check_btrfs() {
+    local fstype
+    # `|| true` makes the command-substitution always succeed; fstype becomes "" on
+    # failure (missing path / not found), which the [[ ]] test below handles.
+    fstype="$(findmnt -nno FSTYPE -T "$POOL_EPHEMERAL_ROOT" 2>/dev/null || true)"
+
+    if [[ "$fstype" == "btrfs" ]]; then
+        printf '%s\n' "$fstype"
+        return 0
+    fi
+
+    # Not btrfs — including the empty case (path missing or findmnt failed).
+    if [[ "$POOL_ALLOW_SLOW_COPY" == "1" ]]; then
+        printf '%s\n' "${fstype:-unknown}"
+        return 0
+    fi
+
+    pool_die "pool_check_btrfs: $POOL_EPHEMERAL_ROOT is not on btrfs" \
+             "(detected: '${fstype:-<empty/missing>})." \
+             "A real copy of the 4.8 GB master per acquire would be catastrophic." \
+             "Set AGENT_CHROME_ALLOW_SLOW_COPY=1 to allow it, or point" \
+             "AGENT_CHROME_EPHEMERAL_ROOT at a btrfs mount (the path may not exist)."
+}
+
+# pool_check_master — verify the master template exists and is populated.
+#
+# Enforces PRD §2.7 (the master is read-only, created once, never launched/mutated)
+# and §2.14 (a missing master must fail with the EXACT cp command to bootstrap it).
+#
+# Tests existence (-d) and non-emptiness (ls -A) ONLY — do NOT stat/du the 4.8 GB
+# master (slow). "Non-empty" is sufficient to catch a stray `mkdir` that created
+# the dir without copying a profile into it.
+#
+# Reads POOL_MASTER_DIR (frozen by pool_config_init). Returns 0 when the dir exists
+# and is non-empty; calls pool_die with an actionable copy-paste cp command
+# otherwise (covering BOTH missing AND empty dir).
+pool_check_master() {
+    if [[ -d "$POOL_MASTER_DIR" ]] \
+       && [[ -n "$(ls -A "$POOL_MASTER_DIR" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    pool_die "pool_check_master: master template missing or empty:" \
+             "$POOL_MASTER_DIR" \
+             "Create it ONCE by copying a configured Chrome profile, e.g.:" \
+             "  cp -a --reflink=always <your-chrome-profile> \"$POOL_MASTER_DIR\"" \
+             "(see PRD §1.2 — the master is created once, never launched/mutated.)"
+}

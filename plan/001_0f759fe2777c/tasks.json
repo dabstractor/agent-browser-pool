@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Foundation & Core Library",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Create the project scaffolding (bin/, lib/, test/ directories), implement lib/pool.sh skeleton with strict bash settings, and build the foundational layer: absolute path resolution from env vars, state directory setup, btrfs detection, atomic file write helpers, logging, and error handling. Every subsequent milestone depends on this.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Project scaffolding & path configuration",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create directory structure, lib/pool.sh skeleton with strict bash, and resolve all configuration variables to absolute paths.",
               "subtasks": [
                 {
@@ -54,7 +54,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S3",
                   "title": "State directory setup + btrfs detection",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -72,14 +72,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Atomic write & JSON helper utilities",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Implement atomic file write (tmp + mv rename), JSON lease serialization via jq, and common helpers used across the library.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Atomic file write + JSON helpers",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
