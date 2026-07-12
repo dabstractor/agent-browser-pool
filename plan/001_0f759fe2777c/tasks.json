@@ -1,0 +1,746 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P1",
+      "title": "MVP — Transparent Browser Pool",
+      "status": "Researching",
+      "description": "Build the complete agent-browser-pool system: a transparent PATH-shadowing wrapper that gives every AI agent (pi process) its own dedicated, locked, ephemeral Chrome profile from a btrfs CoW copy of a master template. Includes the shared lease library (lib/pool.sh), the wrapper shim (bin/agent-browser), the admin tool (bin/agent-browser-pool), install.sh, and the test harness. ~250 LOC bash total. No fork, no daemon, no Rust.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P1.M1",
+          "title": "Foundation & Core Library",
+          "status": "Planned",
+          "description": "Create the project scaffolding (bin/, lib/, test/ directories), implement lib/pool.sh skeleton with strict bash settings, and build the foundational layer: absolute path resolution from env vars, state directory setup, btrfs detection, atomic file write helpers, logging, and error handling. Every subsequent milestone depends on this.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M1.T1",
+              "title": "Project scaffolding & path configuration",
+              "status": "Planned",
+              "description": "Create directory structure, lib/pool.sh skeleton with strict bash, and resolve all configuration variables to absolute paths.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S1",
+                  "title": "Directory structure + lib/pool.sh skeleton with strict bash",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.2", "h3.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The repo is greenfield — no bin/, lib/, or test/ dirs exist yet. See plan/001_0f759fe2777c/architecture/system_context.md §1.\n2. INPUT: None (first subtask in the project).\n3. LOGIC: Create the directory structure per PRD §3 (Repository layout): bin/, lib/, test/. Create lib/pool.sh with `#!/usr/bin/env bash` and `set -euo pipefail` at the top. Add a header comment documenting the file's purpose. Define a `pool_die()` function that prints to stderr and exits non-zero. Add a `_pool_log()` function that timestamps messages to the pool log. Do NOT implement any pool logic yet — just the skeleton and utility functions.\n4. OUTPUT: lib/pool.sh exists with strict bash settings, die/log utilities, and is sourceable without errors.\n5. DOCS: [Mode A] Add a file-level comment block in lib/pool.sh documenting it as the shared library sourced by both bin/agent-browser and bin/agent-browser-pool. Update .gitignore if needed for any new patterns."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S2",
+                  "title": "Config/path resolution — all env vars to absolute paths",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h3.6", "h3.15", "h3.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The PRD's §2.2 hard rule is critical — tilde does NOT expand inside quotes or after `=`. A literal `~` creates a junk dir named `~`. ALL paths must be resolved to absolute form at startup using $HOME. See plan/001_0f759fe2777c/architecture/key_findings.md FINDING 3 and external_deps.md §5.\n2. INPUT: Environment variables (optional overrides). Defaults from PRD §2.11.\n3. LOGIC: Implement `pool_config_init()` that resolves ALL configuration to absolute global variables:\n   - HOME_DIR=\"$(realpath \"$HOME\")\"\n   - POOL_STATE_DIR (default: $HOME_DIR/.local/state/agent-browser-pool)\n   - POOL_MASTER_DIR (default: $HOME_DIR/.agent-chrome-profiles/master-profile)\n   - POOL_EPHEMERAL_ROOT (default: $HOME_DIR/.agent-chrome-profiles/active)\n   - POOL_REAL_BIN (default: $HOME_DIR/.local/bin/agent-browser)\n   - POOL_CHROME_BIN (default: google-chrome-stable)\n   - POOL_PORT_BASE (default: 53420)\n   - POOL_PORT_RANGE (default: 1000)\n   - POOL_WAIT (default: 600)\n   - POOL_HEADLESS (from AGENT_CHROME_HEADLESS, unset=windowed)\n   - POOL_DISABLE (from AGENT_BROWSER_POOL_DISABLE)\n   - POOL_ALLOW_SLOW_COPY (from AGENT_CHROME_ALLOW_SLOW_COPY)\n   - POOL_LANES_DIR=$POOL_STATE_DIR/lanes\n   - POOL_LOCK_FILE=$POOL_STATE_DIR/acquire.lock\n   Use realpath or explicit $HOME_DIR expansion — NEVER bare ~.\n4. OUTPUT: A `pool_config_init()` function that, when called, populates all POOL_* globals with validated absolute paths. Consumed by every subsequent function.\n5. DOCS: [Mode A] Add a comment block listing every env var, its default, and its purpose. This is the configuration reference for the project."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T1.S3",
+                  "title": "State directory setup + btrfs detection",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S2"],
+                  "prd_selectors": ["h3.6", "h3.11", "h3.15"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: State dir ~/.local/state/agent-browser-pool/ does NOT exist yet. btrfs is confirmed at the profile root. See system_context.md §7 and external_deps.md §3.2.\n2. INPUT: POOL_STATE_DIR, POOL_LANES_DIR globals from P1.M1.T1.S2. POOL_EPHEMERAL_ROOT and POOL_MASTER_DIR from same.\n3. LOGIC: Implement:\n   a. `pool_state_init()` — mkdir -p $POOL_LANES_DIR, touch $POOL_LOCK_FILE. Idempotent.\n   b. `pool_check_btrfs()` — Use findmnt to detect FS type at $POOL_EPHEMERAL_ROOT. If not btrfs and POOL_ALLOW_SLOW_COPY!=1, pool_die with clear error message. Return the detected FSTYPE. If btrfs, return 0.\n   c. `pool_check_master()` — Verify $POOL_MASTER_DIR exists and is non-empty. If missing, pool_die with the exact cp command the user should run to create it.\n4. OUTPUT: pool_state_init(), pool_check_btrfs(), pool_check_master() functions. Called at the start of acquire.\n5. DOCS: none — no user-facing/config/API surface change beyond internal functions."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M1.T2",
+              "title": "Atomic write & JSON helper utilities",
+              "status": "Planned",
+              "description": "Implement atomic file write (tmp + mv rename), JSON lease serialization via jq, and common helpers used across the library.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M1.T2.S1",
+                  "title": "Atomic file write + JSON helpers",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h3.23", "h3.12"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Atomic lease writes are critical for concurrency safety. Write to .tmp then mv (rename is atomic on same FS). See key_findings.md FINDING 7. jq is available at /usr/bin/jq.\n2. INPUT: File path and content.\n3. LOGIC: Implement:\n   a. `_pool_atomic_write(filepath, content)` — Write content to filepath.tmp, then `mv filepath.tmp filepath`. The tmp file is in the same directory (same FS guarantee for atomic rename).\n   b. `_pool_json_valid(filepath)` — Use `jq empty filepath` to validate JSON. Return 0 if valid, 1 if not.\n   c. `_pool_now()` — Echo current Unix timestamp (`date +%s`).\n   d. `_pool_age_str(timestamp)` — Human-readable age string (e.g., '5m', '2h').\n4. OUTPUT: Internal helper functions used by lease I/O (M3.T1) and admin status (M7.T1).\n5. DOCS: none — internal helpers, no user-facing surface."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M2",
+          "title": "Owner Resolution & Identity System",
+          "status": "Planned",
+          "description": "Implement the mechanism to identify which 'pi' process owns a given agent-browser invocation, and verify liveness/staleness of that owner. This is the foundation for mutual exclusion (1 agent = 1 lane) and reliable cleanup (detect dead owners).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M2.T1",
+              "title": "Owner PID resolution & starttime extraction",
+              "status": "Planned",
+              "description": "Walk ppid chain to find the owning 'pi' process, extract its PID, comm, and starttime for identity verification.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S1",
+                  "title": "ppid walk to comm==pi + test hook overrides",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h3.0", "h3.8", "h3.22", "h3.23"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Every bash tool call is a child of one pi process. Walking ppid to comm=='pi' yields a stable, unique-per-agent PID. Verified: this session → ppid chain: bash → pi (1409826) → timeout → zsh → systemd. See system_context.md §2. Subagents are separate pi processes → separate lanes. See key_findings.md FINDING 8 for test hooks.\n2. INPUT: Current process tree (via /proc). Optional override env vars AGENT_BROWSER_POOL_OWNER_PID and AGENT_BROWSER_POOL_OWNER_STARTTIME for testing.\n3. LOGIC: Implement `pool_owner_resolve()` that:\n   a. If AGENT_BROWSER_POOL_OWNER_PID is set: use it directly (test mode). Set globals POOL_OWNER_PID, POOL_OWNER_COMM='pi'. If AGENT_BROWSER_POOL_OWNER_STARTTIME is also set, use that for POOL_OWNER_STARTTIME.\n   b. Otherwise: walk ppid chain starting from $$ — for each pid, read /proc/<pid>/comm. Stop at first comm=='pi'. Set POOL_OWNER_PID, POOL_OWNER_COMM='pi'. Extract starttime (see S2).\n   c. If no pi ancestor found (human in terminal): set POOL_OWNER_PID=0 (signals passthrough mode).\n   d. Also record POOL_OWNER_CWD from /proc/<pid>/cwd (readlink).\n4. OUTPUT: Globals: POOL_OWNER_PID (0 if no pi ancestor), POOL_OWNER_COMM, POOL_OWNER_STARTTIME, POOL_OWNER_CWD. Consumed by lease queries (M3.T2) and the wrapper lifecycle (M6.T3).\n5. DOCS: none — internal function. Test hooks are documented in code comments only."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T1.S2",
+                  "title": "Robust starttime extraction from /proc/stat",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T1.S1"],
+                  "prd_selectors": ["h3.8", "h3.12", "h3.23"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: CRITICAL — The PRD §2.19 says 'starttime is field 22 → index NF-19'. This is WRONG. Verified: /proc/self/stat has 52 fields; NF-19 = field 33, not 22. The correct method: since comm='pi' has no spaces, `cut -d' ' -f22` works. For robustness: `sed 's/.*)//' /proc/<pid>/stat | awk '{print $20}'` (removes everything up to last ')', then field 20 = 22-2). See key_findings.md FINDING 1.\n2. INPUT: A PID (from pool_owner_resolve or a lease's owner.pid).\n3. LOGIC: Implement `_pool_get_starttime(pid)`:\n   a. Read /proc/<pid>/stat.\n   b. Use the robust method: `sed 's/.*)//' /proc/<pid>/stat | awk '{print $20}'`.\n   c. Echo the starttime value (integer, ticks since boot).\n   d. Return 1 if /proc/<pid>/stat doesn't exist (process dead).\n4. OUTPUT: A function that echoes the starttime integer for a given PID, used by pool_owner_resolve (to record POOL_OWNER_STARTTIME) and is_owner_alive (to verify identity across PID recycling).\n5. DOCS: none — internal function. CRITICAL: add a code comment explaining why the PRD's NF-19 approach is wrong and documenting the correct method."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M2.T2",
+              "title": "Owner liveness check & staleness detection",
+              "status": "Planned",
+              "description": "Determine whether a lease's owner is still alive and still the same process (defeats PID recycling).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M2.T2.S1",
+                  "title": "is_owner_alive(pid, starttime) — liveness + identity verification",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M2.T1.S2"],
+                  "prd_selectors": ["h3.8", "h3.9", "h3.12", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PID recycling is a real threat — a crashed pi's PID can be reused by a new process. starttime (field 22 of /proc/pid/stat, in clock ticks since boot) is unique per process invocation. Comparing starttime defeats recycling. See external_deps.md §6.1 and key_findings.md FINDING 1.\n2. INPUT: pid (integer), expected_starttime (integer), expected_comm (string, default 'pi').\n3. LOGIC: Implement `pool_owner_alive(pid, starttime, comm)`:\n   a. If /proc/<pid> doesn't exist → dead (return 1 = not alive).\n   b. Read /proc/<pid>/comm — if it doesn't match expected comm (stripped of newline) → recycled into non-pi (return 1 = stale).\n   c. Read /proc/<pid>/stat starttime via _pool_get_starttime(pid) — if it doesn't match expected_starttime → recycled into new process (return 1 = stale).\n   d. All checks pass → alive and same process (return 0).\n4. OUTPUT: Returns 0 if owner is alive and identity matches, 1 otherwise. Consumed by lease staleness checks (M3.T2.S3), reaper (M5.T3), and ensure-connected (M5.T1.S3).\n5. DOCS: none — internal function."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M3",
+          "title": "Lease Management System",
+          "status": "Planned",
+          "description": "Implement the JSON lease data model: atomic read/write, lane enumeration, find-my-lease (by owner), find-free-lane (lowest N), and staleness detection. This is the mutual-exclusion primitive that ensures 1 agent = 1 lane.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M3.T1",
+              "title": "Lease JSON I/O — atomic write & read",
+              "status": "Planned",
+              "description": "Define the lease JSON schema and implement safe read/write operations.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S1",
+                  "title": "Lease schema + atomic write function",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T2.S1", "P1.M1.T1.S3"],
+                  "prd_selectors": ["h3.12", "h3.23"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Lease schema is defined in PRD §2.8. Atomic writes via tmp+mv. See key_findings.md FINDING 7. jq available at /usr/bin/jq.\n2. INPUT: Lane number (N) and lease field values: ephemeral_dir, port, session, owner{pid,comm,starttime,cwd}, chrome_pid, chrome_pgid, connected.\n3. LOGIC: Implement `pool_lease_write(lane, ...)`:\n   a. Build JSON using `jq -n` with --arg/--argjson for each field.\n   b. Schema fields: version=1, lane=N, ephemeral_dir, port, session, owner{pid,comm,starttime,cwd}, chrome_pid, chrome_pgid, acquired_at, last_seen_at, connected (boolean).\n   c. Write to $POOL_LANES_DIR/<N>.json.tmp, then mv to <N>.json.\n   d. Also implement `pool_lease_update(lane, field, value)` — read existing lease, update one field, write atomically. Used for port, chrome_pid, connected updates during post-lock boot.\n4. OUTPUT: pool_lease_write() and pool_lease_update() functions. Consumed by acquire (M5.T1) and release (M5.T2).\n5. DOCS: none — internal functions. Schema is documented in PRD §2.8."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T1.S2",
+                  "title": "Lease read function + validation",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M3.T1.S1"],
+                  "prd_selectors": ["h3.12"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Lease files are optional — a lane with no .json file is simply unleased. Leases may be corrupt if a crash happened mid-write (rare with atomic writes, but defensive coding is needed).\n2. INPUT: Lane number (N).\n3. LOGIC: Implement:\n   a. `pool_lease_read(lane)` — Read $POOL_LANES_DIR/<N>.json. If file doesn't exist, return 1. If invalid JSON, log warning and return 1. Echo the raw JSON on success.\n   b. `pool_lease_field(lane, field)` — Read a specific field via `jq -r .field`. Helper for quick access.\n   c. `pool_lease_exists(lane)` — Return 0 if lease file exists and is valid, 1 otherwise.\n4. OUTPUT: Read functions returning lease data. Consumed by all lease query operations (M3.T2) and admin commands (M7).\n5. DOCS: none — internal functions."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M3.T2",
+              "title": "Lease query operations",
+              "status": "Planned",
+              "description": "Enumerate lanes, find the current owner's lease, find the lowest free lane number, and determine staleness.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S1",
+                  "title": "Enumerate lanes + find_my_lease(owner)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M3.T1.S2", "P1.M2.T2.S1"],
+                  "prd_selectors": ["h3.8", "h3.12"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 2 requires scanning lanes/*.json for owner.pid match with comm and starttime verification. One owner holds ≤1 lane (§2.8).\n2. INPUT: POOL_OWNER_PID, POOL_OWNER_STARTTIME globals from pool_owner_resolve (P1.M2.T1.S1).\n3. LOGIC: Implement:\n   a. `pool_lanes_list()` — List all N from $POOL_LANES_DIR/*.json. Echo each N on a separate line.\n   b. `pool_lease_find_mine()` — Iterate all lanes. For each, read owner.pid, owner.comm, owner.starttime. If owner.pid == POOL_OWNER_PID AND pool_owner_alive(pid, starttime, comm) returns 0 → this is my valid lease. Echo the lane N and return 0. If no match → return 1.\n   c. `pool_lease_find_mine_any()` — Like find_mine but returns even if the owner check fails (for diagnosing stale leases owned by this PID).\n4. OUTPUT: pool_lease_find_mine() returns 0 and echoes lane N if the current owner has a valid lease, returns 1 otherwise. Consumed by wrapper lifecycle step 2 (M6.T3.S1).\n5. DOCS: none — internal functions."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S2",
+                  "title": "find_free_lane() — lowest free lane number",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M3.T2.S1"],
+                  "prd_selectors": ["h3.8", "h3.7"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 3c: 'lowest N≥1 with no active/<N> dir and no lanes/<N>.json lease'. Lanes are unbounded — created on demand.\n2. INPUT: POOL_EPHEMERAL_ROOT and POOL_LANES_DIR globals.\n3. LOGIC: Implement `pool_find_free_lane()`:\n   a. Start N=1, increment.\n   b. For each N: check if $POOL_EPHEMERAL_ROOT/<N> dir exists OR $POOL_LANES_DIR/<N>.json exists.\n   c. First N where neither exists → echo N and return 0.\n   d. This is called under flock so it's race-free within the critical section.\n4. OUTPUT: Echoes the lowest free lane number N. Consumed by acquire step 3c (M5.T1.S1).\n5. DOCS: none — internal function."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M3.T2.S3",
+                  "title": "is_lane_stale(lane) — staleness detection for reaper",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M3.T1.S2", "P1.M2.T2.S1"],
+                  "prd_selectors": ["h3.8", "h3.9", "h3.14", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: A lane is stale if its owner pid is dead, comm != 'pi', or starttime mismatches (PRD §2.5, §2.14). This drives reaping.\n2. INPUT: Lane number N. Uses pool_lease_read and pool_owner_alive.\n3. LOGIC: Implement `pool_lane_is_stale(lane)`:\n   a. Read lease for lane N. If no lease → return 2 (not stale, just doesn't exist — caller skips).\n   b. Extract owner.pid, owner.comm, owner.starttime from lease.\n   c. Call pool_owner_alive(pid, starttime, comm). If returns 1 → lane is stale (return 0).\n   d. If owner is alive → not stale (return 1).\n4. OUTPUT: Returns 0 if lane is stale (should be reaped), 1 if live, 2 if no lease. Consumed by reaper (M5.T3) and acquire reap-stale step (M5.T1.S1).\n5. DOCS: none — internal function."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M4",
+          "title": "Lane Lifecycle Operations",
+          "status": "Planned",
+          "description": "Implement the low-level operations for creating and destroying lanes: btrfs CoW copy from master, Singleton lock cleanup, free TCP port discovery, Chrome launch with setsid + anti-throttle flags, CDP readiness wait, daemon connect, and process-group teardown. These are the building blocks the acquire/release flows orchestrate.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M4.T1",
+              "title": "Master copy & profile hygiene",
+              "status": "Planned",
+              "description": "Copy-on-write the master profile to an ephemeral lane dir and clean stale Chrome singleton locks.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T1.S1",
+                  "title": "btrfs reflink copy + Singleton lock cleanup",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S3"],
+                  "prd_selectors": ["h3.7", "h3.11", "h3.23"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: `cp -a --reflink=always` is instant on btrfs (CoW). Verified working on this host's btrfs mount. Reflink FAILS on non-btrfs (/tmp is tmpfs — confirmed). SingletonLock/Cookie/Socket are stale Chrome locks from the template that must be removed before launch. See external_deps.md §3 and key_findings.md.\n2. INPUT: POOL_MASTER_DIR (source) and target ephemeral dir path (e.g., $POOL_EPHEMERAL_ROOT/<N>).\n3. LOGIC: Implement `pool_copy_master(target_dir)`:\n   a. Run: `cp -a --reflink=always \"$POOL_MASTER_DIR\" \"$target_dir\"`.\n   b. If cp fails AND not btrfs AND POOL_ALLOW_SLOW_COPY != 1 → pool_die with error.\n   c. If cp fails AND POOL_ALLOW_SLOW_COPY == 1 → retry with `cp -a` (no reflink, slow 4.8GB copy).\n   d. After successful copy: `rm -f \"$target_dir/SingletonLock\" \"$target_dir/SingletonCookie\" \"$target_dir/SingletonSocket\"`.\n   e. Return 0 on success, die on failure.\n4. OUTPUT: pool_copy_master() function. Consumed by acquire post-lock boot (M5.T1.S2).\n5. DOCS: none — internal function. The btrfs/reflink requirement is already in README.md."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M4.T2",
+              "title": "Port allocation & Chrome launch",
+              "status": "Planned",
+              "description": "Find a free TCP port in the pool range, launch Chrome with setsid and anti-throttle flags, and wait for the CDP endpoint.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T2.S1",
+                  "title": "find_free_port() — lowest free TCP port in pool range",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S2"],
+                  "prd_selectors": ["h3.8", "h3.15"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 3f specifies 'lowest free TCP port in [BASE, BASE+RANGE)'. Port 9222 is used by Brave on this host — pool uses 53420+ to avoid collision. Existing lanes' ports are recorded in lease JSON.\n2. INPUT: POOL_PORT_BASE (53420), POOL_PORT_RANGE (1000). Access to lanes/*.json for claimed ports.\n3. LOGIC: Implement `pool_find_free_port()`:\n   a. Build a set of ports claimed by existing leases: iterate lanes/*.json, extract .port for each.\n   b. For port in BASE..BASE+RANGE-1:\n      - Skip if claimed by any lease.\n      - Check if port is listening: `ss -tlnH | grep -q \":$port \"` → skip if in use.\n      - Double-check: `curl -sf http://127.0.0.1:$port/json/version` → if responds, port is taken by non-pool Chrome → skip.\n      - First port that passes all checks → echo it, return 0.\n   c. If none free → return 1 (should be extremely rare with 1000 ports).\n4. OUTPUT: Echoes a free port number. Consumed by acquire post-lock boot (M5.T1.S2).\n5. DOCS: none — internal function."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T2.S2",
+                  "title": "Chrome launch with setsid + anti-throttle + CDP readiness wait",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M4.T2.S1"],
+                  "prd_selectors": ["h3.8", "h3.10", "h3.23", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.6 specifies exact Chrome flags. setsid makes Chrome its own process group leader (pgid==pid). Anti-throttle flags are REQUIRED on Wayland — without them, backgrounded pool windows get JS-timer-throttled. CDP readiness: poll http://127.0.0.1:<port>/json/version up to 30×0.5s=15s. Chrome binary verified at /usr/bin/google-chrome-stable. See external_deps.md §2.\n2. INPUT: port (from pool_find_free_port), user_data_dir (absolute path to ephemeral dir), lane number N (for log file).\n3. LOGIC: Implement:\n   a. `pool_chrome_launch(port, user_data_dir, lane)`:\n      - Build flag list: --remote-debugging-port=<port>, --user-data-dir=<ABSOLUTE path>, --no-first-run, --no-default-browser-check, --disable-background-timer-throttling, --disable-backgrounding-occluded-windows, --disable-renderer-backgrounding, --disable-features=CalculateNativeWinOcclusion, --disable-back-forward-cache.\n      - If POOL_HEADLESS=1, add --headless=new.\n      - Log file: $POOL_STATE_DIR/chrome-<lane>.log.\n      - Launch: `setsid \"$POOL_CHROME_BIN\" <flags> > \"$log_file\" 2>&1 &`\n      - Capture CHROME_PID=$!\n      - Get CHROME_PGID: `ps -o pgid= -p $CHROME_PID | tr -d ' '` (should equal CHROME_PID since setsid).\n      - Export CHROME_PID and CHROME_PGID as globals.\n   b. `pool_wait_cdp(port)`:\n      - Loop up to 60 times (30s total): `curl -sf http://127.0.0.1:<port>/json/version >/dev/null 2>&1`.\n      - Return 0 if CDP responds, 1 on timeout.\n      - On timeout: kill the Chrome process group, return 1.\n4. OUTPUT: Sets globals CHROME_PID, CHROME_PGID after successful launch. pool_wait_cdp returns 0/1. Consumed by acquire post-lock boot (M5.T1.S2).\n5. DOCS: none — internal functions. Chrome flags are documented in PRD §2.6."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M4.T3",
+              "title": "Daemon connect & teardown primitives",
+              "status": "Planned",
+              "description": "Connect the agent-browser daemon to a Chrome CDP endpoint, and tear down a Chrome process group cleanly.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M4.T3.S1",
+                  "title": "agent-browser connect + verify + process group teardown",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M1.T1.S2"],
+                  "prd_selectors": ["h3.8", "h3.9", "h3.10", "h3.18", "h3.23"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: `agent-browser --session <name> connect <port>` binds the daemon to a Chrome. Verified: connect to a dead port fails with exit 1. `get cdp-url` returns the WebSocket URL if connected. Teardown: `kill -- -<pgid>` kills the entire Chrome process group (renderers, GPU, utility children). See external_deps.md §1.4 and key_findings.md FINDING 6.\n2. INPUT: session name, port, chrome_pid, chrome_pgid (from lease or launch).\n3. LOGIC: Implement:\n   a. `pool_daemon_connect(session, port)`:\n      - Run: `$POOL_REAL_BIN --session \"$session\" connect \"$port\"`.\n      - Return 0 on success, 1 on failure.\n   b. `pool_daemon_connected(session)`:\n      - Run: `$POOL_REAL_BIN --session \"$session\" get cdp-url >/dev/null 2>&1`.\n      - Return 0 if connected (exit 0), 1 if not.\n   c. `pool_chrome_kill(chrome_pid, chrome_pgid)`:\n      - Primary: `kill -- -\"$chrome_pgid\" 2>/dev/null || true` (kill process group).\n      - Wait briefly (sleep 0.5), then `kill -9 -- -\"$chrome_pgid\" 2>/dev/null || true` (force).\n      - Fallback: `kill \"$chrome_pid\" 2>/dev/null || true` then `kill -9 \"$chrome_pid\" 2>/dev/null || true`.\n      - Idempotent — safe to call on already-dead processes.\n4. OUTPUT: pool_daemon_connect(), pool_daemon_connected(), pool_chrome_kill() functions. Consumed by acquire (M5.T1), release (M5.T2), and reaper (M5.T3).\n5. DOCS: none — internal functions."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M5",
+          "title": "Acquire, Release & Reaper Orchestration",
+          "status": "Planned",
+          "description": "Implement the high-level flow logic that orchestrates the lane lifecycle operations: the acquire flow (flock critical section + post-lock Chrome boot), release/teardown, the stale reaper (on-acquire and on-demand), reuse-orphan-if-responsive, and pool exhaustion handling with block-timeout + force-reap + alert.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M5.T1",
+              "title": "Acquire flow",
+              "status": "Planned",
+              "description": "The complete acquire lifecycle: flock-guarded reap-stale + reuse-orphan + choose-N + provisional claim, then post-lock Chrome boot (copy + port + launch + connect + update lease).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T1.S1",
+                  "title": "flock critical section — reap-stale + reuse-orphan + choose-N + provisional claim",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M3.T2.S2", "P1.M3.T2.S3", "P1.M3.T1.S1", "P1.M5.T2.S1"],
+                  "prd_selectors": ["h3.8", "h3.13", "h3.14", "h3.23"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: CRITICAL — flock section must be SHORT. Only scan+claim under lock; Chrome launch happens AFTER releasing flock so concurrent acquires boot in parallel. See key_findings.md FINDING 2. flock at /usr/bin/flock. Pattern: `( flock 9; ... ) 9>\"$LOCK_FILE\"`.\n2. INPUT: POOL_OWNER_PID, POOL_OWNER_STARTTIME globals. POOL_LOCK_FILE, POOL_LANES_DIR.\n3. LOGIC: Implement `pool_acquire_locked()` that runs under flock on $POOL_LOCK_FILE:\n   a. REAP-STALE: Iterate all lanes. For each stale lane (pool_lane_is_stale returns 0): call release internals (kill pgroup, rm dir, delete lease). See M5.T2.S1 for the release function — it must exist first. NOTE: This depends on P1.M5.T2.S1.\n   b. REUSE-ORPHAN: For each lane with a responsive Chrome but dead owner (stale lease but Chrome still listening on its port): adopt it — reassign owner to current, ensure connected. Skip the copy. (PRD §2.4 step 3b, IQ4.)\n   c. CHOOSE N: pool_find_free_lane() → N.\n   d. CLAIM: Write provisional lease lanes/<N>.json with port=0, chrome_pid=0, connected=false, owner=current. (Atomic write via pool_lease_write.)\n   e. Echo N and return 0.\n   If no free lane → return 1 (triggers exhaustion handling in M5.T4).\n4. OUTPUT: Echoes claimed lane N. Provisional lease exists with port=0, connected=false. Consumed by acquire post-lock boot (S2). The lock is released when this function returns.\n5. DOCS: none — internal function."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T1.S2",
+                  "title": "Post-lock boot — copy + port + launch + connect + update lease",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M5.T1.S1", "P1.M4.T1.S1", "P1.M4.T2.S2", "P1.M4.T3.S1"],
+                  "prd_selectors": ["h3.8", "h3.10", "h3.11", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: This runs OUTSIDE the flock so concurrent acquires boot their Chromes in parallel. Chrome boot takes ~5-10s. If Chrome crashes on boot, retry once; then fail and drop the lane (PRD §2.14).\n2. INPUT: Lane N (from pool_acquire_locked). Provisional lease with port=0.\n3. LOGIC: Implement `pool_boot_lane(lane)`:\n   a. COPY: pool_copy_master($POOL_EPHEMERAL_ROOT/<N>).\n   b. PORT: PORT=$(pool_find_free_port). Update lease port.\n   c. LAUNCH: pool_chrome_launch($PORT, $POOL_EPHEMERAL_ROOT/<N>, $lane). Sets CHROME_PID, CHROME_PGID.\n   d. WAIT: pool_wait_cdp($PORT). If timeout → retry launch once. If still fails → delete lease, rm dir, return 1.\n   e. CONNECT: pool_daemon_connect(abpool-<N>, $PORT). If fails → kill Chrome, delete lease, rm dir, return 1.\n   f. UPDATE LEASE: pool_lease_update lane N with port=$PORT, chrome_pid=$CHROME_PID, chrome_pgid=$CHROME_PGID, connected=true, last_seen_at=now.\n   g. Return 0.\n4. OUTPUT: Lane is fully provisioned: Chrome running, daemon connected, lease complete. Return 0 on success, 1 on failure (lane cleaned up). Consumed by the wrapper lifecycle (M6.T3).\n5. DOCS: none — internal function."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T1.S3",
+                  "title": "ensure_connected — reconnect logic for subsequent calls",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M4.T3.S1"],
+                  "prd_selectors": ["h3.8", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 4. The daemon may die between calls. `get cdp-url` returns 0 if connected. If Chrome crashed mid-task, relaunch on same dir+port, reconnect, keep lease (open tabs lost; profile kept) per PRD §2.14.\n2. INPUT: Lane N with lease (has port, session, chrome_pid).\n3. LOGIC: Implement `pool_ensure_connected(lane)`:\n   a. Read lease → session, port, chrome_pid.\n   b. Check pool_daemon_connected(session). If connected → update last_seen_at, return 0.\n   c. If not connected: check if Chrome is still alive (kill -0 $chrome_pid).\n      - If alive: pool_daemon_connect(session, port). Return 0/1.\n      - If dead: relaunch Chrome on same dir+port (pool_chrome_launch). pool_wait_cdp. pool_daemon_connect. Update lease chrome_pid/pgid. Return 0/1.\n   d. Touch lease mtime (last_seen_at).\n4. OUTPUT: Returns 0 if lane is connected (possibly after reconnect/relaunch), 1 on failure. Consumed by wrapper lifecycle step 4 (M6.T3.S1).\n5. DOCS: none — internal function."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M5.T2",
+              "title": "Release & teardown",
+              "status": "Planned",
+              "description": "Tear down a lane: kill Chrome process group, delete ephemeral dir, drop lease. Used by reaper, explicit release, and pool exhaustion force-reap.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T2.S1",
+                  "title": "Release lane — kill pgroup + rm dir + delete lease",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M4.T3.S1", "P1.M3.T1.S2"],
+                  "prd_selectors": ["h3.8", "h3.9", "h3.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Release kills the Chrome process group (not just the main process — catches renderers, GPU, utility children). Ephemeral dir is deleted. Lease JSON is removed. The master-profile is NEVER touched. See PRD §2.5 and external_deps.md.\n2. INPUT: Lane number N.\n3. LOGIC: Implement `pool_release_lane(lane)`:\n   a. Read lease for lane N. If no lease → already released, return 0.\n   b. Extract chrome_pid, chrome_pgid, ephemeral_dir, session.\n   c. KILL: pool_chrome_kill(chrome_pid, chrome_pgid).\n   d. DISCONNECT daemon: $POOL_REAL_BIN --session <session> close 2>/dev/null || true.\n   e. RM DIR: rm -rf \"$ephemeral_dir\".\n   f. DELETE LEASE: rm -f $POOL_LANES_DIR/<N>.json.\n   g. Return 0.\n   Idempotent — safe to call on partially-released lanes.\n4. OUTPUT: Lane fully torn down: Chrome dead, dir gone, lease removed. Consumed by reaper (M5.T3), acquire reap-stale (M5.T1.S1), admin release (M7.T3), exhaustion force-reap (M5.T4).\n5. DOCS: none — internal function."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M5.T3",
+              "title": "Stale reaper & orphan reuse",
+              "status": "Planned",
+              "description": "Scan all lanes for stale owners and tear them down. Called inside acquire (step 3a) and on-demand via admin reap. Also handles reuse-orphan-if-responsive.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T3.S1",
+                  "title": "reap_stale() — scan all lanes, release stale ones",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M5.T2.S1", "P1.M3.T2.S3"],
+                  "prd_selectors": ["h3.8", "h3.14", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.10 — reaper is lazy, runs inside every acquire. No background daemon by default. A crashed agent's Chrome+dir is reclaimed at next acquire or explicit reap.\n2. INPUT: None (scans all lanes).\n3. LOGIC: Implement `pool_reap_stale()`:\n   a. Iterate all lanes (pool_lanes_list).\n   b. For each lane: call pool_lane_is_stale(lane).\n      - If stale (return 0): call pool_release_lane(lane). Log: 'Reaped stale lane N (owner pid P dead/recycled)'.\n      - If live (return 1): skip.\n      - If no lease (return 2): skip.\n   c. Echo count of reaped lanes (for observability).\n   d. Return 0.\n4. OUTPUT: All stale lanes are torn down. Returns count of reaped lanes. Consumed by acquire step 3a (M5.T1.S1) and admin reap command (M7.T2).\n5. DOCS: none — internal function."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T3.S2",
+                  "title": "reuse_orphan() — adopt responsive Chrome with dead owner",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M5.T3.S1", "P1.M4.T3.S1"],
+                  "prd_selectors": ["h3.8", "h3.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 3b (IQ4 = reuse-if-responsive). If a lane has a dead owner but its Chrome is still listening on its CDP port, adopt it: reassign owner, ensure connected, skip the expensive master copy. This saves the ~5-10s Chrome boot.\n2. INPUT: Current POOL_OWNER_PID, POOL_OWNER_STARTTIME (the new owner).\n3. LOGIC: Implement `pool_reuse_orphan()`:\n   a. Iterate all stale lanes (pool_lane_is_stale returns 0).\n   b. For each stale lane: read its port from lease.\n   c. Check if Chrome is responsive: `curl -sf http://127.0.0.1:<port>/json/version`.\n   d. If responsive:\n      - Update lease: reassign owner to current POOL_OWNER_PID/STARTTIME/COMM/CWD.\n      - Ensure daemon connected: pool_daemon_connected(session). If not, pool_daemon_connect(session, port).\n      - Update connected=true, last_seen_at=now.\n      - Echo lane N, return 0.\n   e. If no orphan is responsive → return 1.\n   f. NOTE: This runs inside the flock critical section of pool_acquire_locked.\n4. OUTPUT: Returns 0 and echoes adopted lane N, or 1 if no reusable orphan. Consumed by acquire step 3b (M5.T1.S1).\n5. DOCS: none — internal function."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M5.T4",
+              "title": "Pool exhaustion handling",
+              "status": "Planned",
+              "description": "When no free/reusable lane is available, block with timeout, poll for releases, force-reap a dead-owner lane, and alert via notify-send + log.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M5.T4.S1",
+                  "title": "Block-with-timeout + force-reap + alert",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M5.T1.S1", "P1.M5.T3.S1"],
+                  "prd_selectors": ["h3.13", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.9 (IQ2 = block-with-timeout + alert). POOL_WAIT default 600s (10 min). Hitting exhaustion means sessions accumulated without cleanup = a leak to investigate. notify-send is available at /usr/bin/notify-send. Alerts log at $POOL_STATE_DIR/alerts.log.\n2. INPUT: POOL_WAIT (timeout seconds). Access to pool_acquire_locked and pool_reap_stale.\n3. LOGIC: Implement `pool_wait_for_lane()`:\n   a. Loop up to POOL_WAIT seconds (poll every 2s):\n      - Run pool_reap_stale().\n      - Try pool_acquire_locked(). If success → return lane N.\n   b. On timeout: FORCE-REAP — find the oldest lane whose owner is actually dead (pool_lane_is_stale). Release it. Then try pool_acquire_locked() one more time.\n   c. If force-reap succeeds → alert and return lane.\n   d. If still no lane (all-live-owners): fail non-zero with clear message.\n   e. ALERT: `notify-send 'agent-browser-pool' 'Pool exhausted — force-reaped lane N. Possible leak.'` and append to alerts.log.\n4. OUTPUT: Returns 0 + lane N if a lane was acquired (possibly after force-reap), 1 on total failure. Consumed by the wrapper lifecycle when pool_acquire_locked returns 'no free lane'.\n5. DOCS: none — internal function. Alert behavior documented in PRD §2.9."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M6",
+          "title": "Wrapper Shim (bin/agent-browser)",
+          "status": "Planned",
+          "description": "Build the transparent wrapper that intercepts agent-browser commands, resolves the owning pi process, routes to the correct ephemeral lane, forces the session override, and execs the real binary. This is the user-facing entry point that makes pooling invisible.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M6.T1",
+              "title": "Command dispatch & classification",
+              "status": "Planned",
+              "description": "Parse the first non-flag token to classify DRIVING commands (route to lane) vs META/passthrough commands (exec unchanged). Handle special cases: connect (ignore arg), close --all (intercept).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M6.T1.S1",
+                  "title": "Parse first token → classify DRIVING vs META/passthrough",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S1"],
+                  "prd_selectors": ["h3.8", "h3.19"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 0 defines dispatch. DRIVING commands need a lane; META commands exec unchanged. See external_deps.md §1.1-1.2 for the full command lists verified from agent-browser --help output.\n2. INPUT: Original command-line args ($@).\n3. LOGIC: Implement `pool_dispatch_classify(args)`:\n   a. Skip leading flags (--help, -h, --version, --json, --session <X>). Find the first non-flag token = the command.\n   b. META/passthrough commands (return 'meta'): skills, dashboard, plugin, mcp, session list, --help, -h, --version.\n   c. DRIVING commands (return 'driving'): open, click, type, fill, press, keyboard, hover, focus, check, uncheck, select, drag, upload, download, scroll, scrollintoview, wait, screenshot, pdf, snapshot, eval, connect, close, session, back, forward, reload, get, is, find.\n   d. If command not recognized → default to 'driving' (let the real binary handle the error).\n   e. Echo 'meta' or 'driving'.\n4. OUTPUT: Echoes 'meta' or 'driving'. Consumed by the lifecycle integration (M6.T3).\n5. DOCS: none — internal function."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M6.T1.S2",
+                  "title": "Handle close --all interception + connect arg normalization",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M6.T1.S1"],
+                  "prd_selectors": ["h3.8", "h3.19"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 transparency rules: `close --all` would nuke ALL sessions (including other agents' lanes) — must be intercepted to only close MY lane's daemon. `connect <anything>` must ignore the arg and ensure MY lane is connected (agents follow skills which teach `connect <port>`).\n2. INPUT: Classified args (from pool_dispatch_classify).\n3. LOGIC: Implement:\n   a. `pool_normalize_close(args)`: If command is 'close' and '--all' is present → strip '--all', set a flag to close ONLY my session. The real exec will be `close --session abpool-<N>` (session-scoped).\n   b. `pool_normalize_connect(args)`: If command is 'connect' → strip the port/url argument entirely. The lane connection is ensured by ensure_connected in the lifecycle. The real exec will just run with the lane's session.\n   c. Return normalized args.\n4. OUTPUT: Normalized args with close --all and connect <arg> handled. Consumed by lifecycle integration (M6.T3).\n5. DOCS: none — internal function. The close/connect semantics are documented in PRD §2.4."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M6.T2",
+              "title": "Session override & arg stripping",
+              "status": "Planned",
+              "description": "Strip any inherited --session flags and AGENT_BROWSER_SESSION env, then force abpool-<N> so the agent cannot bypass its lane.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M6.T2.S1",
+                  "title": "Strip --session flag + force AGENT_BROWSER_SESSION=abpool-<N>",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M1.T1.S2"],
+                  "prd_selectors": ["h3.8", "h3.19"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.4 step 5: 'Strip any inherited --session / AGENT_BROWSER_SESSION so the agent can't bypass its lane.' The skills teach agents to use `--session <X>` and `AGENT_BROWSER_SESSION`, which must be overridden.\n2. INPUT: Original args and the resolved lane N.\n3. LOGIC: Implement:\n   a. `pool_strip_session_args(args)`: Remove any `--session <X>` and `--session=<X>` from args. Return cleaned args.\n   b. `pool_force_session(lane)`: Export `AGENT_BROWSER_SESSION=abpool-<lane>`. This env var will be inherited by the exec'd real binary.\n   c. Both are called before exec.\n4. OUTPUT: Cleaned args (no --session) and AGENT_BROWSER_SESSION exported as abpool-<N>. Consumed by lifecycle exec step (M6.T3.S1).\n5. DOCS: none — internal function."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M6.T3",
+              "title": "Full request lifecycle integration + passthrough",
+              "status": "Planned",
+              "description": "Wire together the complete wrapper flow: dispatch → owner resolve → find/acquire → ensure connected → exec. Handle all passthrough paths (no pi ancestor, DISABLE env, META commands).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M6.T3.S1",
+                  "title": "Wire complete lifecycle: dispatch → resolve → find/acquire → ensure → exec",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M6.T1.S1", "P1.M6.T1.S2", "P1.M6.T2.S1", "P1.M5.T1.S2", "P1.M5.T1.S3"],
+                  "prd_selectors": ["h3.8", "h3.19", "h3.1", "h3.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: This is the main entry point — PRD §2.4 steps 0-5 implemented as the wrapper's `pool_main()` function. It orchestrates all prior components. The wrapper is bin/agent-browser, which sources lib/pool.sh and calls pool_main \"$@\".\n2. INPUT: Original command-line args ($@).\n3. LOGIC: Implement `pool_wrapper_main()`:\n   a. Call pool_config_init + pool_state_init.\n   b. If POOL_DISABLE==1 → exec $POOL_REAL_BIN \"$@\" (passthrough, no pooling).\n   c. Classify: if pool_dispatch_classify returns 'meta' → exec $POOL_REAL_BIN \"$@\" unchanged.\n   d. Resolve owner: pool_owner_resolve. If POOL_OWNER_PID==0 (no pi ancestor) → exec real binary unchanged (human in terminal).\n   e. Find my lease: pool_lease_find_mine. If found → go to step h.\n   f. Not found → acquire: pool_acquire_locked. If no free lane → pool_wait_for_lane.\n   g. Post-lock boot: pool_boot_lane(lane).\n   h. Ensure connected: pool_ensure_connected(lane).\n   i. Normalize args: pool_normalize_close/connect.\n   j. Strip session args + force session: pool_strip_session_args, pool_force_session.\n   k. EXEC: exec $POOL_REAL_BIN <normalized args>. The agent's command runs against its lane.\n4. OUTPUT: The wrapper fully routes the agent's command to its ephemeral lane. No return (exec replaces the process).\n5. DOCS: [Mode A] Add a header comment in bin/agent-browser documenting the dispatch flow and the transparency contract."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M6.T3.S2",
+                  "title": "bin/agent-browser executable — source lib/pool.sh via symlink-safe path",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M6.T3.S1"],
+                  "prd_selectors": ["h3.5", "h3.21"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: The wrapper will be symlinked to ~/scripts/agent-browser (shadowing ~/.local/bin/agent-browser). It must resolve its own real path to find lib/pool.sh regardless of symlink location. See key_findings.md ARCHITECTURAL RECOMMENDATION.\n2. INPUT: None (this is the executable entry point).\n3. LOGIC: Create bin/agent-browser:\n   ```bash\n   #!/usr/bin/env bash\n   set -euo pipefail\n   # Resolve real script dir (handles symlinks)\n   REAL_SCRIPT=\"$(readlink -f \"${BASH_SOURCE[0]}\")\"\n   REAL_DIR=\"$(dirname \"$REAL_SCRIPT\")\"\n   source \"$REAL_DIR/../lib/pool.sh\"\n   pool_wrapper_main \"$@\"\n   ```\n   Make it executable (chmod +x).\n4. OUTPUT: bin/agent-browser executable that sources the shared library and dispatches. This is what gets symlinked to ~/scripts/.\n5. DOCS: none — the file itself is self-documenting via comments."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M7",
+          "title": "Admin CLI (bin/agent-browser-pool)",
+          "status": "Planned",
+          "description": "Build the admin tool for humans to observe and manage the pool: status (lane table), reap (clean stale), release (explicit teardown), and doctor (reconcile leases vs live state).",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M7.T1",
+              "title": "status command — lane table display",
+              "status": "Planned",
+              "description": "Display all lanes with port, session, owner PID+cwd, Chrome PID, age, and state (live/stale/disconnected).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M7.T1.S1",
+                  "title": "status — format and display lane table",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M3.T1.S2", "P1.M3.T2.S3", "P1.M2.T2.S1"],
+                  "prd_selectors": ["h3.16"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.12 defines status output format: 'lane | port | session | owner pid+cwd | chrome pid | age | state'. Uses pool_lanes_list, pool_lease_read, pool_lane_is_stale.\n2. INPUT: None (reads all lanes).\n3. LOGIC: Implement `pool_admin_status()`:\n   a. Print header: LANE  PORT  SESSION  OWNER_PID  OWNER_CWD  CHROME_PID  AGE  STATE\n   b. Iterate all lanes (pool_lanes_list).\n   c. For each lane: read lease, extract fields.\n   d. Compute age from acquired_at (human-readable via _pool_age_str).\n   e. Determine state: 'live' if pool_lane_is_stale returns 1, 'STALE' if returns 0, 'disconnected' if lease.connected is false.\n   f. If no lanes → print 'No active lanes.'\n4. OUTPUT: Formatted table to stdout. This is a user-facing admin command.\n5. DOCS: [Mode A] The --help output for 'status' subcommand should describe its output columns."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M7.T2",
+              "title": "reap command — on-demand stale cleanup",
+              "status": "Planned",
+              "description": "Trigger the stale reaper on demand and report what was cleaned.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M7.T2.S1",
+                  "title": "reap — trigger pool_reap_stale and report",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M5.T3.S1"],
+                  "prd_selectors": ["h3.16", "h3.14"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.12 reap: 'kill+delete dead-owner lanes'. Reuses pool_reap_stale from M5.T3.S1.\n2. INPUT: None.\n3. LOGIC: Implement `pool_admin_reap()`:\n   a. Call pool_reap_stale().\n   b. Print the count of reaped lanes: 'Reaped N stale lane(s).'\n   c. If 0 reaped: 'No stale lanes found.'\n4. OUTPUT: User-facing reap report to stdout.\n5. DOCS: [Mode A] --help output for 'reap' subcommand."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M7.T3",
+              "title": "release command — explicit teardown",
+              "status": "Planned",
+              "description": "Release a specific lane or all lanes explicitly.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M7.T3.S1",
+                  "title": "release [<N>|all] — explicit lane teardown",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P1.M5.T2.S1"],
+                  "prd_selectors": ["h3.16", "h3.9"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.12 release: 'explicit teardown'. Accepts a lane number or 'all'. Reuses pool_release_lane from M5.T2.S1.\n2. INPUT: Optional argument: lane number N or 'all'.\n3. LOGIC: Implement `pool_admin_release(target)`:\n   a. If target == 'all': iterate all lanes, pool_release_lane each. Print summary.\n   b. If target is a number: pool_release_lane(N). Print 'Released lane N.'\n   c. If target is empty or invalid: print usage.\n   d. If lane doesn't exist: print 'Lane N has no active lease.'\n4. OUTPUT: User-facing release confirmation to stdout.\n5. DOCS: [Mode A] --help output for 'release' subcommand."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M7.T4",
+              "title": "doctor command — reconcile & diagnose",
+              "status": "Planned",
+              "description": "Reconcile leases vs live Chromes vs ephemeral dirs. Verify all dependencies are present. Report any discrepancies (leaks, orphan dirs, missing processes).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M7.T4.S1",
+                  "title": "doctor — full system reconciliation + dependency check",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M3.T1.S2", "P1.M5.T2.S1"],
+                  "prd_selectors": ["h3.16", "h3.20", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.12 doctor: 'reconcile leases vs live Chromes vs dirs; report leaks'. Also §2.16: verify all dependencies present at runtime (agent-browser, google-chrome-stable, btrfs, flock, setsid, jq, curl, etc.).\n2. INPUT: None (full system scan).\n3. LOGIC: Implement `pool_admin_doctor()`:\n   a. CHECK DEPENDENCIES: For each dep in {flock, setsid, pgrep, pkill, curl, jq, notify-send, google-chrome-stable, cp}: check if on PATH. Print OK/MISSING.\n   b. CHECK REAL BIN: Verify $POOL_REAL_BIN exists and is executable.\n   c. CHECK FS: Verify btrfs at ephemeral root.\n   d. CHECK MASTER: Verify master-profile exists.\n   e. RECONCILE LANES: For each lease:\n      - Does ephemeral_dir exist? If not → LEAK (lease without dir).\n      - Is chrome_pid alive? If not → LEAK (lease with dead Chrome).\n      - Is port listening? If not → DISCONNECTED.\n   f. RECONCILE DIRS: For each dir in active/: does it have a lease? If not → ORPHAN DIR.\n   g. Print summary with OK/WARN/FAIL counts. Return non-zero if any FAIL.\n4. OUTPUT: Diagnostic report to stdout. Exit 0 if healthy, 1 if problems found.\n5. DOCS: [Mode A] --help output for 'doctor' subcommand should describe the checks performed."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M7.T5",
+              "title": "bin/agent-browser-pool executable",
+              "status": "Planned",
+              "description": "Create the admin tool entry point that dispatches to the correct admin subcommand.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M7.T5.S1",
+                  "title": "Admin CLI dispatcher + --help",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M7.T1.S1", "P1.M7.T2.S1", "P1.M7.T3.S1", "P1.M7.T4.S1"],
+                  "prd_selectors": ["h3.16", "h3.5"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: This binary is symlinked to ~/.local/bin/agent-browser-pool. It sources lib/pool.sh (same as the wrapper). See key_findings.md ARCHITECTURAL RECOMMENDATION for symlink-safe sourcing.\n2. INPUT: Command-line args ($@): first arg is subcommand.\n3. LOGIC: Create bin/agent-browser-pool:\n   ```bash\n   #!/usr/bin/env bash\n   set -euo pipefail\n   REAL_SCRIPT=\"$(readlink -f \"${BASH_SOURCE[0]}\")\"\n   REAL_DIR=\"$(dirname \"$REAL_SCRIPT\")\"\n   source \"$REAL_DIR/../lib/pool.sh\"\n   pool_config_init\n   pool_state_init\n   cmd=\"${1:-status}\"\n   case \"$cmd\" in\n     status) pool_admin_status ;;\n     reap) pool_admin_reap ;;\n     release) pool_admin_release \"${2:-}\" ;;\n     doctor) pool_admin_doctor ;;\n     --help|-h|help) pool_admin_help ;;\n     *) echo \"Unknown command: $cmd\" >&2; exit 1 ;;\n   esac\n   ```\n   Also implement `pool_admin_help()` printing usage for all subcommands.\n   Make executable (chmod +x).\n4. OUTPUT: bin/agent-browser-pool executable.\n5. DOCS: [Mode A] --help / pool_admin_help output is the user-facing documentation for the admin tool."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M8",
+          "title": "Install & Cutover",
+          "status": "Planned",
+          "description": "Create install.sh with safe cutover: symlinks, confirmation, cutover warning. The installer is deliberate, not automatic, because PATH shadowing is all-or-nothing.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M8.T1",
+              "title": "install.sh — symlinks + cutover safety",
+              "status": "Planned",
+              "description": "Create the installer that symlinks bin/agent-browser → ~/scripts/ and bin/agent-browser-pool → ~/.local/bin/, with a prominent cutover warning and confirmation flag.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M8.T1.S1",
+                  "title": "install.sh with confirmation + cutover warning + state dir setup",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M6.T3.S2", "P1.M7.T5.S1"],
+                  "prd_selectors": ["h3.21", "h3.5", "h2.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.17 is critical. Once installed, the wrapper is GLOBAL — every agent-browser call in every shell is intercepted. Running agents on the old workflow will be silently broken. install.sh must warn and require explicit confirmation. ~/scripts/ precedes ~/.local/bin on PATH (verified). See system_context.md §3.\n2. INPUT: Repo directory (where install.sh lives). Optional --force flag to skip confirmation.\n3. LOGIC: Create install.sh:\n   a. Print PROMINENT WARNING about PATH shadowing being all-or-nothing.\n   b. Print WARNING about running agents being silently intercepted.\n   c. Unless --force: prompt 'Type YES to continue:' and require exact match.\n   d. Create symlinks:\n      - ln -sf <repo>/bin/agent-browser ~/scripts/agent-browser\n      - ln -sf <repo>/bin/agent-browser-pool ~/.local/bin/agent-browser-pool\n   e. Create state dir: mkdir -p ~/.local/state/agent-browser-pool/lanes, touch acquire.lock.\n   f. Run doctor to verify dependencies.\n   g. Print success message with instructions for testing (absolute path invocation) and bypass (AGENT_BROWSER_POOL_DISABLE=1).\n   h. Make install.sh executable.\n4. OUTPUT: install.sh that safely sets up the pool. Prints clear guidance.\n5. DOCS: [Mode A] install.sh itself is user-facing documentation — the prompts and warnings ARE the docs for cutover."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M9",
+          "title": "Testing & Validation",
+          "status": "Planned",
+          "description": "Build the test harness that exercises owner resolution, concurrency, mutual exclusion, release/cleanup, and the transparency checklist. Tests use owner PID override hooks and headless Chrome for unattended runs.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M9.T1",
+              "title": "Test harness infrastructure",
+              "status": "Planned",
+              "description": "Set up the test framework: owner override hooks, headless config, cleanup assertions, and test runner.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M9.T1.S1",
+                  "title": "Test framework — override hooks, headless config, assertion helpers",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M6.T3.S2"],
+                  "prd_selectors": ["h3.22", "h2.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.18. Owner resolution needs a pi ancestor — a plain interactive shell has none → passthrough. Remedies: (a) run under pi, or (b) use AGENT_BROWSER_POOL_OWNER_PID/_OWNER_STARTTIME overrides to simulate distinct agents. Smoke tests launch real Chrome — use AGENT_CHROME_HEADLESS=1 for unattended. The main interactive pi is long-lived → every test must release/reap and assert cleanup.\n2. INPUT: Wrapper binary (bin/agent-browser by absolute path for pre-cutover testing).\n3. LOGIC: Create test/validate.sh with:\n   a. Test helpers: `assert_lane_exists(N)`, `assert_lane_gone(N)`, `assert_no_chrome()`, `assert_no_dir(path)`, `assert_eq(actual, expected, msg)`.\n   b. Setup: export AGENT_CHROME_HEADLESS=1, AGENT_BROWSER_POOL_OWNER_PID=<unique per test>, AGENT_BROWSER_POOL_OWNER_STARTTIME=<unique>.\n   c. Teardown: agent-browser-pool release all, assert no leftover processes/dirs.\n   d. Test runner: function `run_test(name, fn)` that wraps setup/teardown and counts pass/fail.\n   e. Exit non-zero if any test fails.\n4. OUTPUT: test/validate.sh runnable test framework. Used by all subsequent test subtasks.\n5. DOCS: none — test infrastructure, no user-facing surface."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M9.T2",
+              "title": "Concurrency & mutual-exclusion tests",
+              "status": "Planned",
+              "description": "N parallel 'agents' (distinct owner PIDs via override) must each get a distinct lane. Assert no two share a lane and all release cleanly.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M9.T2.S1",
+                  "title": "Concurrency — N agents get N distinct lanes, no collision",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M9.T1.S1"],
+                  "prd_selectors": ["h3.22", "h3.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.18 concurrency harness: 'N parallel agents (distinct owner PIDs via override) must each get a distinct lane; assert no two share a lane and all release cleanly with no leftover dirs/processes.'\n2. INPUT: Test framework from P1.M9.T1.S1.\n3. LOGIC: Implement test:\n   a. Spawn 3-5 parallel subshells, each with a unique AGENT_BROWSER_POOL_OWNER_PID.\n   b. Each runs: <wrapper> open https://example.com (headless).\n   c. Wait for all to complete.\n   d. Assert: each got a DIFFERENT lane number (check lanes/*.json owner.pid values).\n   e. Assert: no two lanes share the same port.\n   f. Assert: each has its own Chrome process.\n   g. Release all, assert cleanup (no dirs, no Chrome processes, no leases).\n4. OUTPUT: Passing concurrency test. Validates mutual exclusion.\n5. DOCS: none — test code."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M9.T3",
+              "title": "Release & cleanup validation tests",
+              "status": "Planned",
+              "description": "Verify that release (explicit and via reaper) kills Chrome, deletes ephemeral dir, and drops lease. Verify stale detection (simulated dead owner).",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M9.T3.S1",
+                  "title": "Release + stale reaper + crash simulation tests",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M9.T1.S1"],
+                  "prd_selectors": ["h3.22", "h3.9", "h3.14", "h3.18"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.18. Tests must call release/reap and assert ephemeral dir + Chrome process group are gone. Simulate crash by changing the owner PID override (so the existing lease's owner appears dead).\n2. INPUT: Test framework from P1.M9.T1.S1.\n3. LOGIC: Implement tests:\n   a. TEST explicit release: Acquire lane N, run agent-browser-pool release N. Assert: dir gone, Chrome dead, lease gone.\n   b. TEST stale reaper: Acquire lane N with PID=X. Then acquire lane M with PID=Y (different). During M's acquire, N's owner X should be detected as dead (X != Y). Assert N is reaped.\n   c. TEST crash simulation: Acquire lane N. Kill the Chrome process manually (simulating crash). Call agent-browser-pool reap. Assert: dir deleted, lease gone.\n   d. TEST close != release: Acquire lane N. Run close (disconnect-only). Assert: Chrome still alive, dir still exists, lease still present. Next command reuses same lane.\n4. OUTPUT: Passing cleanup tests. Validates reliable cleanup including on crash.\n5. DOCS: none — test code."
+                }
+              ]
+            },
+            {
+              "type": "Task",
+              "id": "P1.M9.T4",
+              "title": "Transparency checklist validation tests",
+              "status": "Planned",
+              "description": "Validate the PRD §2.15 transparency checklist: skills passthrough, connect routing, --session override, close --all safety, etc.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M9.T4.S1",
+                  "title": "Transparency checklist — verify invisible pooling contract",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M9.T1.S1"],
+                  "prd_selectors": ["h3.19", "h3.8"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: PRD §2.15 transparency checklist. These are the 'no idea' contract — agents must not be able to tell pooling is happening.\n2. INPUT: Test framework from P1.M9.T1.S1.\n3. LOGIC: Implement tests:\n   a. `skills get core` → passthrough: output matches real binary exactly.\n   b. `--help`, `--version` → passthrough.\n   c. `open <url>` with zero prep → opens in a lane (verify via status).\n   d. Second `open` in same session → same lane (same N).\n   e. `connect <random>` → routed to my lane (ignore the arg).\n   f. `--session <X> open <url>` → forced to abpool-<N> (verify session is overridden, not X).\n   g. `close --all` → only my lane's daemon closed; other lanes unaffected.\n   h. Next agent (different PID) → different lane, no collision.\n4. OUTPUT: Passing transparency tests. Validates the invisible pooling contract.\n5. DOCS: none — test code."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P1.M10",
+          "title": "Sync changeset-level documentation",
+          "status": "Planned",
+          "description": "Final documentation sweep: update README.md with final features/install/usage, ensure all env vars and admin commands are documented, and verify docs match the implemented system.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P1.M10.T1",
+              "title": "Sync README.md and cross-cutting documentation",
+              "status": "Planned",
+              "description": "Update README.md to reflect the final implemented system: features, installation, usage, configuration, and admin commands. Verify accuracy against the codebase.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P1.M10.T1.S1",
+                  "title": "Update README.md — features, install, usage, configuration reference",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P1.M6.T3.S2", "P1.M7.T5.S1", "P1.M8.T1.S1", "P1.M9.T4.S1", "P1.M5.T4.S1", "P1.M5.T3.S2", "P1.M4.T2.S2", "P1.M3.T2.S3", "P1.M2.T1.S2"],
+                  "prd_selectors": ["h2.0", "h2.1", "h3.2", "h3.4", "h3.15", "h3.16", "h3.17", "h3.19", "h3.21"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: README.md already exists with a good overview but was written pre-implementation. It needs to be updated to match the final system. The README should serve as the primary user documentation. See system_context.md §1 for current README state.\n2. INPUT: The complete implemented system (all prior subtasks). The PRD for reference.\n3. LOGIC: Update README.md with:\n   a. Feature overview (transparency, 1 agent = 1 browser, cleanup on crash, discoverable pool).\n   b. Prerequisites (btrfs, master-profile, agent-browser ≥0.28, Chrome).\n   c. Installation (./install.sh, confirmation, cutover warning).\n   d. Usage for agents (just type agent-browser — nothing special).\n   e. Admin commands (status, reap, release, doctor) with example outputs.\n   f. Configuration reference (all env vars from §2.11 with defaults).\n   g. Safety valve (AGENT_BROWSER_POOL_DISABLE=1).\n   h. How it works (the 30-second version — already good, verify accuracy).\n   i. Troubleshooting (pool exhaustion, leaks, doctor command).\n4. OUTPUT: README.md accurately reflects the final system.\n5. DOCS: [Mode B] This IS the documentation task — updates README.md as the changeset-level overview."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P1.M10.T1.S2",
+                  "title": "Verify .gitignore covers all runtime artifacts",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P1.M10.T1.S1"],
+                  "prd_selectors": ["h2.2"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: Current .gitignore has *.log and .state/. Verify it covers all runtime artifacts that shouldn't be committed: chrome-*.log, lanes/*.json (runtime leases), alerts.log.\n2. INPUT: The implemented system structure.\n3. LOGIC: Verify/update .gitignore to exclude: *.log (covers chrome-*.log, alerts.log), .state/ (if used locally). Ensure the repo only tracks: README.md, PRD.md, .gitignore, install.sh, bin/*, lib/*, test/*. Do NOT ignore the plan/ directory (it's tracked for project history).\n4. OUTPUT: .gitignore accurately covers runtime artifacts.\n5. DOCS: none — .gitignore is not user-facing documentation."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
