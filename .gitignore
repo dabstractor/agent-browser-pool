@@ -3,3 +3,21 @@
 
 # local dev symlinks / state
 .state/
+
+# environment files
+.env
+.env.*
+!.env.example
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# build artifacts
+dist/
+build/
+
+# dependency directories
+node_modules/
+venv/
+__pycache__/
