@@ -105,14 +105,14 @@
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Owner PID resolution & starttime extraction",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Walk ppid chain to find the owning 'pi' process, extract its PID, comm, and starttime for identity verification.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "ppid walk to comm==pi + test hook overrides",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -129,7 +129,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Robust starttime extraction from /proc/stat",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S1"

@@ -384,3 +384,138 @@ _pool_age_str() {
         printf '%sd\n' "$(( diff / 86400 ))"
     fi
 }
+
+# =============================================================================
+# Owner resolution (P1.M2.T1.S1)
+# =============================================================================
+# Resolves WHICH pi process owns the current tool-call shell, by walking the
+# ppid chain from $$ up to the first process whose /proc/<pid>/comm == 'pi'
+# (PRD §1.1 / §2.4 step 1). Populates the four POOL_OWNER_* globals consumed by
+# every downstream lease query (M3.T2.S1 find_my_lease) and the wrapper
+# lifecycle (M6.T3 passthrough gate). Also implements the TEST-HOOK overrides
+# of PRD §2.18 / key_findings FINDING 8 (AGENT_BROWSER_POOL_OWNER_PID +
+# _OWNER_STARTTIME) so the test harness (M9.T1.S1) can simulate distinct agents
+# from distinct subshell PIDs WITHOUT real pi ancestor processes.
+
+_pool_owner_starttime() {
+    # Echo the process starttime (/proc/<pid>/stat field 22, clock ticks since
+    # boot) for PID. Returns 0 + echoes digits on success; returns 1 (NOT fatal,
+    # no echo) if the stat file is missing/unreadable. EXTRACTS ONLY — no
+    # liveness validation (that's is_owner_alive in P1.M2.T2.S1).
+    #
+    # ROBUSTNESS: field 2 (comm) is wrapped in parens and MAY contain spaces,
+    # which shifts every later field. The PRD §2.19 "NF-19" formula is WRONG on
+    # this host (NF=52 → NF-19=field 33, not 22). We strip "pid (comm)" by
+    # removing everything up to and including the LAST ')' (greedy), making
+    # overall field 22 == field 20 of the remainder (offset −2). Verified
+    # 2026-07-12: both methods agree (8239564) for comm='pi'. P1.M2.T1.S2 may
+    # harden this; CONTRACT: echo digits / return 0, or return 1 (no echo),
+    # never exit the process.
+    local pid="$1"
+    local stat_line after start
+    stat_line="$(cat "/proc/$pid/stat" 2>/dev/null)" || true
+    [[ -n "$stat_line" ]] || return 1
+    after="${stat_line##*)}"                 # greedy: drop through LAST ')'
+    start="$(awk '{print $20}' <<<"$after")" # field 22 overall == field 20 of remainder
+    [[ -n "$start" ]] || return 1
+    printf '%s\n' "$start"
+}
+
+pool_owner_resolve() {
+    # Resolve the owning pi process and populate POOL_OWNER_* globals.
+    # Implements PRD §2.4 step 1 (resolve OWNER), §1.1 (walk ppid to comm=='pi'),
+    # and the test-hook overrides of PRD §2.18 / key_findings FINDING 8.
+    #
+    # TEST-HOOK env vars (TEST-ONLY, PRD §2.18 / key_findings FINDING 8 — narrowly
+    # scoped, NOT exposed in user-facing docs):
+    #   AGENT_BROWSER_POOL_OWNER_PID        — simulate a specific owner PID.
+    #   AGENT_BROWSER_POOL_OWNER_STARTTIME  — simulate the owner starttime.
+    #
+    # LOGIC: (1) TEST MODE if AGENT_BROWSER_POOL_OWNER_PID set+numeric → use
+    # directly; (2) REAL MODE walk ppid from $$ to comm=='pi'; (3) no pi ancestor
+    # → PID=0 (passthrough). NEVER fatal. Globals MUTABLE → re-runnable. One
+    # _pool_log line per call (never inside the walk loop — this runs on every
+    # agent-browser invocation).
+
+    # Reset globals to defaults every call (re-runnable contract).
+    POOL_OWNER_PID="0"; POOL_OWNER_COMM=""; POOL_OWNER_STARTTIME=""; POOL_OWNER_CWD=""
+    declare -g POOL_OWNER_PID POOL_OWNER_COMM POOL_OWNER_STARTTIME POOL_OWNER_CWD
+
+    # --- 1. TEST MODE: env-var override -------------------------------------
+    if [[ -n "${AGENT_BROWSER_POOL_OWNER_PID:-}" ]]; then
+        local ovr_pid="$AGENT_BROWSER_POOL_OWNER_PID"
+        if [[ ! "$ovr_pid" =~ ^[0-9]+$ ]]; then
+            _pool_log "pool_owner_resolve: invalid AGENT_BROWSER_POOL_OWNER_PID='$ovr_pid' (ignored)"
+            return 0
+        fi
+        POOL_OWNER_PID="$ovr_pid"; declare -g POOL_OWNER_PID
+        POOL_OWNER_COMM="pi";      declare -g POOL_OWNER_COMM
+        if [[ -n "${AGENT_BROWSER_POOL_OWNER_STARTTIME:-}" ]]; then
+            POOL_OWNER_STARTTIME="$AGENT_BROWSER_POOL_OWNER_STARTTIME"; declare -g POOL_OWNER_STARTTIME
+        else
+            local st=""
+            st="$(_pool_owner_starttime "$ovr_pid" 2>/dev/null)" || true
+            if [[ -n "$st" ]]; then
+                POOL_OWNER_STARTTIME="$st"; declare -g POOL_OWNER_STARTTIME
+            fi
+        fi
+        local cwd=""
+        cwd="$(readlink "/proc/$ovr_pid/cwd" 2>/dev/null)" || true
+        if [[ -n "$cwd" ]]; then
+            POOL_OWNER_CWD="$cwd"; declare -g POOL_OWNER_CWD
+        fi
+        _pool_log "pool_owner_resolve: TEST MODE owner pid=$POOL_OWNER_PID" \
+                  "comm=$POOL_OWNER_COMM starttime=${POOL_OWNER_STARTTIME:-<none>}"
+        return 0
+    fi
+
+    # --- 2. REAL MODE: walk ppid chain from $$ ------------------------------
+    local pid="$$"
+    local ppid="" comm="" line="" found_pid="" steps=0
+    while (( steps++ < 128 )); do
+        comm=""
+        IFS= read -r comm < "/proc/$pid/comm" 2>/dev/null || true
+        if [[ "$comm" == "pi" ]]; then
+            found_pid="$pid"
+            break
+        fi
+        ppid=""
+        if [[ -r "/proc/$pid/status" ]]; then
+            while IFS= read -r line; do
+                if [[ "$line" == PPid:* ]]; then
+                    ppid="${line#PPid:}"
+                    ppid="${ppid//[[:space:]]/}"
+                    break
+                fi
+            done < "/proc/$pid/status"
+        fi
+        if [[ ! "$ppid" =~ ^[0-9]+$ ]]; then break; fi
+        if (( ppid == 1 ));  then break; fi
+        if (( ppid == 0 ));  then break; fi
+        if (( ppid == pid )); then break; fi
+        pid="$ppid"
+    done
+
+    # --- 3. RESULT ----------------------------------------------------------
+    if [[ -n "$found_pid" ]]; then
+        POOL_OWNER_PID="$found_pid"; declare -g POOL_OWNER_PID
+        POOL_OWNER_COMM="pi";         declare -g POOL_OWNER_COMM
+        local st=""
+        st="$(_pool_owner_starttime "$found_pid" 2>/dev/null)" || true
+        if [[ -n "$st" ]]; then
+            POOL_OWNER_STARTTIME="$st"; declare -g POOL_OWNER_STARTTIME
+        fi
+        local cwd=""
+        cwd="$(readlink "/proc/$found_pid/cwd" 2>/dev/null)" || true
+        if [[ -n "$cwd" ]]; then
+            POOL_OWNER_CWD="$cwd"; declare -g POOL_OWNER_CWD
+        fi
+        _pool_log "pool_owner_resolve: owner pid=$POOL_OWNER_PID" \
+                  "comm=$POOL_OWNER_COMM starttime=${POOL_OWNER_STARTTIME:-<none>}" \
+                  "cwd=${POOL_OWNER_CWD:-<unknown>}"
+        return 0
+    fi
+
+    _pool_log "pool_owner_resolve: no pi ancestor (passthrough mode)"
+    return 0
+}
