@@ -98,7 +98,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Owner Resolution & Identity System",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the mechanism to identify which 'pi' process owns a given agent-browser invocation, and verify liveness/staleness of that owner. This is the foundation for mutual exclusion (1 agent = 1 lane) and reliable cleanup (detect dead owners).",
           "tasks": [
             {
@@ -147,14 +147,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "Owner liveness check & staleness detection",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Determine whether a lease's owner is still alive and still the same process (defeats PID recycling).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "is_owner_alive(pid, starttime) — liveness + identity verification",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S2"
@@ -189,7 +189,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Lease schema + atomic write function",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1",

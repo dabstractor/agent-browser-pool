@@ -573,3 +573,77 @@ pool_owner_resolve() {
     _pool_log "pool_owner_resolve: no pi ancestor (passthrough mode)"
     return 0
 }
+
+# =============================================================================
+# Owner liveness & identity verification (P1.M2.T2.S1)
+# =============================================================================
+
+# pool_owner_alive PID EXPECTED_STARTTIME [EXPECTED_COMM]
+#
+# Predicate: is the lease owner PID still alive AND still the SAME process that
+# took the lease? Returns 0 (alive + identity matches) or 1 (dead / recycled /
+# unverifiable). NEVER fatal — never calls pool_die, never writes, never logs
+# (leaf predicate; callers log the decision).
+#
+# WHY THREE CHECKS (PRD §2.5 owner-liveness-driven release, §2.14 failure modes,
+# key_findings FINDING 1, research note §2/§4):
+#   PID recycling is real: after a pi crash, the kernel hands that PID number to
+#   an UNRELATED process. pid alone is NOT identity. The (pid, comm, starttime)
+#   triple IS — starttime (field 22 of /proc/<pid>/stat, clock ticks since boot)
+#   is unique per process invocation and strictly increases for a recycled PID.
+#   This triple is the industry-standard identity check (systemd, psmisc,
+#   procps-ng; research note §5).
+#
+# DECISION LADDER (order matters — cheapest/most-likely-fail first; research §4.4):
+#   a. /proc/<pid> missing                → dead              → return 1
+#   b. /proc/<pid>/comm != EXPECTED_COMM  → recycled (non-pi) → return 1
+#   c. starttime != EXPECTED_STARTTIME    → recycled (new pi) → return 1
+#   d. all pass                           → alive + same      → return 0
+#
+# GOTCHA — kill -0 is a TRAP (research note §3, kill(2)): `kill -0 $pid` returns
+# 1 for BOTH ESRCH (dead) and EPERM (alive but not yours) — the shell cannot
+# tell them apart, so a live foreign process looks dead. We use /proc/<pid>
+# existence, which never conflates them. /proc is also needed for comm/stat, so
+# one source of truth.
+#
+# GOTCHA — comm truncation (research note §1.2): /proc/<pid>/comm is at most 15
+# chars (TASK_COMM_LEN=16). 'pi' is 2 chars → zero risk. Do not pad/trim.
+#
+# GOTCHA — TOCTOU (research note §4): a process can die between checks. Each
+# /proc read is independently guarded (|| return 1), so a mid-function death
+# yields return 1 (stale) — SAFE. The caller must be idempotent (reaper re-runs
+# on next acquire). Even return 0 only proves liveness at that instant.
+pool_owner_alive() {
+    local pid="${1:-}"
+    local expected_starttime="${2:-}"
+    local expected_comm="${3:-pi}"
+    local comm actual_starttime
+
+    # Input validation: pid must be a non-negative integer. A non-numeric/empty
+    # pid is not a verifiable owner → return 1. `[[ =~ ]] || return 1` is safe
+    # under set -e (the `||` list is errexit-exempt).
+    [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+
+    # (a) Liveness: /proc/<pid> must exist (it is a directory for live PIDs;
+    # verified -d/-e both true on host). A dead process has no /proc entry.
+    [[ -d "/proc/$pid" ]] || return 1
+
+    # (b) Image-name first pass: read /proc/<pid>/comm. `$(cat ...)` strips the
+    # trailing newline (bash Command Substitution), so comm is the bare name
+    # with no '\n' — no manual strip needed. If the read fails (process died
+    # mid-function → TOCTOU, or EACCES), treat as dead. PLAIN assignment (not
+    # `local x=$(...)`) so cat's exit status is preserved → `|| return 1` works.
+    # Quote the RHS of [[ == ]] so a glob-y expected_comm can't pattern-match.
+    comm="$(cat "/proc/$pid/comm" 2>/dev/null)" || return 1
+    [[ "$comm" == "$expected_comm" ]] || return 1
+
+    # (c) Authoritative identity token: starttime via the canonical extractor
+    # _pool_get_starttime (P1.M2.T1.S2). It echoes digits/return 0 on success,
+    # return 1 (no echo, never fatal) on failure (process died, garbled stat).
+    # Extraction failure → not verifiably alive → return 1.
+    actual_starttime="$(_pool_get_starttime "$pid" 2>/dev/null)" || return 1
+    [[ "$actual_starttime" == "$expected_starttime" ]] || return 1
+
+    # (d) Alive and the same process invocation that took the lease.
+    return 0
+}
