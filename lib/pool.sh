@@ -386,7 +386,7 @@ _pool_age_str() {
 }
 
 # =============================================================================
-# Owner resolution (P1.M2.T1.S1)
+# Owner resolution (P1.M2.T1.S1 + P1.M2.T1.S2)
 # =============================================================================
 # Resolves WHICH pi process owns the current tool-call shell, by walking the
 # ppid chain from $$ up to the first process whose /proc/<pid>/comm == 'pi'
@@ -396,29 +396,83 @@ _pool_age_str() {
 # of PRD §2.18 / key_findings FINDING 8 (AGENT_BROWSER_POOL_OWNER_PID +
 # _OWNER_STARTTIME) so the test harness (M9.T1.S1) can simulate distinct agents
 # from distinct subshell PIDs WITHOUT real pi ancestor processes.
+#
+# P1.M2.T1.S2 adds the CANONICAL starttime extractor _pool_get_starttime()
+# below and reduces S1's _pool_owner_starttime() to a one-line delegating
+# wrapper so the codebase holds exactly ONE starttime parser (no duplication).
+
+_pool_get_starttime() {
+    # _pool_get_starttime PID
+    #
+    # THE CANONICAL starttime extractor for the pool. Echo the process starttime
+    # (/proc/<pid>/stat field 22, clock ticks since boot; CLK_TCK=100 on this
+    # host) for PID. Returns 0 + echoes a digits-only string on success; returns
+    # 1 (NOT fatal, echoes nothing) if PID is empty/non-numeric, or
+    # /proc/<pid>/stat is absent/unreadable, or the parsed value is not an integer.
+    #
+    # CONSUMERS:
+    #   - pool_owner_resolve()  → records POOL_OWNER_STARTTIME (PRD §2.4 step 1, §2.8),
+    #     via the _pool_owner_starttime() wrapper below.
+    #   - is_owner_alive() (P1.M2.T2.S1) → reads a lease owner's CURRENT starttime
+    #     and compares to the stored value; a mismatch means the PID was recycled
+    #     (PRD §2.8, §2.19). The (pid, starttime) pair is the anti-recycling key.
+    #
+    # WHY THE PRD §2.19 "NF-19" FORMULA IS WRONG (key_findings FINDING 1,
+    # system_context §6.1, host-verified 2026-07-12):
+    #   /proc/<pid>/stat field 2 is comm, wrapped in parens:  "<pid> (<comm>) <state> ..."
+    #   comm MAY contain spaces (e.g. "(Chrome Helper)"), shifting every later field,
+    #   so a naive left-to-right `awk '{print $22}'` is unsafe in general. The PRD
+    #   tried to read "from the right": field 22 from the start == index NF-19. That
+    #   formula assumes a FIXED total field count of 41. On this host the real count
+    #   is 52, so NF-19 == field 33 — which is vsize (≈ 4096), NOT starttime. The
+    #   total count is NOT fixed across kernel versions / process states, so any
+    #   NF-based offset is inherently fragile. Verified: `awk '{print $(NF-19)}'
+    #   /proc/self/stat` = 4096 (WRONG) vs the correct field-22 starttime ≈ 8283368.
+    #
+    # THE CORRECT ROBUST METHOD:
+    #   Strip "pid (comm)" by deleting everything up to AND INCLUDING the LAST ')'
+    #   (greedy), collapsing any spaces inside comm. That removes exactly fields 1
+    #   (pid) + 2 (comm), so overall field N == field (N-2) of the remainder.
+    #   starttime (field 22) therefore falls at field 20 of the remainder (22-2=20).
+    #   Pure bash (preferred — no extra fork; we already hold the line in a var):
+    #       after="${stat_line##*)}"        # GREEDY longest prefix up to last ')'
+    #       start="$(awk '{print $20}' <<<"$after")"
+    #   Shell-pipeline equivalent (what the PRD/arch docs cite — IDENTICAL result):
+    #       sed 's/.*)//' /proc/<pid>/stat | awk '{print $20}'
+    #   Verified agreement (comm='pi'/'bash'/'cat'/'head', no spaces): all three
+    #   methods yield the same starttime.
+    local pid="${1:-}"
+    local stat_line after start
+    # Input validation: a non-numeric / empty PID is a clean "no value" (return 1),
+    # never fatal. `[[ =~ ]]` inside `if` is errexit-exempt.
+    if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    # `cat ... 2>/dev/null || true`: a vanished / permission-denied /proc entry is a
+    # clean "process dead" signal (return 1), NOT a set -e abort. SC2155: two-stmt.
+    stat_line="$(cat "/proc/$pid/stat" 2>/dev/null)" || true
+    if [[ -z "$stat_line" ]]; then
+        return 1
+    fi
+    # Drop "pid (comm)" — GREEDY strip to & incl. the LAST ')'.
+    after="${stat_line##*)}"
+    start="$(awk '{print $20}' <<<"$after")"   # field 22 overall == field 20 here
+    # Output validation: guard a truncated/garbled stat line. Return 1 (no echo),
+    # never fatal.
+    if [[ ! "$start" =~ ^[0-9]+$ ]]; then
+        return 1
+    fi
+    printf '%s\n' "$start"
+}
 
 _pool_owner_starttime() {
-    # Echo the process starttime (/proc/<pid>/stat field 22, clock ticks since
-    # boot) for PID. Returns 0 + echoes digits on success; returns 1 (NOT fatal,
-    # no echo) if the stat file is missing/unreadable. EXTRACTS ONLY — no
-    # liveness validation (that's is_owner_alive in P1.M2.T2.S1).
-    #
-    # ROBUSTNESS: field 2 (comm) is wrapped in parens and MAY contain spaces,
-    # which shifts every later field. The PRD §2.19 "NF-19" formula is WRONG on
-    # this host (NF=52 → NF-19=field 33, not 22). We strip "pid (comm)" by
-    # removing everything up to and including the LAST ')' (greedy), making
-    # overall field 22 == field 20 of the remainder (offset −2). Verified
-    # 2026-07-12: both methods agree (8239564) for comm='pi'. P1.M2.T1.S2 may
-    # harden this; CONTRACT: echo digits / return 0, or return 1 (no echo),
-    # never exit the process.
-    local pid="$1"
-    local stat_line after start
-    stat_line="$(cat "/proc/$pid/stat" 2>/dev/null)" || true
-    [[ -n "$stat_line" ]] || return 1
-    after="${stat_line##*)}"                 # greedy: drop through LAST ')'
-    start="$(awk '{print $20}' <<<"$after")" # field 22 overall == field 20 of remainder
-    [[ -n "$start" ]] || return 1
-    printf '%s\n' "$start"
+    # Thin delegating wrapper preserved for S1's pool_owner_resolve() call sites.
+    # The canonical parser is _pool_get_starttime() above (P1.M2.T1.S2); keeping
+    # this alias means there is exactly ONE starttime parser in the codebase while
+    # pool_owner_resolve's existing `_pool_owner_starttime "$ovr_pid"` calls stay
+    # unchanged. I/O contract unchanged: echo digits/return 0, or return 1
+    # (no echo), never fatal.
+    _pool_get_starttime "$@"
 }
 
 pool_owner_resolve() {
