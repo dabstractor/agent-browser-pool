@@ -2478,3 +2478,118 @@ pool_release_lane() {
     _pool_log "pool_release: released lane $lane (daemon session '$session' disconnected, chrome killed, dir+lease removed)"
     return 0
 }
+
+# =============================================================================
+# Reaper & orphan reuse (P1.M5.T3.S1)
+# =============================================================================
+# pool_reap_stale
+#
+# PRD §2.10 "Reaper" — the LAZY, on-demand stale-lease cleanup. Scans EVERY lane
+# (pool_lanes_list), asks the tri-state predicate pool_lane_is_stale whether each
+# lane's owner is dead/recycled/unverifiable, and for every STALE lane calls the PUBLIC
+# pool_release_lane (full teardown: daemon close + Chrome pgroup kill + rm dir + delete
+# lease). Echoes the reaped count to stdout for observability; returns 0. NO flock, NO
+# background daemon (PRD §2.10 — lazy; a crashed agent's Chrome+dir is reclaimed here OR
+# at the next acquire's inlined reap).
+#
+# DESIGN — the acquire-vs-reaper SPLIT (research §1): the LANDED acquire critical section
+# (_pool_acquire_critical_section @ ~line 1966) inlines its OWN reap loop that calls the
+# PRIVATE _pool_release_lane_internals directly — because the daemon close subprocess is
+# FORBIDDEN under the short acquire flock (PRD §2.19 / key_findings FINDING 2). This
+# standalone reaper runs OUTSIDE any flock and uses the PUBLIC pool_release_lane (which
+# DOES run close). The CONTRACT's "Consumed by acquire step 3a" is legacy design intent;
+# the REAL consumer is the on-demand admin reap command (M7.T2 `agent-browser-pool reap`,
+# PRD §2.10/§2.12), with exhaustion force-reap (M5.T4) as a possible future caller.
+#
+# DELEGATE (do NOT duplicate — research §2/§4): the staleness verdict comes from
+# pool_lane_is_stale (M3.T2.S3); the teardown from pool_release_lane (M5.T2.S1). Do NOT
+# re-inline pool_owner_alive / pool_chrome_kill / the rm-rf / the close.
+#
+# LOGIC (CONTRACT a→d):
+#   a. for n in $(pool_lanes_list)  — snapshot (cmd-subst captured once); empty ⇒ 0 iters.
+#   b.   if pool_lane_is_stale "$n"; then   — TRI-STATE; the if-condition is errexit-exempt:
+#          rc 0 (stale) → enter body;  rc 1 (live) / rc 2 (no lease) → fall through (skip).
+#          pid  = pool_lease_field "$n" owner.pid (best-effort || true; "null"/empty → "?")
+#                 — read BEFORE release (release deletes the lease).
+#          pool_release_lane "$n" >/dev/null — full teardown (close+kill+rm+rmlease; rc 0
+#                 always). >/dev/null so the daemon close subprocess can't pollute the count
+#                 capture (_pool_log still fires — it writes the LOG FILE, not stdout).
+#          _pool_log "pool_reap: reaped stale lane $n (owner pid $pid dead/recycled)"
+#          reaped=$((reaped + 1)) — assignment form (safe); NEVER (( reaped++ )) (aborts @0).
+#        fi
+#   c. printf '%s\n' "$reaped"  — the ONLY stdout write (count capture for M7.T2).
+#   d. return 0  — NON-FATAL always (never pool_die, never non-zero).
+#
+# CALLER CONTRACT (the admin reap command M7.T2 / exhaustion M5.T4, under set -e):
+#     reaped="$(pool_reap_stale)"   # captures exactly one integer; rc 0 always
+#   OR (fire-and-forget):  pool_reap_stale >/dev/null 2>&1 || true
+#
+# GOTCHA — tri-state under set -e: a BARE `pool_lane_is_stale "$n"` whose rc is 1 (live) or
+#   2 (no lease) ABORTS the caller. The `if …; then …; fi` is MANDATORY (the condition is
+#   errexit-exempt). (pool_lane_is_stale GOTCHA @ ~line 1145-1148.)
+# GOTCHA — `(( reaped++ ))` ABORTS when reaped==0 (command form returns rc 1 on value 0).
+#   Use `reaped=$((reaped + 1))` (assignment form, exit 0). (BashFAQ 105.)
+# GOTCHA — stdout discipline: pool_release_lane's daemon close subprocess is NOT stdout-
+#   redirected inside it; redirect pool_release_lane "$n" >/dev/null so the count capture
+#   stays clean. _pool_log writes the LOG FILE (never stdout) → keeps firing.
+# GOTCHA — read pid BEFORE release: pool_release_lane deletes the lease; extract owner.pid
+#   first (best-effort || true; "null"/empty → "?").
+# GOTCHA — `local var=$(…)` masks errexit (SC2155): split every capture (local declared
+#   FIRST, assign AFTER); guard pool_lease_field's rc-1 with || true INSIDE the $().
+# GOTCHA — NON-FATAL always: never pool_die, never non-zero. A TOCTOU missing lease ⇒
+#   pool_release_lane returns 0 (no-op); a corrupt lease ⇒ pool_lane_is_stale rc 2 (skip).
+# GOTCHA — NO flock: release is lane-local + idempotent; a concurrent acquire's in-lock reap
+#   of the same lane is a harmless no-op. Flocking the sweep would serialize vs acquire.
+# GOTCHA — snapshot iteration: the lane list is frozen before the loop; mid-loop releases
+#   cannot mutate the iteration set.
+# Reads POOL_LANES_DIR (via helpers). No new globals exported. No new env vars / files.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR via pool_lanes_list/pool_lease_field;
+#   POOL_REAL_BIN via pool_release_lane). pool_state_init NOT required (pool_lanes_list
+#   handles a missing lanes dir as a no-match glob → 0 iterations; _pool_log mkdir -p's).
+pool_reap_stale() {
+    local n pid
+    local reaped=0
+
+    # (a) Iterate ALL lanes. pool_lanes_list: newline-separated, numerically-sorted lane
+    #     numbers; rc 0 always; empty/missing dir ⇒ no-match glob ⇒ 0 iterations. The
+    #     unquoted command substitution is the documented idiom (digits-only; word-splits
+    #     on IFS into exactly the lane numbers). The list is a SNAPSHOT (captured once
+    #     before the loop) — mid-loop releases cannot mutate the iteration set.
+    for n in $(pool_lanes_list); do
+
+        # (b) TRI-STATE verdict. pool_lane_is_stale: 0=stale / 1=live / 2=no-lease.
+        #     The `if`-condition is errexit-exempt — rc 1 (live) and rc 2 (no lease) fall
+        #     through cleanly (skip); ONLY rc 0 (stale) enters the body. A BARE call would
+        #     ABORT under set -e on rc 1/2 (pool_lane_is_stale GOTCHA @ ~line 1145-1148).
+        if pool_lane_is_stale "$n"; then
+            # Best-effort read of the owner pid for the log line. Read BEFORE release
+            # (pool_release_lane deletes the lease). pool_lease_field: nested-path read
+            # (owner.pid via getpath); rc 1 on missing/corrupt; echoes "null" for a missing
+            # path. The `|| true` INSIDE the $() makes the capture set -e-safe against a
+            # TOCTOU missing-lease rc 1 (pid falls back to "?"). The assignment is split
+            # (local declared above) — no SC2155 / errexit masking.
+            pid="$(pool_lease_field "$n" owner.pid 2>/dev/null || true)"
+            [[ -n "$pid" && "$pid" != "null" ]] || pid="?"
+
+            # Release the stale lane: daemon close + Chrome pgroup kill + rm dir + delete
+            # lease (pool_release_lane returns 0 ALWAYS — idempotent, non-fatal). Redirect
+            # its stdout to /dev/null so the daemon close subprocess cannot pollute THIS
+            # function's reaped-count stdout capture. _pool_log (inside release + below)
+            # writes the LOG FILE (+ stderr fallback), NEVER stdout → still fires.
+            pool_release_lane "$n" >/dev/null
+
+            _pool_log "pool_reap: reaped stale lane $n (owner pid $pid dead/recycled)"
+            # assignment form — safe under set -e. NEVER `(( reaped++ ))` (aborts @0).
+            reaped=$((reaped + 1))
+        fi
+    done
+
+    # (c) Echo the reaped count to stdout for observability. This is the ONLY stdout write
+    #     in the function (consumers capture via `count=$(pool_reap_stale)`, e.g. the admin
+    #     reap command M7.T2). 0 = nothing was stale. $() strips the trailing newline so
+    #     the caller gets a bare integer token.
+    printf '%s\n' "$reaped"
+
+    # (d) NON-FATAL always — never pool_die, never non-zero.
+    return 0
+}

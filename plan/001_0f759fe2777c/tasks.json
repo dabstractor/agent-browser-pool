@@ -480,14 +480,14 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Stale reaper & orphan reuse",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Scan all lanes for stale owners and tear them down. Called inside acquire (step 3a) and on-demand via admin reap. Also handles reuse-orphan-if-responsive.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T3.S1",
                   "title": "reap_stale() — scan all lanes, release stale ones",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T2.S1",
@@ -504,7 +504,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S2",
                   "title": "reuse_orphan() — adopt responsive Chrome with dead owner",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T3.S1",
