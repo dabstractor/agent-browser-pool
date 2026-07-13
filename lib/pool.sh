@@ -3760,3 +3760,157 @@ pool_admin_reap() {
     # --- d. NON-FATAL always — never pool_die in body, never non-zero -----------
     return 0
 }
+
+# ============================================================================
+# Admin CLI — release (P1.M7.T3.S1)
+# ============================================================================
+# pool_admin_release [TARGET]
+#
+# PRD §2.12 `release [<N>|all]` / §2.5 "Explicit release" — the USER-FACING
+# release command. Takes ONE optional argument TARGET (the string "all", a lane
+# number N, or empty/invalid), CLASSIFIES it, and explicitly tears down the named
+# lane(s) by delegating to the LANDED pool_release_lane (M5.T2.S1 — kill pgroup +
+# disconnect daemon + rm dir + delete lease; rc 0 ALWAYS; idempotent). Prints a
+# one-line confirmation. Distinct from `reap` (M7.T2.S1): reap is STALE-ONLY
+# (pool_reap_stale skips live-owner lanes); release is EXPLICIT (admin-named lane
+# is torn down live OR stale).
+#
+# LOGIC (CONTRACT 3a→3d):
+#   a. TARGET == "all"  → snapshot pool_lanes_list; if empty → "No active lanes to
+#      release."; else pool_release_lane EACH, then "Released N lane(s)." (N = count).
+#      rc 0.
+#   b. TARGET is a number AND pool_lease_exists → pool_release_lane TARGET;
+#      "Released lane N.". rc 0.
+#   c. TARGET is empty OR invalid (not "all", not ^[0-9]+$) → print USAGE to STDERR.
+#      rc 1.
+#   d. TARGET is a number AND NOT pool_lease_exists → "Lane N has no active lease."
+#      rc 1. (Nothing torn down.)
+#
+# OUTPUT (stdout = the result line; stderr = usage only):
+#   release all (N>0)  → stdout: "Released N lane(s)."
+#   release all (N==0) → stdout: "No active lanes to release."
+#   release N (exists) → stdout: "Released lane N."
+#   release N (absent) → stdout: "Lane N has no active lease."
+#   release / release foo → stderr: usage block; stdout EMPTY.
+#
+# The literal "lane(s)" handles both singular and plural (do not special-case N=1).
+#
+# CONTRACT:
+#   - DELEGATE: ALL teardown logic lives in pool_release_lane. This function does NOT
+#     re-implement any of it. It classifies + probes existence + delegates + reports.
+#   - PROBE BEFORE DELEGATING (the key decision): pool_release_lane is idempotent +
+#     rc-0-always + SILENTLY no-ops on a missing lease (lib/pool.sh:2448-2450). So it
+#     CANNOT distinguish "I just released lane N" from "lane N had no lease" (BOTH rc 0).
+#     The numeric branch MUST probe pool_lease_exists FIRST to pick the right message
+#     ("Released lane N." vs "Lane N has no active lease."). In the `all` branch no
+#     per-lane probe is needed: pool_lanes_list yields ONLY lanes with a lease.
+#   - EXPLICIT, NOT reap: release calls pool_release_lane DIRECTLY (admin-named lane —
+#     live OR stale). Do NOT route through pool_reap_stale (stale-only; skips live lanes).
+#   - RETURN CODES: rc 0 for successful releases (all cases + numeric-found); rc 1 for
+#     usage-error (c) + targeted-not-found (d). This DELIBERATELY diverges from the reap
+#     sibling's rc-0-always: release takes an ARGUMENT and can hit "not found", which is a
+#     genuine error (Unix convention). NEVER pool_die in the body.
+#
+# set -e GUARDS (all live — set -euo pipefail at lib/pool.sh:23):
+#   - pool_lease_exists returns rc 1 on missing/corrupt/non-numeric → a BARE call
+#     ABORTS under set -e. ALWAYS `if pool_lease_exists "$lane"; then …; else …; fi`
+#     (rc 1 falls into else, errexit-exempt). This is the SAME hazard as pool_lane_is_stale.
+#   - pool_release_lane returns rc 0 ALWAYS → a BARE call (after the probe passes) is
+#     set -e-safe. NO `if !` guard.
+#   - pool_lanes_list returns rc 0 ALWAYS → the `mapfile -t lanes < <(pool_lanes_list)`
+#     snapshot + any iteration is safe.
+#   - never `local x="$(…)"` (SC2155); declare then assign. (`local target="${1:-}"` is a
+#     parameter expansion, NOT a `$(…)` capture → SC2155-safe inline.)
+#   - `(( ${#lanes[@]} == 0 ))` MUST be inside `if` (a bare `(( ))` statement returns 1
+#     when the value is 0 → FATAL under set -e).
+#
+# PRECONDITION: pool_config_init (globals) + pool_state_init (mkdir POOL_LANES_DIR).
+#   Both rc-0-or-pool_die (a misconfigured pool fails loudly — correct). No guard.
+# CONSUMERS: M7.T5.S1 bin/agent-browser-pool dispatcher: `case release) pool_admin_release "$@" ;;`.
+pool_admin_release() {
+    # Declare ALL locals up front (SC2155). `target` is a parameter expansion (NOT a
+    # `$(…)` capture), so inline `local target="${1:-}"` is SC2155-safe. `lanes` is the
+    # snapshot array for the `all` branch; `lane` is the loop var.
+    local target="${1:-}"
+    local -a lanes
+    local lane
+
+    # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
+    # Mirrors pool_admin_status (lib/pool.sh:3604-3606) + pool_admin_reap
+    # (lib/pool.sh:3738-3742) + pool_wrapper_main step "a". pool_state_init's
+    # idempotent mkdir -p guarantees POOL_LANES_DIR exists (so a fresh pool's first
+    # release — `release all` on an empty pool — works cleanly).
+    pool_config_init
+    pool_state_init
+
+    # --- classify TARGET: "all" → numeric → else(usage) -------------------------
+    if [[ "$target" == "all" ]]; then
+        # --- (a) release ALL lanes: snapshot first for an accurate count + clean ---
+        # --- empty-pool check (mirrors pool_admin_status @lib/pool.sh:3624/3629). -
+        # Process-substitution exit status is NOT propagated → set -e safe. mapfile of
+        # empty output → empty array. pool_lanes_list yields ONLY lanes with a lease
+        # (numeric *.json stems), so every iterated lane is real.
+        mapfile -t lanes < <(pool_lanes_list)
+        # `(( ))` inside `if` is errexit-exempt (bare `(( ))` @0 is FATAL under set -e).
+        if (( ${#lanes[@]} == 0 )); then
+            printf 'No active lanes to release.\n'
+            return 0
+        fi
+        # Release each lane. pool_release_lane is rc 0 ALWAYS (idempotent; non-fatal) →
+        # the bare call is set -e-safe. NO per-lane pool_lease_exists probe: pool_lanes_list
+        # already guaranteed each lane has a lease. (Contrast the numeric branch, which
+        # MUST probe.) A concurrent reap may race a lane away between snapshot + release —
+        # pool_release_lane no-ops cleanly on the now-absent lease (rc 0); the summary count
+        # reflects the snapshot (acceptable; contract says only "Print summary".)
+        # >/dev/null suppresses the delegate's stdout (pool_release_lane runs the
+        # `agent-browser … close` subprocess whose `✓ Browser closed` line would otherwise
+        # leak into this function's result line — stdout discipline, design-decisions D7.
+        # Matches pool_admin_reap @lib/pool.sh:2579 + exhaustion @lib/pool.sh:2952.)
+        for lane in "${lanes[@]}"; do
+            pool_release_lane "$lane" >/dev/null
+        done
+        # Literal "lane(s)" handles N=1 and N>0 (no singular special-case — same as reap).
+        printf 'Released %d lane(s).\n' "${#lanes[@]}"
+        return 0
+
+    elif [[ "$target" =~ ^[0-9]+$ ]]; then
+        # --- (b)/(d) numeric: PROBE existence BEFORE delegating (the key guard) ---
+        # pool_lease_exists is rc 0 (valid lease) / rc 1 (missing/corrupt/non-numeric).
+        # A BARE call with rc 1 ABORTS under set -e → the `if` is MANDATORY (rc 1 falls
+        # into else, errexit-exempt). This probe is REQUIRED because pool_release_lane is
+        # rc-0-always + silently no-ops on a missing lease — it CANNOT tell us the lane
+        # was absent. The probe picks the right message.
+        if pool_lease_exists "$target"; then
+            # (b) lease EXISTS → delegate the real teardown. pool_release_lane is rc 0
+            # ALWAYS → bare call, NO `if !` guard. It reads the lease, disconnects the
+            # daemon, kills the Chrome pgroup, rm -rf the dir, deletes the lease.
+            # >/dev/null suppresses the delegate's stdout (the `agent-browser … close`
+            # subprocess prints `✓ Browser closed` to stdout — that would leak into this
+            # function's single result line; stdout discipline, design-decisions D7.
+            # Matches pool_admin_reap @lib/pool.sh:2579 + exhaustion @lib/pool.sh:2952.)
+            pool_release_lane "$target" >/dev/null
+            # %s echoes the target token verbatim ("Released lane 7.").
+            printf 'Released lane %s.\n' "$target"
+            return 0
+        else
+            # (d) lease ABSENT → nothing to release. NOT an idempotent success (the admin
+            # named a SPECIFIC lane that isn't there) → rc 1 (Unix convention). Nothing is
+            # torn down (pool_release_lane was NOT called).
+            printf 'Lane %s has no active lease.\n' "$target"
+            return 1
+        fi
+
+    else
+        # --- (c) empty OR invalid (not "all", not ^[0-9]+$) → usage to STDERR ------
+        # Usage goes to stderr (the misuse path; conventional). stdout stays EMPTY so a
+        # `out="$(pool_admin_release foo)"` captures nothing. rc 1 (usage error). The
+        # full --help is the dispatcher's job (M7.T5.S1); this is the function-level
+        # fallback the item contract requires ("print usage").
+        printf 'Usage: agent-browser-pool release [<N>|all]\n' >&2
+        printf '\n' >&2
+        printf 'Release (tear down) one lane or all lanes.\n' >&2
+        printf '  release N    Release lane N (explicit teardown).\n' >&2
+        printf '  release all  Release all active lanes.\n' >&2
+        return 1
+    fi
+}

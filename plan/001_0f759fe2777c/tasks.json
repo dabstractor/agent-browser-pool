@@ -722,14 +722,14 @@
               "type": "Task",
               "id": "P1.M7.T3",
               "title": "release command — explicit teardown",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Release a specific lane or all lanes explicitly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T3.S1",
                   "title": "release [<N>|all] — explicit lane teardown",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T2.S1"
@@ -746,14 +746,14 @@
               "type": "Task",
               "id": "P1.M7.T4",
               "title": "doctor command — reconcile & diagnose",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Reconcile leases vs live Chromes vs ephemeral dirs. Verify all dependencies are present. Report any discrepancies (leaks, orphan dirs, missing processes).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T4.S1",
                   "title": "doctor — full system reconciliation + dependency check",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S2",
