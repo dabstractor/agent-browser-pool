@@ -2772,3 +2772,200 @@ pool_reuse_orphan() {
     #     `n=$(pool_reuse_orphan)` yields the empty string). NON-FATAL (never pool_die).
     return 1
 }
+
+
+# =============================================================================
+# Pool exhaustion (P1.M5.T4.S1)
+# =============================================================================
+# Block-with-timeout + force-reap + alert — PRD §2.9 (IQ2). The PUBLIC handler the
+# wrapper (M6) calls when pool_acquire_locked returns 1 ("no free/reusable lane").
+# _pool_alert is the best-effort notify-send + alerts.log helper; pool_wait_for_lane
+# is the block→force-reap→alert flow.
+
+# _pool_alert SUMMARY BODY
+#
+# Best-effort exhaustion alert (PRD §2.9 "Alert on timeout/force: notify-send desktop
+# notification + a line to ~/.local/state/agent-browser-pool/alerts.log"). Fires a
+# desktop notification (notify-send) AND appends one timestamped line to
+# $POOL_STATE_DIR/alerts.log. ALWAYS returns 0 — a missing notify-send, a headless
+# session (no DISPLAY / DBUS_SESSION_BUS_ADDRESS), or an unwritable alerts.log are
+# ALL non-fatal no-ops. It must NEVER affect its caller's return code.
+#
+# LOGIC:
+#   1. ts = printf '%(%Y-%m-%dT%H:%M:%S%z)T' -1   (house-style display timestamp; no
+#      `date` fork — mirrors _pool_log @~line 41).
+#   2. notify-send "$SUMMARY" "$BODY" — guarded by `command -v` (may be absent on a
+#      minimal host) + 2>/dev/null || true (exits non-zero in a headless session).
+#   3. mkdir -p -- "$POOL_STATE_DIR" 2>/dev/null || true  (the dir normally exists via
+#      pool_state_init; defensive for an early/standalone call).
+#   4. printf '%s %s: %s\n' "$ts" "$SUMMARY" "$BODY" >>"$POOL_STATE_DIR/alerts.log"
+#      2>/dev/null || true  (O_APPEND small write < PIPE_BUF ⇒ atomic on local FS;
+#      POSIX write()/O_APPEND).
+#   5. return 0.
+#
+# GOTCHA — notify-send exits non-zero with no display (libnotify) ⇒ MUST guard; a bare
+#   call ABORTS under set -e.
+# GOTCHA — the `>>` append is atomic-enough for a single short line (POSIX O_APPEND +
+#   PIPE_BUF); NO flock needed (multiple exhausted agents alerting concurrently is fine).
+# GOTCHA — writes NOTHING to stdout (notify-send → D-Bus; printf → the file) ⇒ safe
+#   inside the caller's lane-echo capture; the caller STILL redirects >/dev/null 2>&1
+#   for hygiene (notify-send may print diagnostics to stderr).
+# Reads POOL_STATE_DIR (frozen by pool_config_init). No new globals. PRECONDITION:
+#   pool_config_init (for POOL_STATE_DIR). Non-fatal (rc 0 always).
+_pool_alert() {
+    local summary="${1:-}" body="${2:-}" ts
+    printf -v ts '%(%Y-%m-%dT%H:%M:%S%z)T' -1
+    if command -v notify-send >/dev/null 2>&1; then
+        notify-send "$summary" "$body" >/dev/null 2>&1 || true
+    fi
+    # alerts.log under the runtime state dir (frozen by pool_config_init). Derive inline —
+    # no new global (consistent with _pool_log's inline path derivation).
+    if [[ -n "${POOL_STATE_DIR:-}" ]]; then
+        mkdir -p -- "$POOL_STATE_DIR" 2>/dev/null || true
+        printf '%s %s: %s\n' "$ts" "$summary" "$body" \
+            >>"$POOL_STATE_DIR/alerts.log" 2>/dev/null || true
+    fi
+    return 0
+}
+
+# pool_wait_for_lane
+#
+# PRD §2.9 / IQ2 "block-with-timeout + alert" — the PUBLIC exhaustion handler. Called by
+# the wrapper (M6) AFTER pool_acquire_locked returned 1 ("no free/reusable lane"). Blocks
+# up to POOL_WAIT seconds (default 600), polling every 2 s (reap-stale + retry-acquire);
+# on timeout FORCE-reaps the OLDEST dead-owner lane, alerts, and retries acquire once more;
+# if still no lane (all-live-owners / lost the race) it alerts + returns 1.
+#
+# DESIGN — LOCK-FREE (research §1): ONLY pool_acquire_locked flocks
+# (`( flock 9; _pool_acquire_critical_section ) 9>"$POOL_LOCK_FILE"`). pool_reap_stale and
+# pool_release_lane are explicitly lock-free + idempotent. pool_wait_for_lane takes NO flock
+# (holding one across the 2 s sleep — up to 10 min — would serialize the ENTIRE pool) and
+# opens NO `9>"$POOL_LOCK_FILE"` (flock(2) locks are per OPEN FILE DESCRIPTION; a fresh OFD
+# here would self-deadlock against any caller-held lock — man flock(2)). It COMPOSES the
+# flock-owner + the lock-free helpers.
+#
+# LOGIC (CONTRACT a→e):
+#   a. POLL (≤ POOL_WAIT s, 2 s cadence; check-BEFORE-body so POOL_WAIT=0 → 0 iterations):
+#        start = _pool_now
+#        while true; do
+#            now = _pool_now; (( now - start >= POOL_WAIT )) && break   # &&-list = errexit-exempt
+#            pool_reap_stale >/dev/null                                  # full daemon-close reap (lock-free)
+#            if N = pool_acquire_locked; then printf '%s\n' "$N"; return 0; fi   # split-local, if-capture
+#            sleep 2
+#        done
+#   b. FORCE-REAP (oldest dead-owner lane):
+#        oldest_lane=""; oldest_ts=""
+#        for cand in $(pool_lanes_list); do
+#            if pool_lane_is_stale "$cand"; then                          # tri-state; if = errexit-exempt
+#                ts = pool_lease_field "$cand" acquired_at (|| true inside $(); "null"/missing → "")
+#                [[ "$ts" =~ ^[0-9]+$ ]] || continue                      # corrupt → SKIP (never default to 0)
+#                if [[ -z "$oldest_ts" ]] || (( ts < oldest_ts )); then   # ||-list = errexit-exempt
+#                    oldest_ts="$ts"; oldest_lane="$cand"
+#                fi
+#            fi
+#        done
+#   c. if oldest_lane set:
+#        pool_release_lane "$oldest_lane" >/dev/null                      # PUBLIC teardown (close+kill+rm; lock-free)
+#        _pool_alert 'agent-browser-pool' "Pool exhausted — force-reaped lane $oldest_lane. Possible leak."
+#        _pool_log "pool_wait: force-reaped stale lane $oldest_lane after ${POOL_WAIT}s timeout"
+#        if N = pool_acquire_locked; then printf '%s\n' "$N"; return 0; fi  # peer may have won the race → rc 1
+#   d. (no stale lane OR lost the race): alert + log + return 1 (nothing echoed)
+#        _pool_alert 'agent-browser-pool' "Pool exhausted — no lane available after ${POOL_WAIT}s + force-reap. Possible leak."
+#        _pool_log "pool_wait: exhausted — no free/reusable lane after ${POOL_WAIT}s + force-reap"
+#        return 1
+#   e. ALERT = the _pool_alert calls above (notify-send + alerts.log); see _pool_alert.
+#
+# CALLER CONTRACT (the wrapper M6, under set -e — split the capture per BashFAQ 105):
+#     local N
+#     if N="$(pool_acquire_locked)"; then
+#         <post-lock boot / ensure_connected>
+#     elif N="$(pool_wait_for_lane)"; then
+#         <post-lock boot / ensure_connected for N>
+#     else
+#         pool_die "agent-browser-pool: no lane available after ${POOL_WAIT}s + force-reap"
+#     fi
+#
+# GOTCHA — LOCK-FREE: NO flock, NO `9>"$POOL_LOCK_FILE"` anywhere in this function (see
+#   DESIGN). Delegate acquire to pool_acquire_locked.
+# GOTCHA — force-reap uses the PUBLIC pool_release_lane (close+kill+rm), NOT the private
+#   _pool_release_lane_internals (no close, in-lock only). This function runs UNFLOCKED.
+# GOTCHA — pool_lane_is_stale under an `if`, NEVER bare (rc 1/2 abort under set -e).
+# GOTCHA — pool_acquire_locked under an `if` with a SPLIT-local (`local N` first; plain
+#   `N="$(…)"`), NEVER `local N=$(…)` (SC2155 masks errexit) or a bare capture.
+# GOTCHA — every `(( ))` is in a condition context (`&&`/`||`/`if`), NEVER a bare statement
+#   (value 0 → rc 1 → abort).
+# GOTCHA — timing uses `_pool_now` (epoch), NEVER `$SECONDS` (unset-fragile in a sourced
+#   library); display ts in _pool_alert uses printf %()T.
+# GOTCHA — POOL_WAIT=0 ⇒ check-BEFORE-body ⇒ 0 poll iterations ⇒ straight to force-reap.
+# GOTCHA — stdout discipline: ONLY `printf '%s\n' "$N"` escapes (on success). pool_reap_stale
+#   >/dev/null; pool_release_lane >/dev/null; _pool_alert >/dev/null 2>&1; _pool_log → LOG FILE.
+# GOTCHA — lost-the-race after force-reap is ACCEPTABLE (rc 1, nothing echoed). Do NOT
+#   retry-loop the force-reap — a peer legitimately won N.
+# GOTCHA — _pool_alert is best-effort + non-fatal (rc 0 always); NEVER affects this rc.
+# Reads POOL_WAIT + POOL_STATE_DIR (via _pool_alert; both frozen by pool_config_init) +
+# POOL_LANES_DIR (via the helpers). No new globals.
+# PRECONDITION: pool_config_init + pool_owner_resolve + (by the wrapper) one prior
+#   pool_acquire_locked that returned 1. NOT the first acquire.
+pool_wait_for_lane() {
+    local N now start oldest_lane oldest_ts cand ts
+
+    # (a) POLL loop — check-timeout-BEFORE-body so POOL_WAIT=0 runs ZERO iterations.
+    start="$(_pool_now)"
+    while true; do
+        now="$(_pool_now)"
+        # &&-list ⇒ errexit-exempt (no abort even when the comparison is false). CHECK FIRST.
+        (( now - start >= POOL_WAIT )) && break
+        # Full daemon-close reap (lock-free, idempotent, rc 0 always). Echoes a count → >/dev/null.
+        pool_reap_stale >/dev/null
+        # Acquire (takes its OWN short flock; inlines reap+reuse+choose+claim). rc 0 ⇒ done.
+        # `if N="$(…)"` with N already declared above (plain assignment, NOT local N=$(…)).
+        if N="$(pool_acquire_locked)"; then
+            printf '%s\n' "$N"
+            return 0
+        fi
+        sleep 2
+    done
+
+    # (b) FORCE-REAP — find the OLDEST lane whose owner is actually dead.
+    oldest_lane=""
+    oldest_ts=""
+    for cand in $(pool_lanes_list); do
+        # tri-state: rc 0 (stale) → enter; rc 1 (live) / rc 2 (no lease) → skip. `if` = exempt.
+        if pool_lane_is_stale "$cand"; then
+            # acquired_at is a numeric epoch (pool_lease_write @~704/721; _pool_now). `|| true`
+            # inside $() makes the capture set -e-safe (pool_lease_field rc 1 on corrupt).
+            ts="$(pool_lease_field "$cand" acquired_at 2>/dev/null || true)"
+            # corrupt/missing ⇒ SKIP (never default to 0 — 0 would always win "oldest").
+            [[ "$ts" =~ ^[0-9]+$ ]] || continue
+            # ||-list ⇒ errexit-exempt. First stale lane seeds oldest; later older ones replace it.
+            if [[ -z "$oldest_ts" ]] || (( ts < oldest_ts )); then
+                oldest_ts="$ts"
+                oldest_lane="$cand"
+            fi
+        fi
+    done
+
+    # (c) If we found a stale lane, force-reap it, ALERT, and try acquire ONE more time.
+    if [[ -n "$oldest_lane" ]]; then
+        # PUBLIC teardown (close+kill+rm dir+rm lease; lock-free, idempotent, rc 0 always).
+        # >/dev/null (the close subprocess @~2472 redirects only stderr — stdout can leak).
+        pool_release_lane "$oldest_lane" >/dev/null
+        # ALERT — notify-send summary 'agent-browser-pool' + the VERBATIM force-reap body
+        # (PRD §2.9; em-dash —). >/dev/null 2>&1 (notify-send may print stderr; writes no stdout).
+        _pool_alert 'agent-browser-pool' \
+            "Pool exhausted — force-reaped lane $oldest_lane. Possible leak." >/dev/null 2>&1
+        _pool_log "pool_wait: force-reaped stale lane $oldest_lane after ${POOL_WAIT}s timeout"
+        # Final acquire. A peer may have grabbed the just-freed lane first → rc 1 falls through to (d).
+        if N="$(pool_acquire_locked)"; then
+            printf '%s\n' "$N"
+            return 0
+        fi
+    fi
+
+    # (d) No stale lane existed (all-live-owners) OR lost the race. ALERT + log + return 1
+    #     (nothing echoed ⇒ N=$(pool_wait_for_lane) yields the empty string).
+    _pool_alert 'agent-browser-pool' \
+        "Pool exhausted — no lane available after ${POOL_WAIT}s + force-reap. Possible leak." >/dev/null 2>&1
+    _pool_log "pool_wait: exhausted — no free/reusable lane after ${POOL_WAIT}s + force-reap"
+    return 1
+}

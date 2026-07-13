@@ -383,7 +383,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Acquire, Release & Reaper Orchestration",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the high-level flow logic that orchestrates the lane lifecycle operations: the acquire flow (flock critical section + post-lock Chrome boot), release/teardown, the stale reaper (on-acquire and on-demand), reuse-orphan-if-responsive, and pool exhaustion handling with block-timeout + force-reap + alert.",
           "tasks": [
             {
@@ -522,14 +522,14 @@
               "type": "Task",
               "id": "P1.M5.T4",
               "title": "Pool exhaustion handling",
-              "status": "Researching",
+              "status": "Complete",
               "description": "When no free/reusable lane is available, block with timeout, poll for releases, force-reap a dead-owner lane, and alert via notify-send + log.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T4.S1",
                   "title": "Block-with-timeout + force-reap + alert",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1",
@@ -563,7 +563,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S1",
                   "title": "Parse first token → classify DRIVING vs META/passthrough",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1"
