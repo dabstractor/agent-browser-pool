@@ -3259,3 +3259,133 @@ pool_normalize_connect() {
     declare -ga POOL_NORM_ARGS=( "${out[@]}" )
     return 0
 }
+
+# =============================================================================
+# Wrapper shim — session override (P1.M6.T2.S1)
+# =============================================================================
+# PRD §2.4 step 5 / §2.15 transparency. Neutralize an agent's attempt to bypass its
+# lane via the upstream-skill-taught --session <X> flag or an inherited
+# AGENT_BROWSER_SESSION=<X> env var. Called by the wrapper lifecycle (M6.T3.S1) AFTER
+# pool_dispatch_classify returned 'driving', AFTER M6.T1.S2's close/connect normalize,
+# and AFTER acquire + ensure_connected, but BEFORE the exec.
+#
+# HOST-VERIFIED precedence (agent-browser 0.28.0): the --session <name> FLAG WINS over
+# the AGENT_BROWSER_SESSION env var (the env is the fallback when no flag is given).
+# ⇒ NEITHER strip-alone NOR force-alone suffices. BOTH are required:
+#     pool_strip_session_args  → remove every --session from the argv
+#     pool_force_session       → export AGENT_BROWSER_SESSION=abpool-<lane>
+#   so the env var is the SOLE session source, pinned to the agent's lane.
+
+# pool_strip_session_args [--] ARGS...
+#
+# Pure argv transform: remove EVERY '--session <X>' (space form: flag + value) and
+# '--session=<X>' (equals form: single token) from ARGS, preserving all other tokens
+# (other --flags, -shortflags, positionals, args with spaces/newlines) in original order.
+# Writes the cleaned argv to the GLOBAL ARRAY POOL_CLEAN_ARGS (declare -ga). Returns 0
+# ALWAYS (removing a token that isn't there is a valid no-op). stdout: EMPTY.
+#
+# LOGIC (CONTRACT a, research codebase-internal §3/§5):
+#   - Snapshot $@ into local -a orig=("$@").
+#   - Walk orig with an index i; rebuild into local -a out=():
+#        --session      → if a next token exists: i+=2 (drop flag + value); else i+=1 (drop trailing flag)
+#        --session=*    → i+=1 (drop the single equals-form token)
+#        <anything else>→ out+=("$tok"); i+=1   (KEEP verbatim, incl. --session-name)
+#   - POOL_CLEAN_ARGS = out. Return 0.
+#
+# CONSUMERS: M6.T3.S1 wrapper lifecycle (passes ${POOL_NORM_ARGS[@]} from M6.T1.S2 as
+#   the args); unit tests (M9).
+#
+# GOTCHA — OUTPUT is the GLOBAL ARRAY POOL_CLEAN_ARGS, NOT stdout. stdout stays EMPTY.
+#   The caller reads "${POOL_CLEAN_ARGS[@]}". (argv may contain spaces → stdout is unsafe.)
+# GOTCHA — return 0 ALWAYS; no failure mode ⇒ the caller needs NO if-guard.
+# GOTCHA --session-name is NOT stripped (different feature: cookie/localStorage persistence;
+#   research bash-external §6). Only --session / --session=<X> are removed.
+# GOTCHA — multiple --session are ALL dropped; trailing --session (no value) is dropped
+#   without reading past the array end (the i+1<${#orig[@]} guard).
+# GOTCHA — the index counter uses `i=$((i+N))` (assignment, always rc 0), NEVER `(( i++ ))`
+#   (returns rc 1 when i==0 → ABORT under set -e; lib/pool.sh:360-365). The only (( )) are
+#   `while (( i < ${#orig[@]} ))` (cond, exempt) and `if (( i+1 < ${#orig[@]} ))` (cond, exempt).
+# GOTCHA — MIRRORS pool_dispatch_classify's scan case-arms (--session / --session=*) so the
+#   wrapper-shim siblings agree on what a --session token is.
+# GOTCHA — POOL_CLEAN_ARGS is DISTINCT from M6.T1.S2's POOL_NORM_ARGS (pipeline:
+#   POOL_NORM_ARGS → strip → POOL_CLEAN_ARGS → exec). This function reads only "$@" (it does
+#   NOT reference POOL_NORM_ARGS) → decoupled from the parallel sibling.
+# PRECONDITION: none. Reads only "$@".
+pool_strip_session_args() {
+    local -a orig=("$@") out=()
+    local i=0 tok
+
+    # Walk orig with an index; rebuild into out MINUS every --session token. `i=$((i+N))`
+    # is an ASSIGNMENT (always rc 0) — avoids the bare-(( i++ )) trap (lib/pool.sh:360-365).
+    # The `while (( ))` and `if (( ))` are CONDITIONS (errexit-exempt).
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)
+                # Space form: drop the flag AND its value (if a next token exists).
+                # Trailing `--session` with no value → drop just the flag (i+=1).
+                if (( i+1 < ${#orig[@]} )); then
+                    i=$((i+2))
+                else
+                    i=$((i+1))
+                fi
+                ;;
+            --session=*)
+                # Equals form: single combined token (--session=X) → drop it.
+                i=$((i+1))
+                ;;
+            *)
+                # KEEP everything else verbatim (incl. --session-name, --json, positionals).
+                out+=("$tok")
+                i=$((i+1))
+                ;;
+        esac
+    done
+
+    # Emit the cleaned argv via the GLOBAL ARRAY (atomic single-statement; REPLACES each
+    # call — no stale elements; empty out → POOL_CLEAN_ARGS=() with 0 elements).
+    # shellcheck disable=SC2034 # POOL_CLEAN_ARGS is an OUTPUT-only contract read by the
+    # wrapper (M6.T3.S1) + tests (M9); this lib writes it, it does not read it back.
+    declare -ga POOL_CLEAN_ARGS=( "${out[@]}" )
+    return 0
+}
+
+# pool_force_session LANE
+#
+# Export AGENT_BROWSER_SESSION=abpool-<LANE> into the CALLING shell's environment so the
+# later `exec "$POOL_REAL_BIN" …` (M6.T3.S1) inherits it. Because pool_strip_session_args
+# removed any --session flag, this env var is the SOLE session source → the agent cannot
+# bypass its lane. Validates LANE is a non-negative integer; returns 1 (non-fatal, no
+# export) on a bad lane. stdout: EMPTY.
+#
+# LOGIC (CONTRACT b, research bash-external §4):
+#   - lane="${1:-}"  (set -u safe)
+#   - [[ "$lane" =~ ^[0-9]+$ ]] || return 1   (non-numeric/empty/negative → do-no-harm)
+#   - export AGENT_BROWSER_SESSION="abpool-$lane"   (persists in calling shell; inherited by exec)
+#   - return 0
+#
+# CONSUMERS: M6.T3.S1 wrapper lifecycle; unit tests (M9).
+#
+# GOTCHA — `export` inside a function (no $(...) / no pipe) runs in the CALLING shell →
+#   the env var PERSISTS after the function returns AND is inherited by a later exec.
+#   Host-verified (bash-external §4).
+# GOTCHA — NON-FATAL rc 0/1 (never pool_die): mirrors pool_daemon_connect @1630 /
+#   pool_daemon_connected @1680. The caller MUST guard: `if pool_force_session "$N"; then …`.
+# GOTCHA — on rc 1 we return WITHOUT exporting (do-no-harm: any prior AGENT_BROWSER_SESSION
+#   is left untouched).
+# GOTCHA — a SUCCESSFUL export OVERWRITES any inherited AGENT_BROWSER_SESSION (that is the
+#   point — "strip inherited AGENT_BROWSER_SESSION" collapses to one overwrite export).
+# GOTCHA — does NOT touch AGENT_BROWSER_SESSION_NAME (different feature; bash-external §6).
+# PRECONDITION: none (reads only $1; no config/init needed).
+pool_force_session() {
+    local lane="${1:-}"
+
+    # Validate lane: non-negative integer. `[[ ]] || return 1` is errexit-exempt.
+    # Bad lane (empty/non-numeric/negative) → return 1 WITHOUT exporting (do-no-harm).
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+
+    # Force the lane session. export VAR=val is ShellCheck-clean (no cmd-sub → no SC2155).
+    # Persists in the calling shell; inherited by the later exec.
+    export AGENT_BROWSER_SESSION="abpool-$lane"
+    return 0
+}

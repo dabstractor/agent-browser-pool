@@ -595,14 +595,14 @@
               "type": "Task",
               "id": "P1.M6.T2",
               "title": "Session override & arg stripping",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Strip any inherited --session flags and AGENT_BROWSER_SESSION env, then force abpool-<N> so the agent cannot bypass its lane.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T2.S1",
                   "title": "Strip --session flag + force AGENT_BROWSER_SESSION=abpool-<N>",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -626,7 +626,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T3.S1",
                   "title": "Wire complete lifecycle: dispatch → resolve → find/acquire → ensure → exec",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T1.S1",
