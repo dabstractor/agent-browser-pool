@@ -281,7 +281,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Lane Lifecycle Operations",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the low-level operations for creating and destroying lanes: btrfs CoW copy from master, Singleton lock cleanup, free TCP port discovery, Chrome launch with setsid + anti-throttle flags, CDP readiness wait, daemon connect, and process-group teardown. These are the building blocks the acquire/release flows orchestrate.",
           "tasks": [
             {
@@ -354,14 +354,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "Daemon connect & teardown primitives",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Connect the agent-browser daemon to a Chrome CDP endpoint, and tear down a Chrome process group cleanly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "agent-browser connect + verify + process group teardown",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -397,7 +397,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "flock critical section — reap-stale + reuse-orphan + choose-N + provisional claim",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S2",

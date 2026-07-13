@@ -1588,3 +1588,189 @@ pool_wait_cdp() {
     fi
     return 1
 }
+
+# =============================================================================
+# Lane lifecycle — daemon connect, verify & teardown (P1.M4.T3.S1)
+# =============================================================================
+# The three daemon/Chrome primitives of the pool: bind the shared agent-browser daemon
+# to a pooled Chrome (connect), check that binding SIDE-EFFECT-FREE (connected), and tear
+# down a Chrome's whole process tree idempotently (kill). Implements PRD §2.4 step 3i
+# (CONNECT), step 4 (ENSURE CONNECTED — stray-free), §2.5/§2.10 (release = kill pgroup),
+# §2.19 (kill -- -<pgid>), key_findings FINDING 6. Consumed by the acquire post-lock boot
+# (M5.T1.S2), ensure_connected (M5.T1.S3), release (M5.T2.S1), and the reaper (M5.T3.*).
+
+# pool_daemon_connect SESSION PORT
+#
+# Bind the agent-browser daemon session SESSION to the pooled Chrome on PORT by running
+# `$POOL_REAL_BIN --session "$SESSION" connect "$PORT"`. Returns the subprocess rc:
+# 0 on success (live chrome), 1 on failure (dead port / unreachable). NON-FATAL — never
+# pool_die; the caller (M5.T1.S2) owns the retry policy.
+#
+# LOGIC (CONTRACT 3a, HOST-VERIFIED research §1):
+#   - "$POOL_REAL_BIN" --session "$session" connect "$port" >/dev/null 2>&1
+#   - return its rc (connect to live chrome → rc 0 + binds; connect to dead port → rc 1,
+#     "All CDP discovery methods failed … Connection refused").
+#
+# CONSUMER: M5.T1.S2 acquire post-lock boot (PRD §2.4 step 3i), called right after
+#   pool_wait_cdp succeeds. M5.T3.S2 reuse_orphan (re-bind an adopted session). CONTRACT:
+#   rc 0 → session bound (caller writes connected:true); rc 1 → caller retries / drops.
+#   Caller MUST guard under set -e: `if pool_daemon_connect …; then …`.
+#
+# GOTCHA — connect to a DEAD port is a CLEAN rc 1 (HOST-VERIFIED, research §1): agent-browser
+#   prints "✗ All CDP discovery methods failed … Connection refused" and exits 1. It does
+#   NOT launch anything. So pool_daemon_connect is safe to call speculatively.
+# GOTCHA — connect is IDEMPOTENT / re-bindable (HOST-VERIFIED, research §1): re-running
+#   connect on an already-bound session + same-live-port returns rc 0 (re-binds). Safe to
+#   call in ensure_connected's reconnect path.
+# GOTCHA — the daemon auto-starts on the first command of a session (researcher finding 12);
+#   no explicit daemon-start is needed before connect.
+# GOTCHA — the daemon is SHARED (FINDING 4): SESSION is an isolated binding in the shared
+#   daemon; the pool's abpool-<N> namespace does not collide with existing manual sessions.
+# Reads ONLY POOL_REAL_BIN (frozen by pool_config_init). Writes nothing.
+# PRECONDITION: pool_config_init (for POOL_REAL_BIN).
+pool_daemon_connect() {
+    local session="${1:-}"
+    local port="${2:-}"
+
+    # Validate args (defensive, NON-FATAL rc 1 — never pool_die). `[[ ]] || return 1`
+    # is errexit-exempt.
+    [[ -n "$session" ]] || return 1
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    [[ -n "$POOL_REAL_BIN" ]] || return 1
+
+    # Bind. >/dev/null 2>&1 — we only care about the rc. The daemon auto-starts if needed.
+    # NOTE: do NOT add `|| true` here — we WANT to return the real rc (0 live / 1 dead).
+    # The `command ; return $?` form is set -e safe (the command's non-zero does not abort
+    # because it is the LAST statement before an explicit return; but be explicit):
+    "$POOL_REAL_BIN" --session "$session" connect "$port" >/dev/null 2>&1 || return 1
+    return 0
+}
+
+# pool_daemon_connected SESSION PORT
+#
+# Side-effect-free "is this lane's pooled Chrome connected/drivable?" check. Returns 0 if
+# BOTH (1) the daemon knows about SESSION and (2) the pooled Chrome on PORT answers CDP;
+# returns 1 otherwise. NON-FATAL — never pool_die, NEVER launches a Chrome.
+#
+# ⚠️ DEVIATES FROM THE LITERAL CONTRACT STEP 3b (research §2): the contract said
+#   `get cdp-url >/dev/null 2>&1`, but on agent-browser 0.28.0 `get cdp-url` on a
+#   disconnected/dead-chrome session AUTO-LAUNCHES a stray managed Chrome (verified: chrome
+#   count 61→67) and ALWAYS returns rc 0 — so it can never report "not connected" AND it
+#   leaks/strays. There is NO --no-launch flag (researcher confirmed). This function uses
+#   TWO read-only, non-launching probes instead (research §3 + §4).
+#
+# LOGIC (HOST-VERIFIED research §3/§4/§6):
+#   1. SESSION known to the daemon? `--json session list` is READ-ONLY (never launches);
+#      absent ⇒ fresh/restarted daemon ⇒ return 1.
+#   2. pooled Chrome on PORT alive? `curl -sf /json/version` never launches; dead ⇒ return 1
+#      (PRD §2.14 Chrome crash — the primary failure).
+#   3. both pass ⇒ return 0.
+#
+# WHY THE SIGNATURE ADDS PORT: the only reliable, stray-free signal for "connected" is the
+# pooled Chrome's liveness (curl), which needs the port. SESSION is still used (step 1).
+#
+# CONSUMER: M5.T1.S3 ensure_connected (the HOT PATH — every invocation). CONTRACT:
+#   rc 0 → lane drivable, proceed to exec; rc 1 → reconnect/relaunch. Recommended idiom:
+#     pool_daemon_connected "$session" "$port" || pool_daemon_connect "$session" "$port"
+#   ⚠️ This REPLACES the literal PRD §2.4 step 4 `get cdp-url || connect` (broken on 0.28.0).
+#   Also M5.T3.S2 reuse_orphan (is the orphan's chrome responsive?).
+#
+# GOTCHA — get cdp-url is FORBIDDEN here (research §2 auto-launch trap). Read-only probes only.
+# GOTCHA — session list is READ-ONLY but IMPRECISE after close (research §3): a session
+#   LINGERS in the list after a disconnect-only close, so "in list" ≠ "currently bound".
+#   Combined with the curl chrome-probe, the only imprecise case is right after a close
+#   (lingering session + still-alive chrome → returns 0). Per PRD §2.8 that is INTENDED
+#   ("next call reuses the same browser"); the §2.8 [OPEN — confirm] is M6.T1.S2's concern.
+# GOTCHA — NON-FATAL (return 0/1, never pool_die): same family as pool_wait_cdp.
+# GOTCHA — CALLERS under set -e MUST guard: `if pool_daemon_connected …; then …` or
+#   `pool_daemon_connected … || <reconnect>`.
+# Reads ONLY POOL_REAL_BIN (for `session list`). Writes nothing. Launches nothing.
+# PRECONDITION: pool_config_init (for POOL_REAL_BIN).
+pool_daemon_connected() {
+    local session="${1:-}"
+    local port="${2:-}"
+
+    # Validate args (defensive, NON-FATAL rc 1).
+    [[ -n "$session" ]] || return 1
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    [[ -n "$POOL_REAL_BIN" ]] || return 1
+
+    # (1) Is SESSION known to the daemon? `session list` is READ-ONLY (never launches —
+    #     research §3). `--json` → {"success":true,"data":{"sessions":[…]}}. jq -e exits 0
+    #     iff index($session) is non-null (session present). The `if !` is errexit-exempt;
+    #     a transient agent-browser/jq failure degrades to "not connected" (return 1) — SAFE
+    #     (caller reconnects). 2>/dev/null keeps stderr clean.
+    if ! "$POOL_REAL_BIN" --session "$session" --json session list 2>/dev/null \
+            | jq -e --arg s "$session" '.data.sessions | index($s)' >/dev/null 2>&1; then
+        return 1
+    fi
+
+    # (2) Is the pooled Chrome on PORT alive? curl /json/version is SIDE-EFFECT-FREE (never
+    #     launches — research §4). rc 0 = HTTP 200 = alive; non-zero = dead/unreachable.
+    #     `|| return 1` is errexit-exempt. curl -sf: -s silent, -f fail-on-HTTP-error.
+    curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1 || return 1
+
+    # (3) Session known + chrome alive ⇒ connected/drivable.
+    return 0
+}
+
+# pool_chrome_kill CHROME_PID CHROME_PGID
+#
+# Tear down a pooled Chrome's ENTIRE process tree idempotently: SIGTERM the process group,
+# wait briefly, SIGKILL the group, then a bare-pid fallback. Safe to call on already-dead
+# processes (every kill is `2>/dev/null || true`) and on provisional-lease args
+# (CHROME_PID=0 / CHROME_PGID=0 are skipped). Returns 0 ALWAYS (teardown must never fail
+# the caller). NON-FATAL — never pool_die. Does NOT touch the daemon session (Chrome-only).
+#
+# LOGIC (CONTRACT 3c, HOST-VERIFIED research §5):
+#   - Primary:  kill -- -"$chrome_pgid" 2>/dev/null || true       (SIGTERM the pgroup)
+#   - Wait:     sleep 0.5                                              (let stragglers exit)
+#   - Force:    kill -9 -- -"$chrome_pgid" 2>/dev/null || true       (SIGKILL the pgroup)
+#   - Fallback: kill   "$chrome_pid" 2>/dev/null || true             (bare pid, if pgid
+#               kill -9 "$chrome_pid" 2>/dev/null || true              missed the leader)
+#   Numeric guards: skip pgid/pid <= 0 (provisional lease) or non-numeric.
+#
+# CONSUMER: M5.T2.S1 release + M5.T3.S1 reap_stale (per-lane teardown, reading
+#   chrome_pid/chrome_pgid from the lease). CONTRACT: rc 0 always; the whole tree is gone
+#   (0 orphans) on return. Idempotent — safe in reap loops over many (possibly-dead) lanes.
+#
+# GOTCHA — kill on an ALREADY-DEAD target returns rc 1 (ESRCH) → ABORTS under set -e
+#   (lib/pool.sh line 17 `set -euo pipefail`). EVERY kill MUST be `… 2>/dev/null || true`.
+#   This IS the idempotency mechanism (no kill -0 pre-check). HOST-VERIFIED (research §5).
+# GOTCHA — `kill -- -<pgid>` needs the `--` (pgid is positive but the arg starts with '-').
+#   The negative-pid form signals the whole process group (renderer/GPU/utility children).
+#   PRD §2.19 + key_findings FINDING 6.
+# GOTCHA — numeric guards: a PROVISIONAL lease writes chrome_pid=0, chrome_pgid=0 (PRD §2.4
+#   step 3d). Guard `[[ =~ ^[0-9]+$ && -gt 0 ]]` so pool_chrome_kill 0 0 is a safe no-op.
+# GOTCHA — SIGTERM → sleep 0.5 → SIGKILL escalation is sound (research §5): Chrome responds
+#   to SIGTERM but renderer/GPU/utility children can lag; the 0.5 s grace then SIGKILL
+#   catches stragglers. Verified 0 orphans after escalation.
+# GOTCHA — the bare-pid fallback covers a pgid of 0 (provisional) OR a missed group leader;
+#   it is NOT a substitute for the group kill (which catches children the bare pid misses).
+# GOTCHA — Chrome-teardown ONLY: do NOT call `agent-browser --session <name> close` here.
+#   Daemon/session disconnect is the wrapper's close interception (M6.T1.S2) + release's
+#   lease-delete (M5.T2.S1). Scope: kill the Chrome tree.
+# GOTCHA — do NOT confuse with pool_wait_cdp's inline single-SIGKILL (M4.T2.S2, CDP-timeout
+#   cleanup). This is the CANONICAL thorough teardown for release/reap. They coexist; do
+#   NOT refactor pool_wait_cdp.
+# Reads NO globals (args only). Writes nothing. Returns 0 always.
+pool_chrome_kill() {
+    local chrome_pid="${1:-}"
+    local chrome_pgid="${2:-}"
+
+    # Primary + force: signal the PROCESS GROUP (negative pid). Numeric guard: skip
+    # non-numeric or <= 0 (provisional lease pgid=0). SIGTERM (default) → grace → SIGKILL.
+    if [[ "$chrome_pgid" =~ ^[0-9]+$ ]] && (( chrome_pgid > 0 )); then
+        kill -- -"$chrome_pgid" 2>/dev/null || true    # SIGTERM the whole pgroup
+        sleep 0.5                                     # let renderer/GPU/utility children exit
+        kill -9 -- -"$chrome_pgid" 2>/dev/null || true # SIGKILL any stragglers
+    fi
+
+    # Fallback: bare pid (covers pgid=0 / missed leader). Numeric guard as above.
+    if [[ "$chrome_pid" =~ ^[0-9]+$ ]] && (( chrome_pid > 0 )); then
+        kill   "$chrome_pid" 2>/dev/null || true      # SIGTERM the leader
+        kill -9 "$chrome_pid" 2>/dev/null || true      # SIGKILL the leader
+    fi
+
+    return 0
+}
