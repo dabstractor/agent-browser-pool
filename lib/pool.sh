@@ -2969,3 +2969,118 @@ pool_wait_for_lane() {
     _pool_log "pool_wait: exhausted — no free/reusable lane after ${POOL_WAIT}s + force-reap"
     return 1
 }
+
+# =============================================================================
+# Wrapper shim — command dispatch (P1.M6.T1.S1)
+# =============================================================================
+# PRD §2.4 step 0 dispatcher. Classify an agent-browser invocation as 'meta'
+# (passthrough — exec the real binary unchanged) or 'driving' (route to the agent's
+# locked lane). ECHOES 'meta' or 'driving' on stdout; returns 0 ALWAYS. Called by the
+# wrapper lifecycle (M6.T3.S1) as the VERY FIRST step, BEFORE owner resolution.
+
+# pool_dispatch_classify [--] ARGS...
+#
+# Walk $@ left→right, skipping leading flags to find the first non-flag token (the
+# command), then classify. Pure: reads NO globals, writes NO files, calls NO external
+# commands. stdout = EXACTLY one token ('meta'|'driving'). Returns 0 always.
+#
+# LOGIC (item contract steps a–e):
+#   a. Flag scan (first non-flag token = command):
+#        --help | -h | --version  → echo 'meta'; return 0   (short-circuit: always a
+#                                   help/version request — PRD §2.4 / external_deps §1.2 META)
+#        --session <X>            → shift 2 (space form: consume flag + value)
+#        --session=<X>            → shift 1 (equals form: value attached; caught by --*)
+#        --json | <any --flag>    → shift 1 (caught by --*)
+#        <any -shortflag except -h> → shift 1 (caught by -*)
+#        <non-flag>               → the COMMAND; break (peek next token for session-list)
+#   b. META classification:
+#        'session' + next=='list' → 'meta'   (two-word command; bare 'session' is DRIVING)
+#        cmd ∈ {skills, dashboard, plugin, mcp} → 'meta'
+#   c. EVERYTHING ELSE → 'driving'. Covers the DRIVING set
+#      (open/click/dblclick/type/fill/press/keyboard/hover/focus/check/uncheck/select/drag/
+#       upload/download/scroll/scrollintoview/wait/screenshot/pdf/snapshot/eval/connect/
+#       close/session/back/forward/reload/get/is/find — external_deps.md §1.1) AND
+#   d. unrecognized commands (contract step d: "default to 'driving' — let the real binary
+#      handle the error"). Because (c) and (d) BOTH yield 'driving', the DRIVING set is NOT
+#      enumerated in code — detecting META + defaulting the rest is identical and stays
+#      correct as agent-browser adds driving commands (mouse, react, …).
+#   e. No command found (only flags / empty $@) → 'driving' (default, step d).
+#
+# CONSUMERS: M6.T3.S1 wrapper lifecycle step 0; unit tests (M9).
+#
+# GOTCHA — return 0 ALWAYS. No failure mode ⇒ the caller's
+#   `class="$(pool_dispatch_classify "$@")"` is set -e-safe with NO guard (unlike
+#   pool_lease_find_mine which returns 1 on no-match and REQUIRES an `if` guard).
+# GOTCHA — NO precondition. Callable BEFORE pool_config_init / pool_owner_resolve (dispatch
+#   is PRD §2.4 STEP 0, before owner resolution step 1). Reads NO POOL_* globals. This also
+#   makes it unit-testable with zero fixtures.
+# GOTCHA — the loop guard `while (( $# > 0 ))` is a CONDITION (errexit-exempt). A BARE
+#   `(( expr ))` statement whose value is 0 returns rc 1 and ABORTS under set -e
+#   (lib/pool.sh:362-364). Shift-based iteration (NO index counter) avoids the
+#   `(( i++ ))`-returns-0 trap entirely.
+# GOTCHA — `shift 2 || shift` for --session: the `||`-list is errexit-exempt; tolerates a
+#   trailing --session with no value (shift 2 fails → shift consumes just --session).
+# GOTCHA — 'session list' (two-word) is META; bare 'session' is DRIVING. The lookahead
+#   peeks the token immediately after the command (`next="${2:-}"`). session ∈ DRIVING so
+#   'session <other>' → 'driving' via the default.
+# GOTCHA — SCOPE: CLASSIFIES ONLY. Does NOT intercept 'close --all' / normalize 'connect'
+#   (M6.T1.S2), strip '--session' / force AGENT_BROWSER_SESSION (M6.T2.S1), or wire the
+#   lifecycle (M6.T3.S1). Here connect & close simply classify 'driving'.
+# PRECONDITION: none. The function is pure.
+pool_dispatch_classify() {
+    local tok cmd next
+    cmd=""
+    while (( $# > 0 )); do
+        tok="$1"
+        case "$tok" in
+            --help|-h|--version)
+                printf 'meta\n'
+                return 0
+                ;;
+            --session)
+                # Space form: consume the flag AND its value. `|| shift` tolerates a
+                # trailing --session with no value (shift 2 fails → shift 1). The `||`
+                # list is errexit-exempt.
+                shift 2 || shift
+                ;;
+            --*)
+                # Any other long flag: --json, --session=X (equals form), --headed, …
+                shift
+                ;;
+            -*)
+                # Any short flag except -h (caught above): -i, -c, -d, -p, -v, -q, …
+                shift
+                ;;
+            *)
+                # First non-flag token = the command. Peek the next token (for the
+                # 'session list' two-word META command) and stop scanning.
+                cmd="$1"
+                next="${2:-}"
+                break
+                ;;
+        esac
+    done
+
+    # No command token found (only flags / empty $@) → default 'driving' (contract step d).
+    if [[ -z "$cmd" ]]; then
+        printf 'driving\n'
+        return 0
+    fi
+
+    # META classification. (The DRIVING set + unrecognized commands all fall through to
+    # the default 'driving' below — contract steps c & d.)
+    if [[ "$cmd" == session && "$next" == list ]]; then
+        printf 'meta\n'
+        return 0
+    fi
+    case "$cmd" in
+        skills|dashboard|plugin|mcp)
+            printf 'meta\n'
+            return 0
+            ;;
+    esac
+
+    # Everything else → 'driving' (DRIVING set + unrecognized; contract c & d).
+    printf 'driving\n'
+    return 0
+}
