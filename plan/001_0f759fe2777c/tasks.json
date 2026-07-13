@@ -313,14 +313,14 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Port allocation & Chrome launch",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Find a free TCP port in the pool range, launch Chrome with setsid and anti-throttle flags, and wait for the CDP endpoint.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T2.S1",
                   "title": "find_free_port() — lowest free TCP port in pool range",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
@@ -335,7 +335,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S2",
                   "title": "Chrome launch with setsid + anti-throttle + CDP readiness wait",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"

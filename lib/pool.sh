@@ -1310,3 +1310,107 @@ pool_copy_master() {
 
     return 0
 }
+
+# =============================================================================
+# Lane lifecycle — port allocation (P1.M4.T2.S1)
+# =============================================================================
+# Select the lowest free TCP port in [POOL_PORT_BASE, POOL_PORT_BASE+POOL_PORT_RANGE)
+# for a freshly-claimed lane's Chrome to bind. Implements PRD §2.4 step 3f ("PORT: lowest
+# free TCP port in [BASE, BASE+RANGE); probe via curl /json/version") + §2.3 (the
+# 3-stage free test). Consumed by the acquire POST-LOCK boot (M5.T1.S2: copy → port →
+# launch → connect → update lease), OUTSIDE the flock critical section (key_findings
+# FINDING 2 — concurrent boots; selection is BEST-EFFORT: the launch in M4.T2.S2 is the
+# authoritative bind and retries on EADDRINUSE).
+
+# pool_find_free_port
+#
+# Echo the lowest free TCP port in [POOL_PORT_BASE, POOL_PORT_BASE+POOL_PORT_RANGE) and
+# return 0; return 1 if the whole range is occupied (exhaustion — non-fatal, ~impossible
+# with the default 1000-port range). A port is "free" when ALL of:
+#   1. NOT claimed by any live lease's .port      (provisional port=0 claims do NOT count)
+#   2. NOT shown listening by `ss -tlnH`          (any OS listener)
+#   3. NOT answering curl /json/version           (a live non-pool Chrome on that port)
+#
+# LOGIC (CONTRACT 3a→3c):
+#   a. Build a claimed-port set from lanes/*.json (compose pool_lanes_list +
+#      pool_lease_field); skip port<=0 / non-numeric (PRD §2.4 step 3d provisional = 0).
+#   b. Capture `ss -tlnH` ONCE (netlink is more expensive than a grep fork; mirrors
+#      pool_lane_is_stale's "ONE jq fork" principle). Loop BASE..BASE+RANGE-1:
+#        - skip if claimed (O(1) assoc-array lookup)
+#        - skip if `:$port ` (trailing space = word boundary) appears in the snapshot
+#        - skip if curl /json/version responds (live CDP endpoint)
+#        - first pass → echo + return 0.
+#   c. none free → return 1 (NOT pool_die — recoverable; caller → M5.T4 exhaustion flow).
+#
+# CONSUMER: M5.T1.S2 acquire post-lock boot. CONTRACT: rc 0 → stdout is the port to bind;
+#   rc 1 → range exhausted, caller must handle (block/force-reap/alert). Caller MUST guard
+#   under set -e: `if port="$(pool_find_free_port)"; then …`.
+#
+# GOTCHA — provisional leases carry port=0 (PRD §2.4 step 3d): the claimed-set builder
+#   filters `[[ =~ ^[0-9]+$ && -gt 0 ]]`, so a mid-acquire lane does NOT reserve a port.
+#   HOST-VERIFIED (research §3, scenario 2).
+# GOTCHA — the ss regex NEEDS the trailing space (`:$port `): it is the local-addr /
+#   peer-addr separator → the word boundary. Without it `:5342` would match `:53420`.
+#   IPv6-safe ([::]:9222 still has ':9222 '). Plain grep -q (literal) — port is numeric.
+#   HOST-VERIFIED (research §1).
+# GOTCHA — capture ss ONCE, not per-port: the contract writes the ss|grep inside the loop;
+#   ss is a netlink call (slower than grep). We snapshot once and grep the captured text.
+#   `|| true` degrades a transient ss failure to an empty snapshot (curl still guards).
+#   HOST-VERIFIED (research §2).
+# GOTCHA — curl --max-time 2 is DEFENSIVE: connection-refused (rc 7) is INSTANT, so this
+#   adds zero latency for free ports; it only bounds a pathological DROP-style filtered
+#   port. -f makes a 404 responder non-zero, but such a responder is ALREADY caught by the
+#   ss check (it IS listening) — curl only runs for ss-free ports → it's the live race
+#   guard. HOST-VERIFIED (research §4).
+# GOTCHA — NEVER pool_die on exhaustion: rc 1 (non-fatal query), same family as
+#   pool_lease_read / pool_lease_find_mine. Caller MUST guard under set -e. (research §6).
+# GOTCHA — this is the FIRST `local -A` (associative array) in the codebase: the idiomatic
+#   O(1) fork-free "set" for the claimed-port membership test inside a ≤1000-iteration
+#   loop. bash 4+ (already required by mapfile/declare -g). (research §3).
+# GOTCHA — TOCTOU tolerated: runs OUTSIDE the flock (FINDING 2); two acquires can both
+#   pick the same port — the launch (M4.T2.S2) is authoritative + retries on EADDRINUSE.
+#   (research §5).
+# Reads ONLY POOL_PORT_BASE + POOL_PORT_RANGE (frozen by pool_config_init) + the lease
+# JSON (via pool_lanes_list/pool_lease_field). Writes nothing. No new globals/env-vars.
+# PRECONDITION: pool_config_init (for POOL_PORT_BASE/RANGE + POOL_LANES_DIR via helpers).
+pool_find_free_port() {
+    local port p n listeners
+    local -A claimed=()
+
+    # (a) Build the claimed-port set. Compose the LANDED readers (pool_lanes_list +
+    #     pool_lease_field) — same enumeration pattern as pool_lease_find_mine. Skip
+    #     port<=0 / non-numeric: a PROVISIONAL claim writes port=0 (PRD §2.4 step 3d)
+    #     and must NOT reserve a port. `|| continue` keeps a corrupt/missing lease from
+    #     aborting the scan (pool_lease_field returns 1, silent). assoc-array assignment
+    #     is errexit-safe.
+    for n in $(pool_lanes_list); do
+        p="$(pool_lease_field "$n" port 2>/dev/null)" || continue
+        [[ "$p" =~ ^[0-9]+$ && "$p" -gt 0 ]] && claimed["$p"]=1
+    done
+
+    # Snapshot the listening sockets ONCE (not per-port). `|| true` so a transient ss
+    # failure (missing binary / permission) degrades to an empty snapshot — the per-port
+    # curl below is the live check that still guards.
+    listeners="$(ss -tlnH 2>/dev/null || true)"
+
+    # (b) Lowest free port in [BASE, BASE+RANGE). POOL_PORT_BASE/RANGE are validated
+    #     uints (pool_config_init) → safe in (( )). Each skip is errexit-exempt
+    #     (`[[ ]] || continue`, `grep … && continue`, `if curl …; then continue; fi`).
+    for (( port = POOL_PORT_BASE; port < POOL_PORT_BASE + POOL_PORT_RANGE; port++ )); do
+        # 1. claimed by a live lease? (O(1) assoc lookup; ${:-} is safe for unset keys)
+        [[ -z "${claimed[$port]:-}" ]] || continue
+        # 2. OS listener? (`:$port ` trailing space = word boundary; literal grep)
+        grep -q ":$port " <<<"$listeners" && continue
+        # 3. live CDP endpoint? (a non-pool Chrome answering /json/version). -f fails on
+        #    HTTP>=400; --max-time bounds a DROP-style filter (connection-refused is
+        #    instant). 2>&1 + >/dev/null = fully silent.
+        if curl -sf --max-time 2 "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
+            continue
+        fi
+        printf '%s\n' "$port"
+        return 0
+    done
+
+    # (c) Exhausted — rc 1, NOT pool_die. Caller handles via M5.T4 (block/force-reap/alert).
+    return 1
+}
