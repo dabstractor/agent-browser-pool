@@ -3914,3 +3914,320 @@ pool_admin_release() {
         return 1
     fi
 }
+
+# ============================================================================
+# Admin CLI — doctor (P1.M7.T4.S1)
+# ============================================================================
+# pool_admin_doctor
+#
+# PRD §2.12 `doctor` ("reconcile leases vs live Chromes vs dirs; report leaks") +
+# §2.16 ("verify all dependencies present at runtime"). The USER-FACING diagnostic
+# for `agent-browser-pool doctor`. NO input. READ-ONLY: probes six subsystems, prints
+# a sectioned report, returns rc 0/1. Changes NOTHING on disk (unlike reap/release).
+#
+# LOGIC (CONTRACT a→g):
+#   a. DEPS        — command -v each required dep {flock, setsid, pgrep, pkill, cp,
+#                    curl, jq} + the Chrome binary ($POOL_CHROME_BIN, name-or-path) +
+#                    the OPTIONAL notify-send. Required MISSING → FAIL; notify-send
+#                    MISSING → "(optional)", NOT counted.
+#   b. REAL BIN    — $POOL_REAL_BIN is a regular file + executable → OK / FAIL.
+#   c. FS          — btrfs at $POOL_EPHEMERAL_ROOT (findmnt -T) → OK; non-btrfs +
+#                    POOL_ALLOW_SLOW_COPY==1 → WARN; non-btrfs + no-slow-copy → FAIL.
+#   d. MASTER      — $POOL_MASTER_DIR exists + non-empty (-d + ls -A) → OK / FAIL.
+#   e. RECONCILE LANES — per lease (pool_lanes_list): ephemeral_dir missing → LEAK;
+#                    dead chrome_pid → LEAK; port not listening (curl /json/version) →
+#                    DISCONNECTED. Each = WARN. A provisional lease (port=0) → ONE WARN
+#                    "PROVISIONAL" and the three checks are SKIPPED.
+#   f. RECONCILE DIRS  — per numeric dir in $POOL_EPHEMERAL_ROOT: no matching lease →
+#                    ORPHAN DIR = WARN.
+#   g. SUMMARY     — print "OK=N  WARN=N  FAIL=N" + verdict; return 1 if fail>0 else 0.
+#
+# SEVERITY MODEL (FAIL = blocking infra; WARN = recoverable lane/dir cruft):
+#   FAIL (exit 1): missing required dep; $POOL_REAL_BIN not executable; non-btrfs (no
+#                  slow-copy); master missing/empty.
+#   WARN (exit 0): non-btrfs + slow-copy; LEAK (no dir / dead chrome); DISCONNECTED;
+#                  ORPHAN DIR; PROVISIONAL lease; corrupt/unreadable lease.
+#   (not counted): notify-send MISSING (optional).
+# Rationale: infra problems BLOCK correct pool operation → FAIL; lane/dir cruft is
+#   EXACTLY what reap/release recover from → WARN. doctor = "FAIL = fix setup; WARN =
+#   run reap/release." Precedent: brew doctor (advisory vs hard), git fsck (non-zero).
+#
+# OUTPUT (ALL to stdout — capturable):
+#   [dependencies]
+#     <dep>           OK | MISSING            (MISSING = FAIL, except notify-send)
+#     chrome (<bin>)  OK | MISSING
+#     notify-send     OK | MISSING (optional)
+#   [binary]
+#     <POOL_REAL_BIN> OK | MISSING (not executable)
+#   [filesystem]
+#     <EPHEMERAL_ROOT> OK (btrfs) | WARN (<fs>; slow-copy allowed) | FAIL (<fs>; not btrfs)
+#   [master]
+#     <MASTER_DIR>    OK | FAIL (missing or empty)
+#   [lanes]
+#     lane <N>   OK | WARN (LEAK(no dir); LEAK(dead chrome); DISCONNECTED) | WARN (PROVISIONAL)
+#     (no active leases)   ← empty pool
+#   [dirs]
+#     <dir>      WARN (ORPHAN DIR: no lease)
+#     (no ephemeral dirs) | (N dir(s), all leased)
+#   [summary]
+#     OK=N  WARN=N  FAIL=N
+#     Healthy. | Problems found.
+#
+# CONTRACT:
+#   - NON-FATAL probing (THE key constraint): pool_die (lib/pool.sh:30) is `exit 1`
+#     (uncatchable). pool_check_btrfs (lib/pool.sh:230) + pool_check_master
+#     (lib/pool.sh:266) BOTH pool_die on the failures doctor must DETECT+REPORT —
+#     calling them would abort doctor on the FIRST problem before the summary prints.
+#     So doctor REPLICATES their detection NON-fatally (findmnt -T / -d + ls -A) with
+#     if/else instead of pool_die. This is the ONE place doctor does NOT compose the
+#     landed helpers.
+#   - READ-ONLY: doctor changes NOTHING. It is a diagnostic, not a recovery tool.
+#     Recovery is reap/release (the admin decides from doctor's output).
+#   - NEVER pool_die in the body (report, don't die). The ONLY pool_die-capable calls
+#     are the precondition pool_config_init/pool_state_init (rc-0-or-pool_die on genuine
+#     misconfiguration — correct; matches status/reap/release).
+#   - RETURN CODES: rc 0 iff fail==0; rc 1 iff fail>0. WARN NEVER affects rc.
+#
+# set -e GUARDS (all live — set -euo pipefail at lib/pool.sh:18 [NOT 23 — sibling
+# comments citing :23 are STALE]):
+#   - command -v returns 1 on an ABSENT dep → a BARE call ABORTS. ALWAYS inside
+#     `if command -v …; then …; else …; fi`.
+#   - pool_lease_read returns rc 1 on missing/corrupt → a BARE capture ABORTS. ALWAYS
+#     `if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then …; continue; fi`.
+#   - pool_lease_exists returns rc 1 (no lease) → ALWAYS `if ! pool_lease_exists …; then`.
+#   - findmnt / curl / ls exit non-zero (missing path / closed port / empty dir) →
+#     `|| true` (findmnt, inside $()) or `if`/`if !` (curl, ls -A inside [[ ]]).
+#   - `(( ))` ONLY inside `if`/`&&`/`||` (a BARE `(( ))` statement returns 1 when the
+#     value is 0 → FATAL). `$(( ))` expansion (`ok=$((ok+1))`) is ALWAYS safe.
+#   - never `local x="$(…)"` (SC2155); declare then assign. (`local ok=0` literal is safe.)
+#   - nullglob NOT set → a no-match glob "$POOL_EPHEMERAL_ROOT/*/" is its literal →
+#     `[[ -d "$d" ]] || continue`.
+#
+# PRECONDITION: pool_config_init (globals) + pool_state_init (mkdir POOL_LANES_DIR).
+#   Both rc-0-or-pool_die (a misconfigured pool fails loudly — correct). No guard.
+# CONSUMERS: M7.T5.S1 bin/agent-browser-pool dispatcher: `case doctor) pool_admin_doctor ;;`.
+# SUGGESTED --help (for M7.T5.S1 to wire; NOT wired by this task):
+#   "  doctor                 diagnose the pool: deps, fs, master, reconcile leases/Chromes/dirs"
+pool_admin_doctor() {
+    # Declare ALL locals up front (SC2155: never `local x="$(…)"`). `ok/warn/fail` are
+    # literal-initialized (safe); every `$(…)` capture is declared-then-assigned below.
+    local ok=0 warn=0 fail=0
+    local fstype dep chrome_present chrome_label dir_count orphan_count
+    local -a lanes fields
+    local lane json ephemeral_dir chrome_pid port findings
+    local d base
+
+    # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
+    # Mirrors pool_admin_status (lib/pool.sh:3616) + pool_admin_reap + pool_admin_release.
+    pool_config_init
+    pool_state_init
+
+    # =========================================================================
+    # [dependencies] — command -v each required dep + chrome (name-or-path) + notify-send
+    # =========================================================================
+    printf '[dependencies]\n'
+    # Required PATH deps. `command -v` is POSIX-standard + the codebase idiom
+    # (_pool_alert lib/pool.sh:2824); preferred over `which` (ShellCheck SC2230).
+    # rc 1 (absent) MUST be inside `if` (a bare call ABORTS under set -e).
+    for dep in flock setsid pgrep pkill cp curl jq; do
+        if command -v "$dep" >/dev/null 2>&1; then
+            printf '  %-22s OK\n' "$dep"
+            ok=$((ok+1))
+        else
+            printf '  %-22s MISSING\n' "$dep"
+            fail=$((fail+1))
+        fi
+    done
+    # Chrome — $POOL_CHROME_BIN (configurable via $AGENT_CHROME_BIN; default
+    # google-chrome-stable). name-or-path branch (pool_config_init lib/pool.sh:152-174):
+    # a path → -f + -x; a bare name → command -v. Checking the LITERAL "google-chrome-stable"
+    # would FALSE-alarm on a chromium override.
+    chrome_label="$POOL_CHROME_BIN"
+    if [[ "$POOL_CHROME_BIN" == */* ]]; then
+        if [[ -f "$POOL_CHROME_BIN" && -x "$POOL_CHROME_BIN" ]]; then
+            chrome_present=1
+        else
+            chrome_present=0
+        fi
+    else
+        if command -v "$POOL_CHROME_BIN" >/dev/null 2>&1; then
+            chrome_present=1
+        else
+            chrome_present=0
+        fi
+    fi
+    if (( chrome_present )); then
+        printf '  %-22s OK\n' "chrome ($chrome_label)"
+        ok=$((ok+1))
+    else
+        printf '  %-22s MISSING\n' "chrome ($chrome_label)"
+        fail=$((fail+1))
+    fi
+    # notify-send — OPTIONAL (PRD §2.16; _pool_alert guards it lib/pool.sh:2824).
+    # Absence is NOT a FAIL (and NOT a WARN) — it is genuinely fine to lack it.
+    if command -v notify-send >/dev/null 2>&1; then
+        printf '  %-22s OK\n' "notify-send"
+        ok=$((ok+1))
+    else
+        printf '  %-22s MISSING (optional)\n' "notify-send"
+    fi
+
+    # =========================================================================
+    # [binary] — $POOL_REAL_BIN exists + executable
+    # =========================================================================
+    printf '[binary]\n'
+    if [[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]; then
+        printf '  %-22s OK\n' "$POOL_REAL_BIN"
+        ok=$((ok+1))
+    else
+        printf '  %-22s FAIL (missing or not executable)\n' "$POOL_REAL_BIN"
+        fail=$((fail+1))
+    fi
+
+    # =========================================================================
+    # [filesystem] — btrfs at $POOL_EPHEMERAL_ROOT (REPLICATE pool_check_btrfs NON-fatally)
+    # =========================================================================
+    # pool_check_btrfs (lib/pool.sh:230) pool_die's on non-btrfs — doctor must NOT call
+    # it (would abort before the summary). Replicate its findmnt -T primitive non-fatally.
+    # `-T` is MANDATORY (pool_check_btrfs GOTCHA @217-221; a bare findmnt "$dir" matches
+    # SOURCE not the mount tree and exits 1 even on btrfs). `|| true` neutralizes a
+    # missing-path exit-1 → fstype becomes "" → "not btrfs".
+    printf '[filesystem]\n'
+    fstype="$(findmnt -nno FSTYPE -T "$POOL_EPHEMERAL_ROOT" 2>/dev/null || true)"
+    if [[ "$fstype" == "btrfs" ]]; then
+        printf '  %-22s OK (btrfs)\n' "$POOL_EPHEMERAL_ROOT"
+        ok=$((ok+1))
+    elif [[ "$POOL_ALLOW_SLOW_COPY" == "1" ]]; then
+        # Non-btrfs but slow-copy allowed → degraded-but-functional (real 4.8 GB copy per
+        # acquire) → WARN. (pool_check_btrfs allows this path too.)
+        printf '  %-22s WARN (%s; slow-copy allowed)\n' "$POOL_EPHEMERAL_ROOT" "${fstype:-unknown}"
+        warn=$((warn+1))
+    else
+        printf '  %-22s FAIL (%s; not btrfs)\n' "$POOL_EPHEMERAL_ROOT" "${fstype:-unknown}"
+        fail=$((fail+1))
+    fi
+
+    # =========================================================================
+    # [master] — $POOL_MASTER_DIR exists + non-empty (REPLICATE pool_check_master NON-fatally)
+    # =========================================================================
+    # pool_check_master (lib/pool.sh:266) pool_die's on missing/empty — doctor must NOT
+    # call it. Replicate its -d + ls -A primitive non-fatally (no stat/du of the 4.8 GB
+    # master). `ls -A` inside `[[ -n "$(...)" ]]` is errexit-exempt; 2>/dev/null handles
+    # a missing dir.
+    printf '[master]\n'
+    if [[ -d "$POOL_MASTER_DIR" ]] && [[ -n "$(ls -A "$POOL_MASTER_DIR" 2>/dev/null)" ]]; then
+        printf '  %-22s OK\n' "$POOL_MASTER_DIR"
+        ok=$((ok+1))
+    else
+        printf '  %-22s FAIL (missing or empty)\n' "$POOL_MASTER_DIR"
+        fail=$((fail+1))
+    fi
+
+    # =========================================================================
+    # [lanes] — reconcile each lease: dir present? chrome alive? port listening?
+    # =========================================================================
+    # Mirror pool_admin_status's snapshot (lib/pool.sh:3631) + per-lane read guard
+    # (lib/pool.sh:3638) + ONE-fork jq extraction (lib/pool.sh:3650). pool_lanes_list
+    # rc-0-always; process-sub exit not propagated → set -e safe; empty output → empty
+    # array.
+    printf '[lanes]\n'
+    mapfile -t lanes < <(pool_lanes_list)
+    if (( ${#lanes[@]} == 0 )); then
+        # `(( ))` INSIDE `if` (bare @0 is FATAL under set -e).
+        printf '  (no active leases)\n'
+    else
+        for lane in "${lanes[@]}"; do
+            # pool_lease_read rc 1 (missing/corrupt) → MUST guard `if !` (bare ABORTS).
+            if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+                printf '  lane %-6s WARN (corrupt or unreadable lease)\n' "$lane"
+                warn=$((warn+1))
+                continue
+            fi
+            # ONE jq fork (mirror status): ephemeral_dir (str), chrome_pid (num), port (num).
+            # `:-` defends a short read. jq -r echoes numbers as digit strings (fine for
+            # /proc/$chrome_pid and the curl $port interpolation).
+            mapfile -t fields < <(jq -r '.ephemeral_dir, .chrome_pid, .port' <<<"$json")
+            ephemeral_dir="${fields[0]:-}"
+            chrome_pid="${fields[1]:-}"
+            port="${fields[2]:-}"
+            findings=""
+            # Provisional lease (port not a positive integer) → incomplete acquire that was
+            # NOT cleaned up. Skip the three checks (they'd spuriously triple-flag a
+            # port=0/chrome=0 lease). A persistent provisional lease is itself a leak → WARN.
+            # `[[ ]] && (( ))` in a `&&` list is errexit-exempt; `(( ))` only runs if the
+            # regex matched (short-circuit) → safe.
+            if [[ "$port" =~ ^[0-9]+$ ]] && (( port > 0 )); then
+                # (1) dir present? `[[ ]] || findings+=` : test true → skip; false → append.
+                [[ -d "$ephemeral_dir" ]] || findings+='LEAK(no dir); '
+                # (2) chrome alive? codebase idiom [[ -d /proc/$pid ]] (pool_owner_alive
+                # @636). A booted lane should have chrome_pid>0; 0/invalid → LEAK.
+                if [[ "$chrome_pid" =~ ^[0-9]+$ ]] && (( chrome_pid > 0 )); then
+                    [[ -d "/proc/$chrome_pid" ]] || findings+='LEAK(dead chrome); '
+                else
+                    findings+='LEAK(invalid chrome_pid); '
+                fi
+                # (3) port listening? curl /json/version SIDE-EFFECT-FREE (pool_daemon_connected
+                # @1711). --max-time 2 bounds a hung port (pool_find_free_port @1407). rc !=0
+                # → DISCONNECTED.
+                if curl -sf --max-time 2 "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
+                    :
+                else
+                    findings+='DISCONNECTED; '
+                fi
+                if [[ -z "$findings" ]]; then
+                    printf '  lane %-6s OK\n' "$lane"
+                    ok=$((ok+1))
+                else
+                    # Strip the trailing "; " (the `%` removes the shortest suffix match).
+                    printf '  lane %-6s WARN (%s)\n' "$lane" "${findings%; }"
+                    warn=$((warn+1))
+                fi
+            else
+                printf '  lane %-6s WARN (PROVISIONAL; incomplete acquire)\n' "$lane"
+                warn=$((warn+1))
+            fi
+        done
+    fi
+
+    # =========================================================================
+    # [dirs] — orphan detection: per numeric dir in $POOL_EPHEMERAL_ROOT, no lease → ORPHAN
+    # =========================================================================
+    # nullglob NOT set → a no-match glob "$POOL_EPHEMERAL_ROOT/*/" is its literal → `[[ -d ]]
+    # || continue` rejects it (+ files + subdirs). Numeric basename filter mirrors
+    # pool_lanes_list's ^[0-9]+$ test. pool_lease_exists rc 1 (no lease) → MUST `if !`.
+    printf '[dirs]\n'
+    dir_count=0
+    orphan_count=0
+    if [[ -d "$POOL_EPHEMERAL_ROOT" ]]; then
+        for d in "$POOL_EPHEMERAL_ROOT"/*/; do
+            [[ -d "$d" ]] || continue
+            base="${d%/}"           # strip trailing slash
+            base="${base##*/}"      # basename
+            [[ "$base" =~ ^[0-9]+$ ]] || continue
+            dir_count=$((dir_count+1))
+            if ! pool_lease_exists "$base"; then
+                printf '  %-22s WARN (ORPHAN DIR: no lease)\n' "$d"
+                orphan_count=$((orphan_count+1))
+                warn=$((warn+1))
+            fi
+        done
+    fi
+    if (( dir_count == 0 )); then
+        printf '  (no ephemeral dirs)\n'
+    elif (( orphan_count == 0 )); then
+        printf '  (%d dir(s), all leased)\n' "$dir_count"
+    fi
+
+    # =========================================================================
+    # [summary] — counts + verdict + return code
+    # =========================================================================
+    printf '[summary]\n'
+    printf '  OK=%d  WARN=%d  FAIL=%d\n' "$ok" "$warn" "$fail"
+    # `(( ))` INSIDE `if` (bare @0 would be FATAL). WARN never affects rc.
+    if (( fail > 0 )); then
+        printf '  Problems found.\n'
+        return 1
+    fi
+    printf '  Healthy.\n'
+    return 0
+}
