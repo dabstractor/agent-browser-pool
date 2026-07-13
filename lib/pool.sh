@@ -1051,3 +1051,59 @@ pool_lease_find_mine_any() {
     done
     return 1
 }
+
+# =============================================================================
+# Lease management — query operations (P1.M3.T2.S2)
+# =============================================================================
+# Lane allocation: the lowest-free-lane probe. Implements PRD §2.4 step 3c
+# ("CHOOSE N: lowest N≥1 with no active/<N> dir and no lanes/<N>.json lease").
+# A pure, read-only numeric probe; composes NOTHING below it (it does not call
+# pool_lease_exists, pool_lanes_list, or any M3.T2.S1 function). Reads only the two
+# frozen pool_config_init globals. Consumed by the acquire flock critical section
+# (M5.T1.S1 step 3c).
+
+# pool_find_free_lane
+#
+# Walk N = 1, 2, 3, … (lanes are UNBOUNDED — created on demand, PRD §2.4). Echo the
+# first N where BOTH the ephemeral dir is absent AND the lease file is absent, and
+# return 0. ALWAYS echoes a value and returns 0 — there is no "no free lane" failure
+# state (the live-agent count is finite, so the probe terminates at ≈ live-count+1;
+# reap_stale at step 3a has already removed dead-owner lanes before this runs at 3c).
+#
+# CONSUMER: M5.T1.S1 acquire step 3c, INSIDE the caller's flock on $POOL_LOCK_FILE.
+#   Because this function always returns 0, a bare `N="$(pool_find_free_lane)"` is
+#   set -e SAFE (no `if` guard needed) — unlike pool_lease_find_mine (returns 1).
+#
+# WHY TWO CHECKS (dir AND lease — research §0/§7): checking only the lease would miss
+# an orphaned ephemeral dir (a Chrome still running after its lease was deleted, or a
+# crash between `cp -a` and pool_lease_write). Checking only the dir would miss the
+# provisional-claim window (lease written at step 3d, dir copied at 3e — both inside
+# the same flock, so a second serialized acquirer must skip lane N). BOTH must be
+# absent for a lane to be free.
+# WHY [[ -f ]] NOT pool_lease_exists (research §3): pool_lease_exists returns 1 (free)
+# on a CORRUPT lease (jq-empty parse fails), which would let us reuse a lane whose
+# Chrome may still be live (reap skipped it — couldn't read owner.pid) → COLLISION.
+# [[ -f ]] treats a present-but-corrupt file as occupied (safe; just skips that N).
+# It is also cheaper (no jq fork) inside the lock.
+# GOTCHA — for (( n=1; ; n++ )): the empty middle condition is the canonical
+# "loop forever"; its condition slot is NOT a statement, so errexit never fires on it.
+# (A bare `(( n++ ))` STATEMENT would return 1 when n was 0 and ABORT under set -e —
+# same trap as _pool_age_str's (( )) blocks; the for-form sidesteps it.)
+# GOTCHA — no hard cap: do NOT add `n <= MAX`. The contract is "lowest N≥1, increment"
+# with no bound. Pool EXHAUSTION (PRD §2.9) is M5.T4's concern (external timeout around
+# the whole acquire), not this function's.
+# GOTCHA — missing parents are fine: if POOL_EPHEMERAL_ROOT/POOL_LANES_DIR don't exist
+# yet, [[ -d "$POOL_EPHEMERAL_ROOT/1" ]] is simply false → N=1 is free. Read-only:
+# never mkdirs.
+# GOTCHA — junk immunity: a stray foo.json / sub.json/ subdir is never tested (the
+# probe is purely numeric N=1,2,3,…), unlike pool_lanes_list which globs and filters.
+# PRECONDITION: pool_config_init (for the ABSOLUTE POOL_EPHEMERAL_ROOT + POOL_LANES_DIR).
+pool_find_free_lane() {
+    local n
+    for (( n = 1; ; n++ )); do
+        if [[ ! -d "$POOL_EPHEMERAL_ROOT/$n" && ! -f "$POOL_LANES_DIR/$n.json" ]]; then
+            printf '%s\n' "$n"
+            return 0
+        fi
+    done
+}
