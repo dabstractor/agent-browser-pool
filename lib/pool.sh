@@ -4231,3 +4231,72 @@ pool_admin_doctor() {
     printf '  Healthy.\n'
     return 0
 }
+
+# ============================================================================
+# Admin CLI — help (P1.M7.T5.S1)
+# ============================================================================
+# pool_admin_help
+#
+# The USER-FACING help for `agent-browser-pool --help|-h|help` (PRD §2.12 / §2.15
+# transparency — Mode A: this output IS the documentation for the admin tool). NO
+# input. Prints usage for every subcommand + the configuration env vars to STDOUT,
+# then returns 0. Read by the bin/agent-browser-pool dispatcher's
+# `case --help|-h|help) pool_admin_help ;;` branch.
+#
+# DESIGN (the KEY differentiators from the four admin siblings):
+#   - PURE: reads NO global, touches NO disk, does NO $(…). Unlike status/reap/
+#     release/doctor (each calls pool_config_init + pool_state_init as step "a"),
+#     help is documentation only — it MUST NOT depend on init. (The dispatcher's
+#     verbatim init-before-case already ensures globals exist on a normal host; this
+#     function itself stays init-free so it is the most robust entry point.)
+#   - NEVER pool_die, NEVER return non-zero. Explicit --help is conventional stdout
+#     + rc 0 (--help must always succeed; matches `git --help` / `kubectl --help`).
+#   - stdout ONLY (capturable: `agent-browser-pool --help | grep release`). No >&2,
+#     no log. (Contrast pool_admin_release's misuse-usage → stderr + rc 1 @3909:
+#     that is a DIFFERENT case — release called with no/invalid arg. This is the
+#     EXPLICIT help request → stdout.)
+#
+# set -e GUARDS: NONE NEEDED. This function has no $(…) capture, no (( )), no
+# command-that-can-fail — only `printf` (always rc 0) + `return 0`. It is the
+# simplest admin function (fewest set -e hazards). (set -euo pipefail at lib/pool.sh:18
+# [NOT 23 — sibling comments citing :23 are STALE].)
+#
+# PRECONDITION: NONE (pure function). The dispatcher inits config+state before the
+# case; help does not rely on it.
+# CONSUMERS: bin/agent-browser-pool dispatcher: `case --help|-h|help) pool_admin_help ;;`.
+pool_admin_help() {
+    printf 'agent-browser-pool — manage the agent-browser ephemeral-profile pool.\n'
+    printf '\n'
+    printf 'Usage: agent-browser-pool <command> [args]\n'
+    printf '\n'
+    printf 'If no command is given, '"'"'status'"'"' is assumed.\n'
+    printf '\n'
+    printf 'Commands:\n'
+    printf '  status                  Print a read-only table of all active lanes:\n'
+    printf '                          lane, port, session, owner pid+cwd, chrome pid, age, state.\n'
+    printf '  reap                    Tear down lanes whose owning process has died:\n'
+    printf '                          kill Chrome, delete the ephemeral profile dir, remove the lease.\n'
+    printf '  release [<N>|all]       Explicitly tear down one lane by number, or every lane.\n'
+    printf '                          Use '"'"'release all'"'"' to clear the whole pool.\n'
+    printf '  doctor                  Diagnose the pool: verify dependencies, the real binary,\n'
+    printf '                          the filesystem (btrfs), and the master profile; reconcile\n'
+    printf '                          leases against live Chromes and ephemeral dirs; report leaks.\n'
+    printf '                          Exits 1 if any check fails, 0 otherwise.\n'
+    printf '  help                    Show this help. Aliases: --help, -h.\n'
+    printf '\n'
+    printf 'Configuration (environment variables; all optional):\n'
+    printf '  AGENT_BROWSER_POOL_STATE        state dir (lease store + logs)\n'
+    printf '  AGENT_CHROME_MASTER             master profile template (copied per lane)\n'
+    printf '  AGENT_CHROME_EPHEMERAL_ROOT     ephemeral lane dir root\n'
+    printf '  AGENT_BROWSER_REAL              the real agent-browser binary (shadowed CLI)\n'
+    printf '  AGENT_CHROME_BIN                Chrome binary (default: google-chrome-stable)\n'
+    printf '  AGENT_CHROME_PORT_BASE          lowest pool TCP port (default: 53420)\n'
+    printf '  AGENT_CHROME_PORT_RANGE         number of ports in the pool (default: 1000)\n'
+    printf '  AGENT_BROWSER_POOL_WAIT         acquire block timeout, seconds (default: 600)\n'
+    printf '  AGENT_CHROME_HEADLESS           launch Chrome headless if set (1/true/yes)\n'
+    printf '  AGENT_CHROME_ALLOW_SLOW_COPY    permit non-btrfs (slow) copies if set\n'
+    printf '  AGENT_BROWSER_POOL_DISABLE      disable pooling (passthrough) if set\n'
+    printf '\n'
+    printf "Run 'agent-browser-pool doctor' to verify your setup.\n"
+    return 0
+}

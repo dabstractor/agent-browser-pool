@@ -666,7 +666,7 @@
           "type": "Milestone",
           "id": "P1.M7",
           "title": "Admin CLI (bin/agent-browser-pool)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Build the admin tool for humans to observe and manage the pool: status (lane table), reap (clean stale), release (explicit teardown), and doctor (reconcile leases vs live state).",
           "tasks": [
             {
@@ -772,14 +772,14 @@
               "type": "Task",
               "id": "P1.M7.T5",
               "title": "bin/agent-browser-pool executable",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Create the admin tool entry point that dispatches to the correct admin subcommand.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T5.S1",
                   "title": "Admin CLI dispatcher + --help",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M7.T1.S1",
@@ -801,21 +801,21 @@
           "type": "Milestone",
           "id": "P1.M8",
           "title": "Install & Cutover",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Create install.sh with safe cutover: symlinks, confirmation, cutover warning. The installer is deliberate, not automatic, because PATH shadowing is all-or-nothing.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M8.T1",
               "title": "install.sh — symlinks + cutover safety",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Create the installer that symlinks bin/agent-browser → ~/scripts/ and bin/agent-browser-pool → ~/.local/bin/, with a prominent cutover warning and confirmation flag.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M8.T1.S1",
                   "title": "install.sh with confirmation + cutover warning + state dir setup",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T3.S2",

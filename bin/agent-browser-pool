@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#
+# bin/agent-browser-pool — admin CLI for the agent-browser-pool (PRD §2.1, §2.12).
+# Resolves its own real path (symlink-safe, same mechanism as bin/agent-browser) so it can
+# source the shared lib regardless of where it is symlinked (~/.local/bin/agent-browser-pool
+# → repo/bin/agent-browser-pool at install time). Dispatches to the pool_admin_* functions.
+# Default command (no args) is `status`.
+set -euo pipefail
+# Resolve real script dir (handles symlinks — PRD §2.1; mirrors bin/agent-browser)
+REAL_SCRIPT="$(readlink -f "${BASH_SOURCE[0]}")"
+REAL_DIR="$(dirname "$REAL_SCRIPT")"
+source "$REAL_DIR/../lib/pool.sh"
+# Init config + state unconditionally so every subcommand has globals + a lanes dir.
+# (Idempotent; each pool_admin_* ALSO calls them as its own precondition — redundant, harmless.)
+pool_config_init
+pool_state_init
+cmd="${1:-status}"
+case "$cmd" in
+    status)            pool_admin_status ;;
+    reap)              pool_admin_reap ;;
+    release)           pool_admin_release "${2:-}" ;;
+    doctor)            pool_admin_doctor ;;
+    --help|-h|help)    pool_admin_help ;;
+    *) echo "Unknown command: $cmd" >&2; exit 1 ;;
+esac
