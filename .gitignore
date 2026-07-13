@@ -4,6 +4,9 @@
 # local dev symlinks / state
 .state/
 
+# agent harness runtime artifacts (transcripts, meta, outputs)
+.pi-subagents/
+
 # environment files
 .env
 .env.*
