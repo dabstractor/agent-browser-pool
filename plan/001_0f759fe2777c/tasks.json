@@ -549,7 +549,7 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Wrapper Shim (bin/agent-browser)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Build the transparent wrapper that intercepts agent-browser commands, resolves the owning pi process, routes to the correct ephemeral lane, forces the session override, and execs the real binary. This is the user-facing entry point that makes pooling invisible.",
           "tasks": [
             {
@@ -619,7 +619,7 @@
               "type": "Task",
               "id": "P1.M6.T3",
               "title": "Full request lifecycle integration + passthrough",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Wire together the complete wrapper flow: dispatch → owner resolve → find/acquire → ensure connected → exec. Handle all passthrough paths (no pi ancestor, DISABLE env, META commands).",
               "subtasks": [
                 {
@@ -647,7 +647,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T3.S2",
                   "title": "bin/agent-browser executable — source lib/pool.sh via symlink-safe path",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M6.T3.S1"
@@ -673,14 +673,14 @@
               "type": "Task",
               "id": "P1.M7.T1",
               "title": "status command — lane table display",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Display all lanes with port, session, owner PID+cwd, Chrome PID, age, and state (live/stale/disconnected).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T1.S1",
                   "title": "status — format and display lane table",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S2",
