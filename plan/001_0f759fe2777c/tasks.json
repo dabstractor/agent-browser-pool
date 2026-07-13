@@ -390,7 +390,7 @@
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "Acquire flow",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The complete acquire lifecycle: flock-guarded reap-stale + reuse-orphan + choose-N + provisional claim, then post-lock Chrome boot (copy + port + launch + connect + update lease).",
               "subtasks": [
                 {
@@ -417,7 +417,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S2",
                   "title": "Post-lock boot — copy + port + launch + connect + update lease",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1",
@@ -437,7 +437,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S3",
                   "title": "ensure_connected — reconnect logic for subsequent calls",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T3.S1"

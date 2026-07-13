@@ -2053,3 +2053,186 @@ pool_acquire_locked() {
         _pool_acquire_critical_section
     ) 9>"$POOL_LOCK_FILE"
 }
+
+# =============================================================================
+# Acquire — post-lock boot (P1.M5.T1.S2)
+# =============================================================================
+# Turn a PROVISIONALLY-claimed lane (port=0, from pool_acquire_locked / M5.T1.S1) into a
+# FULLY-provisioned lane: copy master → pick port → launch Chrome → wait CDP → bind daemon
+# → finalize lease. PRD §2.4 step 3e–3j, run OUTSIDE the flock (key_findings FINDING 2:
+# concurrent boots). PRD §2.14 failure handling: CDP-timeout → retry launch once → drop
+# lane. Every recoverable failure cleans up via _pool_release_lane_internals (M5.T1.S1)
+# and returns 1. Consumed by the wrapper lifecycle (M6.T3.S1) after pool_acquire_locked
+# returns a provisional lane. The launch+wait sub-flow (_pool_launch_and_verify) is ALSO
+# composed by M5.T1.S3 ensure_connected for a Chrome mid-task crash relaunch.
+
+# _pool_boot_write_chrome_ids LANE
+#
+# Write the POOL_CHROME_PID / POOL_CHROME_PGID globals (set by pool_chrome_launch) into the
+# lease for LANE as top-level chrome_pid / chrome_pgid. Called right after EACH launch (incl.
+# the retry in _pool_launch_and_verify) — NOT only at step f. This is the LEAK-PREVENTION
+# refinement (research §2):
+#   (1) _pool_release_lane_internals reads chrome_id FROM THE LEASE → with this early write
+#       it correctly kills the LIVE Chrome on the daemon-connect-fail path (step e). Without
+#       it, cleanup would read chrome_pid:0 → pool_chrome_kill 0 0 (no-op) → LEAK.
+#   (2) if pool_boot_lane is killed mid-way, the lazy reaper (M5.T3) reads the lease and
+#       tears the Chrome down — impossible if chrome_id is still 0.
+# Uses pool_lease_update (top-level field; value = raw JSON number via --argjson). The lease
+# exists (provisional from S1); a missing/corrupt lease would pool_die (exceptional).
+#
+# GOTCHA — reference the globals with ${…:-} (set -u safe before any launch).
+# Reads POOL_CHROME_PID/PGID (+ POOL_LANES_DIR via pool_lease_update). No new globals.
+# PRECONDITION: pool_chrome_launch just succeeded (both globals set).
+_pool_boot_write_chrome_ids() {
+    local lane="${1:-}"
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+    pool_lease_update "$lane" chrome_pid "${POOL_CHROME_PID:-0}"
+    pool_lease_update "$lane" chrome_pgid "${POOL_CHROME_PGID:-0}"
+}
+
+# _pool_launch_and_verify PORT EPHEMERAL_DIR LANE
+#
+# The launch + CDP-wait + RETRY-ONCE sub-flow. Returns 0 if Chrome's CDP endpoint answers;
+# returns 1 if it times out TWICE (the Chrome pgroup is already killed by pool_wait_cdp on
+# each timeout — research §1.3). PRD §2.14 "Chrome slow to boot → retry launch once; then
+# fail, drop lane". Composed by pool_boot_lane (step c+d) and (by contract) M5.T1.S3
+# ensure_connected for a mid-task-crash relaunch on the same dir+port (profile kept).
+#
+# LOGIC:
+#   1. pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   (sets globals; pool_die on
+#      instant-exit is FATAL — propagates, NOT retried; research §3).
+#   2. _pool_boot_write_chrome_ids "$lane"   (write globals → lease; robustness §2).
+#   3. pool_wait_cdp "$port": rc 0 → return 0.
+#   4. rc 1 (Chrome pgroup already killed) → RETRY: pool_chrome_launch + write_chrome_ids
+#      + pool_wait_cdp. rc 0 → return 0; rc 1 → return 1 (Chrome already killed).
+#
+# GOTCHA — the retry overwrites POOL_CHROME_PID/PGID (and the lease chrome-ids) with the
+#   2nd Chrome's identity, so a subsequent cleanup reads the correct (already-dead) pid.
+# GOTCHA — pool_wait_cdp ALREADY kills the pgroup on timeout; do NOT add a redundant kill.
+# GOTCHA — instant-exit pool_die (pool_chrome_launch) propagates (fatal) — not catchable
+#   without losing the declare -g globals in a subshell (research §3).
+# NON-FATAL on the CDP-timeout path (return 1). No new globals exported.
+# PRECONDITION: pool_config_init + pool_state_init.
+_pool_launch_and_verify() {
+    local port="${1:-}"
+    local ephemeral_dir="${2:-}"
+    local lane="${3:-}"
+
+    # Validate args (defensive; the caller already validated, but be safe).
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    [[ -n "$ephemeral_dir" && "$ephemeral_dir" == /* ]] || return 1
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+
+    # --- Attempt 1 ---
+    pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   # 0 or fatal pool_die
+    _pool_boot_write_chrome_ids "$lane"                    # globals → lease (§2)
+    if pool_wait_cdp "$port"; then
+        return 0
+    fi
+    # pool_wait_cdp rc 1 ⇒ Chrome pgroup ALREADY KILLED (research §1.3).
+
+    # --- Attempt 2 (retry once — PRD §2.14) ---
+    pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   # relaunch (overwrites globals)
+    _pool_boot_write_chrome_ids "$lane"                    # 2nd chrome-ids → lease
+    if pool_wait_cdp "$port"; then
+        return 0
+    fi
+    # Second timeout ⇒ Chrome already killed. Caller cleans up the lane.
+    return 1
+}
+
+# pool_boot_lane LANE
+#
+# PUBLIC ENTRY POINT (the CONTRACT name). Provision a lane: COPY master → PORT →
+# LAUNCH+WAIT (retry once) → CONNECT → finalize LEASE. PRD §2.4 step 3e–3j, OUTSIDE the
+# flock (key_findings FINDING 2 — concurrent boots; this function does NO locking). Input:
+# a PROVISIONAL lease for LANE (port=0, from pool_acquire_locked). Output: lane fully
+# provisioned (return 0) OR cleaned up (return 1).
+#
+# Recoverable failures (→ _pool_release_lane_internals + return 1):
+#   - step b: pool_find_free_port rc 1 (port range exhausted) — no Chrome yet.
+#   - step d: _pool_launch_and_verify rc 1 (CDP timed out twice) — Chrome already killed.
+#   - step e: pool_daemon_connect rc 1 (daemon bind failed) — LIVE Chrome killed via cleanup
+#     (chrome_id is in the lease from step c's early write → no leak).
+# Fatal failures (pool_die propagates — genuine misconfiguration; provisional lease self-heals
+# via the next acquire's REAP-STALE):
+#   - step a: pool_copy_master non-btrfs / slow-copy-fail.
+#   - step c: pool_chrome_launch instant-exit (broken binary / bad flags).
+#
+# CALLER CONTRACT (the wrapper M6.T3.S1, under set -e — split the capture per BashFAQ 105):
+#     local N
+#     if N="$(pool_acquire_locked)"; then
+#         local port
+#         port="$(pool_lease_field "$N" port)"
+#         if [[ "$port" == "0" || -z "$port" || "$port" == "null" ]]; then
+#             pool_boot_lane "$N" || <retry acquire / M5.T4 exhaustion>
+#         else
+#             <M5.T1.S3 adopted: ensure_connected only; skip the boot>
+#         fi
+#     else
+#         <M5.T4 exhaustion>
+#     fi
+#
+# GOTCHA — the chrome-id early write (step c, inside _pool_launch_and_verify) is what makes
+#   the step-e cleanup able to kill the LIVE Chrome. Never reorder it to step f (§2).
+# GOTCHA — step b writes port to the lease BEFORE launch (anti-collision — §4).
+# GOTCHA — `local PORT; PORT="$(…)"` MUST be split (BashFAQ 105 / SC2155).
+# GOTCHA — every recoverable failure → `_pool_release_lane_internals "$LANE"` then
+#   return 1. Do NOT write your own kill/rm here.
+# Reads POOL_EPHEMERAL_ROOT, POOL_LANES_DIR (via helpers), POOL_REAL_BIN (via
+# pool_daemon_connect), POOL_CHROME_PID/PGID (via _pool_boot_write_chrome_ids). No new globals.
+# PRECONDITION: pool_config_init + pool_state_init + a PROVISIONAL lease for LANE (from S1).
+pool_boot_lane() {
+    local lane="${1:-}"
+    local ephemeral_dir port now
+
+    # Validate lane.
+    [[ "$lane" =~ ^[0-9]+$ ]] \
+        || pool_die "pool_boot_lane: lane must be a non-negative integer, got: '$lane'"
+
+    ephemeral_dir="$POOL_EPHEMERAL_ROOT/$lane"
+
+    # --- a. COPY: reflink CoW copy of the master → ephemeral dir (PRD §2.4 step 3e / §2.7). ---
+    #     pool_die's (fatal) on non-btrfs/no-slow-copy — propagates (genuine misconfiguration).
+    pool_copy_master "$ephemeral_dir"
+
+    # --- b. PORT: lowest free TCP port (PRD §2.4 step 3f). ---
+    #     rc 1 = range exhausted (NON-FATAL). Split the capture (BashFAQ 105). On failure,
+    #     clean up (the dir was just copied) + return 1.
+    if ! port="$(pool_find_free_port)"; then
+        _pool_log "pool_boot_lane: port range exhausted for lane $lane; dropping lane"
+        _pool_release_lane_internals "$lane"
+        return 1
+    fi
+    # Anti-collision: write port to the lease BEFORE launch so concurrent pool_find_free_port
+    # calls see it claimed (research §4). pool_lease_update splices the value as raw JSON.
+    pool_lease_update "$lane" port "$port"
+
+    # --- c+d. LAUNCH + WAIT (retry once on CDP timeout) (PRD §2.4 step 3g/3h / §2.14). ---
+    #     _pool_launch_and_verify returns 0 (CDP ready) or 1 (timed out twice; Chrome killed).
+    #     On failure, clean up + return 1.
+    if ! _pool_launch_and_verify "$port" "$ephemeral_dir" "$lane"; then
+        _pool_log "pool_boot_lane: CDP not ready after retry for lane $lane port $port; dropping lane"
+        _pool_release_lane_internals "$lane"
+        return 1
+    fi
+
+    # --- e. CONNECT: bind the daemon session to the Chrome (PRD §2.4 step 3i). ---
+    #     rc 1 = NON-FATAL (dead/unreachable). The Chrome is ALIVE here (CDP just answered) —
+    #     _pool_release_lane_internals kills it correctly (chrome_id is in the lease from step c).
+    if ! pool_daemon_connect "abpool-$lane" "$port"; then
+        _pool_log "pool_boot_lane: daemon connect failed for lane $lane port $port; dropping lane"
+        _pool_release_lane_internals "$lane"
+        return 1
+    fi
+
+    # --- f. UPDATE LEASE: connected=true + last_seen_at=now (PRD §2.4 step 3j). ---
+    #     port + chrome_pid + chrome_pgid are already set (steps b + c). `connected` MUST be
+    #     the literal "true" (pool_lease_update splices via --argjson). last_seen_at = epoch s.
+    now="$(_pool_now)"
+    pool_lease_update "$lane" connected true
+    pool_lease_update "$lane" last_seen_at "$now"
+
+    _pool_log "pool_boot_lane: lane $lane provisioned (port=$port pid=${POOL_CHROME_PID:-0})"
+    return 0
+}
