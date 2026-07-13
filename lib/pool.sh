@@ -3084,3 +3084,178 @@ pool_dispatch_classify() {
     printf 'driving\n'
     return 0
 }
+
+# =============================================================================
+# Wrapper shim — arg normalization (P1.M6.T1.S2)
+# =============================================================================
+# PRD §2.4 / §2.15 transparency normalizers. Rewrite an agent's DRIVING argv so the
+# pool — not the agent — controls connection & teardown scope. Called by the wrapper
+# lifecycle (M6.T3.S1) AFTER pool_dispatch_classify returned 'driving' and the lane is
+# acquired, BEFORE M6.T2.S1 strips --session / forces AGENT_BROWSER_SESSION.
+#
+# Output channel = the GLOBAL ARRAY POOL_NORM_ARGS (declare -ga) — NOT stdout (argv can
+# contain spaces/newlines; stdout is unsafe for an array). pool_normalize_close also sets
+# the scalar GLOBAL POOL_CLOSE_ALL_SEEN (0/1). Both functions return 0 ALWAYS; stdout EMPTY.
+# They read ONLY "$@" (NO config globals) → callable after a bare `source lib/pool.sh`.
+
+# pool_normalize_close [--] ARGS...
+#
+# If the command is 'close', strip EVERY standalone '--all' token (a raw --all would nuke
+# ALL daemon sessions incl. other agents' lanes — PRD §2.4/§2.15). All other tokens
+# (--json, --session <X>, the literal 'close', extra args) are PRESERVED in order. If the
+# command is NOT 'close', POOL_NORM_ARGS = args UNCHANGED (--all is left alone: it may be a
+# legitimate token for another command, e.g. `find role x --all`).
+#
+# Sets POOL_CLOSE_ALL_SEEN=1 iff at least one '--all' was stripped from a close command
+# (else 0) — the contract's "set a flag to close ONLY my session"; the lifecycle's
+# observability hook. The ACTUAL session-scoping is: strip --all (here) + force
+# --session abpool-<N> (M6.T2.S1) → the real exec is `close --session abpool-<N>`.
+#
+# LOGIC:
+#   a. Scan $@ (mirroring pool_dispatch_classify) to find the COMMAND (first non-flag):
+#        --session <X>  → skip 2 (consume flag + value)
+#        --session=<X>  → skip 1 (caught by --*)
+#        <any --flag>   → skip 1 (caught by --*; treated as bool — MIRRORS classify)
+#        <any -short>   → skip 1 (caught by -*)
+#        <non-flag>     → the COMMAND; stop.
+#   b. Rebuild from the ORIGINAL args: drop every token whose value is exactly '--all'
+#      IFF the command == 'close'. Track seen_all.
+#   c. POOL_NORM_ARGS = rebuilt array; POOL_CLOSE_ALL_SEEN = seen_all. Return 0.
+#
+# CONSUMERS: M6.T3.S1 wrapper lifecycle; unit tests (M9).
+#
+# GOTCHA — OUTPUT is the GLOBAL ARRAY POOL_NORM_ARGS, NOT stdout. stdout stays EMPTY. The
+#   caller reads "${POOL_NORM_ARGS[@]}". (argv may contain spaces → stdout is unsafe.)
+# GOTCHA — return 0 ALWAYS; no failure mode ⇒ the caller needs NO if-guard.
+# GOTCHA — --session is PRESERVED (only skipped during the scan). M6.T2.S1 strips it.
+# GOTCHA — the index counter uses `i=$((i+1))` (assignment, always rc 0), NEVER `(( i++ ))`
+#   (returns rc 1 when i==0 → ABORT under set -e; lib/pool.sh:362-365). The only (( )) are
+#   `while (( i < ${#orig[@]} ))` (cond, exempt) — no if-cond needed here.
+# GOTCHA — MIRRORS pool_dispatch_classify's scan exactly so the two siblings agree on the
+#   command token (do NOT enumerate agent-browser value-flags). Safe for close --all.
+# PRECONDITION: none. Reads only "$@".
+# shellcheck disable=SC2034 # POOL_NORM_ARGS/POOL_CLOSE_ALL_SEEN are OUTPUT-only contracts
+# read by the wrapper (M6.T3.S1) + tests (M9).
+pool_normalize_close() {
+    local -a orig=("$@") out=()
+    local cmd="" tok seen_all=0
+    local i=0
+
+    # --- a. Find the COMMAND (mirror pool_dispatch_classify's flag-scan), index-based. ---
+    # `i=$((i+N))` is an ASSIGNMENT (always rc 0) — avoids the bare-(( i++ )) trap. The
+    # `while (( ))` is a CONDITION (errexit-exempt). --session consumes its value (skip 2);
+    # all other flags skip 1 (matches classify's "all --* ⇒ shift-1" shortcut).
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)      i=$((i+2)) ;;   # space form: flag + value
+            --session=*)    i=$((i+1)) ;;   # equals form: value attached
+            --*)            i=$((i+1)) ;;   # --json, --all, --cdp, … (MIRRORS classify: bool)
+            -*)             i=$((i+1)) ;;   # -i -c -d -p …
+            *)              cmd="$tok"; break ;;   # first non-flag = COMMAND
+        esac
+    done
+
+    # --- b. Rebuild from ORIGINAL args; drop every '--all' IFF cmd==close. ---
+    for tok in "${orig[@]}"; do
+        if [[ "$cmd" == close && "$tok" == --all ]]; then
+            seen_all=1
+            continue
+        fi
+        out+=("$tok")
+    done
+
+    # --- c. Emit normalized argv + flag; return 0 ALWAYS. ---
+    # declare -ga NAME=( … ) is the canonical atomic global-array+assign form (keeps values,
+    # clean under shellcheck). The scalar flag uses the assign-then-declare-g idiom (pool_chrome_launch @1514).
+    declare -ga POOL_NORM_ARGS=( "${out[@]}" )
+    POOL_CLOSE_ALL_SEEN=$seen_all
+    declare -g POOL_CLOSE_ALL_SEEN
+    return 0
+}
+
+# pool_normalize_connect [--] ARGS...
+#
+# If the command is 'connect', strip the SINGLE <port|url> positional that follows it (the
+# upstream skill teaches `connect <port>`; the lane's real connection is owned by
+# pool_ensure_connected / PRD §2.4 step 4 using the LANE's port from the lease). Flags
+# (--json, --session <X>) are PRESERVED. If the command is NOT 'connect', POOL_NORM_ARGS =
+# args UNCHANGED.
+#
+# LOGIC:
+#   a. Scan $@ (mirroring classify) to find the COMMAND.
+#   b. If cmd != 'connect' → POOL_NORM_ARGS = args UNCHANGED; return 0.
+#   c. If cmd == 'connect': CONTINUE scanning PAST the command; the FIRST non-flag token
+#      (skipping --session's value, --session=X, --json, etc.) is the <port|url> positional.
+#      Record its index. (Bare `connect` with no positional → nothing to strip.)
+#   d. Rebuild POOL_NORM_ARGS = args MINUS that one positional (order + flags preserved).
+#      Return 0.
+#
+# CONSUMERS: M6.T3.S1 wrapper lifecycle; unit tests (M9).
+#
+# GOTCHA — bare `connect` (no positional) is a RUNTIME ERROR in the real binary (exit 1,
+#   "<port|url> required"). After this strip the result is bare `connect`. PRD §2.4 step 4
+#   (pool_ensure_connected) ALREADY binds the lane's daemon — so M6.T3.S1 must NOT naively
+#   exec a bare connect (the agent would see the error → breaks §2.15 transparency). This
+#   task strips the arg per contract; how the bare result is exec'd is M6.T3.S1.
+# GOTCHA — OUTPUT is the GLOBAL ARRAY POOL_NORM_ARGS, NOT stdout. stdout stays EMPTY.
+# GOTCHA — return 0 ALWAYS. Does NOT touch POOL_CLOSE_ALL_SEEN.
+# GOTCHA — --session is PRESERVED (only its value is skipped during the positional scan).
+# GOTCHA — strips only the FIRST non-flag positional after connect (agent-browser connect
+#   takes exactly one <port|url>); extra stray positionals (malformed) are left for the
+#   binary to error on.
+# PRECONDITION: none. Reads only "$@".
+# shellcheck disable=SC2034 # POOL_NORM_ARGS is an OUTPUT-only contract read by the wrapper
+# (M6.T3.S1) + tests (M9).
+pool_normalize_connect() {
+    local -a orig=("$@") out=()
+    local cmd="" tok
+    local i=0 strip_idx=-1
+    local j=0
+
+    # --- a. Find the COMMAND (mirror classify), index-based. ---
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)      i=$((i+2)) ;;
+            --session=*)    i=$((i+1)) ;;
+            --*)            i=$((i+1)) ;;
+            -*)             i=$((i+1)) ;;
+            *)              cmd="$tok"; i=$((i+1)); break ;;   # command found; advance PAST it
+        esac
+    done
+
+    # --- b. Not connect → unchanged. ---
+    if [[ "$cmd" != connect ]]; then
+        declare -ga POOL_NORM_ARGS=( "${orig[@]}" )
+        return 0
+    fi
+
+    # --- c. cmd==connect: find the FIRST non-flag positional AFTER the command (the <port|url>). ---
+    # Continues the SAME scan from where phase (a) left off (i already points just past `connect`).
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)      i=$((i+2)) ;;   # skip flag + value
+            --session=*)    i=$((i+1)) ;;
+            --*)            i=$((i+1)) ;;   # skip --json etc. (preserve them; not stripped)
+            -*)             i=$((i+1)) ;;
+            *)              strip_idx=$i; break ;;   # the <port|url> positional
+        esac
+    done
+
+    # --- d. Rebuild MINUS strip_idx (or unchanged if no positional was found). ---
+    # `if (( j == strip_idx ))` is an if-CONDITION (errexit-exempt). When strip_idx==-1 (no
+    # positional) the test is never true → out == orig. `j=$((j+1))` is the safe counter form.
+    for tok in "${orig[@]}"; do
+        if (( j == strip_idx )); then
+            j=$((j+1))
+            continue
+        fi
+        out+=("$tok")
+        j=$((j+1))
+    done
+
+    declare -ga POOL_NORM_ARGS=( "${out[@]}" )
+    return 0
+}

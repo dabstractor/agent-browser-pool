@@ -556,7 +556,7 @@
               "type": "Task",
               "id": "P1.M6.T1",
               "title": "Command dispatch & classification",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Parse the first non-flag token to classify DRIVING commands (route to lane) vs META/passthrough commands (exec unchanged). Handle special cases: connect (ignore arg), close --all (intercept).",
               "subtasks": [
                 {
@@ -578,7 +578,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T1.S2",
                   "title": "Handle close --all interception + connect arg normalization",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M6.T1.S1"
@@ -595,14 +595,14 @@
               "type": "Task",
               "id": "P1.M6.T2",
               "title": "Session override & arg stripping",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Strip any inherited --session flags and AGENT_BROWSER_SESSION env, then force abpool-<N> so the agent cannot bypass its lane.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T2.S1",
                   "title": "Strip --session flag + force AGENT_BROWSER_SESSION=abpool-<N>",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S2"
