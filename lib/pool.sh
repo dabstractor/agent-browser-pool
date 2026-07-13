@@ -1195,3 +1195,118 @@ pool_lane_is_stale() {
     fi
     return 0          # stale — owner dead/recycled/unverifiable → caller reaps
 }
+
+# =============================================================================
+# Lane lifecycle — master copy & profile hygiene (P1.M4.T1.S1)
+# =============================================================================
+# Materialize one ephemeral Chrome profile from the read-only master template.
+# Implements PRD §2.7 (Copy / master hygiene) + §2.19 (reflink detection: cp
+# --reflink=always; on failure refuse unless AGENT_CHROME_ALLOW_SLOW_COPY=1) and
+# removes the three stale Chrome single-instance locks the template carries. Consumed
+# by the acquire POST-LOCK boot (M5.T1.S2: copy → port → launch → connect → update
+# lease), OUTSIDE the flock critical section (key_findings FINDING 2 — the ~instant
+# reflink copy is cheap enough to run concurrently with other acquires' boots).
+
+# pool_copy_master TARGET_DIR
+#
+# Copy $POOL_MASTER_DIR (the master template) into TARGET_DIR (an ephemeral lane,
+# normally $POOL_EPHEMERAL_ROOT/<N>) as a flat profile, then remove the stale
+# Singleton* locks. Returns 0 on success; pool_die on any failure.
+#
+# LOGIC (CONTRACT a→e):
+#   a. cp -a --reflink=always "$POOL_MASTER_DIR" "$TARGET_DIR"  (instant CoW on btrfs).
+#   b. cp fails (non-btrfs / unsupported) AND POOL_ALLOW_SLOW_COPY != 1 → pool_die.
+#   c. cp fails AND POOL_ALLOW_SLOW_COPY == 1 → retry with cp -a (slow real copy).
+#   d. after success: rm -f SingletonLock SingletonCookie SingletonSocket.
+#   e. return 0 / pool_die on failure.
+#
+# CONSUMER: M5.T1.S2 acquire post-lock boot. CONTRACT: rc 0 → TARGET_DIR is a flat,
+#   lock-cleaned, ready-to-launch profile; any failure exits the process via pool_die.
+#
+# GOTCHA — reflink stderr FLOODS on non-btrfs: cp emits one "Operation not supported"
+#   line PER source file (thousands for a 4.8 GB master) and exits rc 1. The reflink
+#   attempt runs with 2>/dev/null. HOST-VERIFIED (research §1.1).
+# GOTCHA — reflink failure leaves an EMPTY PARTIAL TARGET_DIR: cp creates TARGET_DIR
+#   (empty) before failing. We `rm -rf -- "$target_dir"` on the failure path so the
+#   caller's `[[ -d ]]` free-lane probe is not fooled and the slow retry does not nest.
+#   HOST-VERIFIED (research §1.2).
+# GOTCHA — NESTING HAZARD: `cp -a src dst` when dst EXISTS copies src INTO dst
+#   (dst/<basename src>/…); when dst is ABSENT, dst becomes a flat copy of src. Because
+#   the failed reflink leaves dst existing, the `rm -rf` before the slow retry is
+#   MANDATORY to keep the copy FLAT. HOST-VERIFIED (research §1.3/§1.4).
+# GOTCHA — SingletonSocket is an AF_UNIX socket: rm -f removes it like a file; no
+#   special-case. `-f` tolerates a clean master where some are absent. (research §5).
+# GOTCHA — compose pool_check_master, NOT pool_check_btrfs: the cp exit code IS the
+#   btrfs detection (contract steps a-c). pool_check_btrfs would pre-empt it and checks
+#   POOL_EPHEMERAL_ROOT not the target; it is the acquire-INIT gate (M5.T1.S1). A raw
+#   findmnt -T is used ONLY to report the FS in the die message. (research §3).
+# GOTCHA — findmnt -T is MANDATORY: a bare `findmnt -nno FSTYPE "$dir"` (no -T) exits 1
+#   ON THIS HOST EVEN ON BTRFS. external_deps.md §3.2 omits -T and is BROKEN. (§4).
+# GOTCHA — POOL_EPHEMERAL_ROOT may not exist on a first run (pool_state_init does NOT
+#   create it); mkdir -p the PARENT of TARGET_DIR so cp can create the target. NEVER
+#   mkdir the target itself (that would flip cp into nesting mode).
+# GOTCHA — TARGET_DIR validated absolute (PRD §2.2: no bare ~ / relative paths to cp or
+#   rm) and non-empty (also guards the internal rm -rf).
+# Reads ONLY POOL_MASTER_DIR + POOL_ALLOW_SLOW_COPY (frozen by pool_config_init).
+# No new globals/env-vars/files.
+# PRECONDITION: pool_config_init (for POOL_MASTER_DIR + POOL_ALLOW_SLOW_COPY).
+pool_copy_master() {
+    local target_dir="${1:-}"
+    local parent fstype
+
+    # Validate target_dir: non-empty + ABSOLUTE (PRD §2.2; also guards the rm -rf).
+    # `[[ ]] || pool_die` is errexit-exempt.
+    [[ -n "$target_dir" ]] \
+        || pool_die "pool_copy_master: empty target_dir"
+    [[ "$target_dir" == /* ]] \
+        || pool_die "pool_copy_master: target_dir must be absolute: $target_dir"
+
+    # Pre-check the master (PRD §2.14: die with the exact bootstrap cp command if
+    # missing/empty). pool_check_master is M1.T1.S3 (LANDED @266): rc 0 or pool_die.
+    pool_check_master
+
+    # Ensure the PARENT of target_dir exists (cp needs it; the ephemeral root may not
+    # exist on a first run). mkdir -p is idempotent. Do NOT mkdir the target itself
+    # (cp creates it; mkdir-ing it would trigger the nesting hazard). `|| pool_die` so a
+    # real FS error is a clean fatal (not a set -e abort).
+    parent="$(dirname -- "$target_dir")"
+    mkdir -p -- "$parent" \
+        || pool_die "pool_copy_master: cannot create parent dir: $parent"
+
+    # (a) reflink CoW copy — instant on btrfs. 2>/dev/null suppresses the per-file
+    # "Operation not supported" flood on non-btrfs (research §1.1). `if !` is
+    # errexit-exempt — a bare cp that fails would ABORT under set -e.
+    if ! cp -a --reflink=always -- "$POOL_MASTER_DIR" "$target_dir" 2>/dev/null; then
+        # reflink failed (non-btrfs / unsupported). cp left an empty PARTIAL target_dir
+        # (research §1.2). rm it so the retry does not NEST (research §1.3). PLAIN rm
+        # under `if !`: if rm itself fails we fall through to die below (acceptable —
+        # something is deeply wrong with the FS).
+        rm -rf -- "$target_dir" 2>/dev/null || true
+
+        # (c) slow-copy escape hatch (POOL_ALLOW_SLOW_COPY normalized to "1"/"0" by
+        # pool_config_init's _pool_config_bool — exactly "1" → on).
+        if [[ "$POOL_ALLOW_SLOW_COPY" == "1" ]]; then
+            if ! cp -a -- "$POOL_MASTER_DIR" "$target_dir"; then
+                pool_die "pool_copy_master: slow copy (cp -a) also failed:" \
+                         "$POOL_MASTER_DIR -> $target_dir"
+            fi
+        else
+            # (b) not btrfs + no escape → die loudly. Report the detected FS for clarity
+            # (findmnt -T MANDATORY; || true neutralizes a missing-path exit 1).
+            fstype="$(findmnt -nno FSTYPE -T "$parent" 2>/dev/null || true)"
+            pool_die "pool_copy_master: cp --reflink=always failed" \
+                     "(target FS '${fstype:-<unknown>}' is not btrfs / reflink unsupported)." \
+                     "A real 4.8 GB copy per acquire would be catastrophic." \
+                     "Set AGENT_CHROME_ALLOW_SLOW_COPY=1 to allow it, or point" \
+                     "AGENT_CHROME_EPHEMERAL_ROOT at a btrfs mount (the path may not exist)."
+        fi
+    fi
+
+    # (d) remove stale Chrome single-instance locks from the template (would confuse a
+    # launched Chrome). SingletonSocket may be an AF_UNIX socket — rm -f handles all
+    # three. -f tolerates a clean master where some are absent. `|| pool_die` for safety.
+    rm -f -- "$target_dir/SingletonLock" "$target_dir/SingletonCookie" "$target_dir/SingletonSocket" \
+        || pool_die "pool_copy_master: cannot remove Singleton locks in: $target_dir"
+
+    return 0
+}
