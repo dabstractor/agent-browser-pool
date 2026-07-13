@@ -698,14 +698,14 @@
               "type": "Task",
               "id": "P1.M7.T2",
               "title": "reap command — on-demand stale cleanup",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Trigger the stale reaper on demand and report what was cleaned.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T2.S1",
                   "title": "reap — trigger pool_reap_stale and report",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M5.T3.S1"
@@ -722,14 +722,14 @@
               "type": "Task",
               "id": "P1.M7.T3",
               "title": "release command — explicit teardown",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Release a specific lane or all lanes explicitly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T3.S1",
                   "title": "release [<N>|all] — explicit lane teardown",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M5.T2.S1"

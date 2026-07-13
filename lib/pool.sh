@@ -3685,3 +3685,78 @@ pool_admin_status() {
 
     return 0
 }
+
+# ============================================================================
+# Admin CLI — reap (P1.M7.T2.S1)
+# ============================================================================
+# pool_admin_reap
+#
+# PRD §2.12 `reap` / §2.10 — the USER-FACING reap report for
+# `agent-browser-pool reap`. No input. Calls the LANDED pool_reap_stale
+# (M5.T3.S1 — the lazy reaper: scans every lane, releases every stale one,
+# echoes the reaped count), CAPTURES that count, and prints a human report to
+# stdout. Returns 0 always.
+#
+# OUTPUT (the ONLY stdout — exactly one line):
+#   N == 0  → "No stale lanes found."
+#   N  > 0  → "Reaped N stale lane(s)."   (N = the integer from pool_reap_stale)
+#
+# The literal "lane(s)" handles both singular and plural (do not special-case N=1).
+#
+# CONTRACT:
+#   - DELEGATE: ALL reap logic (lane enumeration, tri-state staleness verdict,
+#     full teardown: daemon close + Chrome pgroup kill + rm dir + delete lease)
+#     lives in pool_reap_stale. This function does NOT re-implement any of it.
+#   - CAPTURE the count: pool_reap_stale writes the raw integer to ITS stdout
+#     (for any caller's `count=$(…)`). This function MUST capture it
+#     (count="$(pool_reap_stale)") so the integer does NOT leak to the user
+#     alongside the message. pool_admin_reap's stdout is PURELY the one report.
+#   - NON-FATAL always: NEVER calls pool_die in its own body; NEVER returns
+#     non-zero. Reaping 0 lanes is NOT an error → "No stale lanes found." + rc 0.
+#
+# set -e GUARDS (all live — set -euo pipefail at lib/pool.sh:23):
+#   - pool_reap_stale returns rc 0 ALWAYS (lib/pool.sh:2601) → a bare capture
+#     `count="$(pool_reap_stale)"` is SAFE — NO `if !` guard needed. (This is the
+#     one place this function is SIMPLER than its sibling pool_admin_status, which
+#     must guard pool_lease_read rc 1 / pool_lane_is_stale rc 1/2.)
+#   - never `local x="$(…)"` (SC2155); declare then assign.
+#   - `(( count == 0 ))` MUST be inside `if` (a bare `(( ))` statement returns 1
+#     when the value is 0 → FATAL under set -e). The `$(( ))` expansion form is
+#     always safe.
+#
+# PRECONDITION: pool_config_init (globals) + pool_state_init (mkdir POOL_LANES_DIR).
+#   Both rc-0-or-pool_die (a misconfigured pool fails loudly — correct). No guard.
+# CONSUMERS: M7.T5.S1 bin/agent-browser-pool dispatcher: `case reap) pool_admin_reap ;;`.
+pool_admin_reap() {
+    # Declare ALL locals up front (SC2155: never `local x="$(…)"`).
+    local count
+
+    # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
+    # Mirrors pool_admin_status (lib/pool.sh:3604-3606) + pool_wrapper_main step "a"
+    # (lib/pool.sh:3455-3459). pool_state_init's idempotent mkdir -p guarantees
+    # POOL_LANES_DIR exists (so a fresh pool's first reap works cleanly).
+    pool_config_init
+    pool_state_init
+
+    # --- b. CAPTURE the reaped count from pool_reap_stale -----------------------
+    # pool_reap_stale (M5.T3.S1): scans every lane, releases each stale one (full
+    # teardown: close+kill+rm+rmlease), echoes ONE integer = the count reaped, rc 0
+    # ALWAYS (non-fatal). The capture is MANDATORY: pool_reap_stale writes the raw
+    # integer to ITS stdout — if we did NOT capture it, the integer would leak to
+    # the user alongside our message. $() strips the trailing newline → bare token.
+    # NO `if !` guard: pool_reap_stale rc 0 always (unlike pool_lease_read/pool_lane_is_stale).
+    count="$(pool_reap_stale)"
+
+    # --- c. print the human report (the ONLY stdout write in this function) -----
+    # Bare `(( count == 0 ))` returns 1 when count==0 → FATAL under set -e. Inside
+    # `if` it is errexit-exempt. count is digits-only (pool_reap_stale's contract),
+    # so the arithmetic is always valid. The literal "lane(s)" handles N=1 and N>0.
+    if (( count == 0 )); then
+        printf 'No stale lanes found.\n'
+    else
+        printf 'Reaped %d stale lane(s).\n' "$count"
+    fi
+
+    # --- d. NON-FATAL always — never pool_die in body, never non-zero -----------
+    return 0
+}
