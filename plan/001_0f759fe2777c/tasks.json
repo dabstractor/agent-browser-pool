@@ -390,7 +390,7 @@
               "type": "Task",
               "id": "P1.M5.T1",
               "title": "Acquire flow",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The complete acquire lifecycle: flock-guarded reap-stale + reuse-orphan + choose-N + provisional claim, then post-lock Chrome boot (copy + port + launch + connect + update lease).",
               "subtasks": [
                 {
@@ -437,7 +437,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S3",
                   "title": "ensure_connected — reconnect logic for subsequent calls",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T3.S1"
@@ -454,14 +454,14 @@
               "type": "Task",
               "id": "P1.M5.T2",
               "title": "Release & teardown",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Tear down a lane: kill Chrome process group, delete ephemeral dir, drop lease. Used by reaper, explicit release, and pool exhaustion force-reap.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T2.S1",
                   "title": "Release lane — kill pgroup + rm dir + delete lease",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M4.T3.S1",

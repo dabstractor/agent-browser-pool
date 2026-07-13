@@ -2236,3 +2236,150 @@ pool_boot_lane() {
     _pool_log "pool_boot_lane: lane $lane provisioned (port=$port pid=${POOL_CHROME_PID:-0})"
     return 0
 }
+
+# =============================================================================
+# Acquire — ensure connected (P1.M5.T1.S3)
+# =============================================================================
+# PRD §2.4 step 4 (ENSURE CONNECTED) — the per-invocation self-heal. Given an
+# ALREADY-BOOTED lane (port>0, from pool_boot_lane / S2 or a reuse-orphan adoption / S1),
+# verify it is STILL drivable; if not, RECONNECT (re-bind the daemon) or RELAUNCH (restart
+# Chrome on the SAME dir+port, keeping the profile — PRD §2.14 "Chrome crash mid-task").
+# Consumed by the wrapper lifecycle step 4 (M6.T3.S1) on EVERY DRIVING call.
+#
+# Returns 0 if connected (was-already OR reconnected OR relaunched); 1 on failure. NEVER
+# drops the lane (that's the wrapper's / reaper's job). The literal PRD `get cdp-url` probe
+# is BROKEN on agent-browser 0.28.0 (auto-launches strays — P1.M4.T3.S1 research §2), so
+# the connected check is the SIDE-EFFECT-FREE pool_daemon_connected + curl /json/version.
+
+# pool_ensure_connected LANE
+#
+# LOGIC (CONTRACT a→d):
+#   a. Read the lease → session, port, ephemeral_dir (+ chrome_pid). Lease missing/corrupt
+#      OR port<=0 (provisional, not booted) → return 1 (defensive — S2's job).
+#   b. pool_daemon_connected "$session" "$port" (SIDE-EFFECT-FREE): rc 0 → touch last_seen_at
+#      → return 0.
+#   c. NOT connected. Chrome alive? curl /json/version on the port (NOT kill -0 — research §2):
+#      ALIVE → pool_daemon_connect (re-bind the daemon): rc 0 → connected:true + last_seen_at
+#      → return 0; rc 1 → last_seen_at → return 1.
+#      DEAD → RELAUNCH on same dir+port: rm -f Singleton* ; pool_chrome_launch (0 or fatal
+#      pool_die) ; early-write chrome_pid/pgid (reaper-safe) ; pool_wait_cdp (rc 1 → chrome
+#      already killed → connected:false + last_seen_at → return 1) ; pool_daemon_connect
+#      (rc 1 → connected:false + last_seen_at → return 1) ; connected:true + last_seen_at
+#      → return 0.
+#   d. last_seen_at is touched on EVERY path (the observability heartbeat).
+#
+# CALLER CONTRACT (the wrapper M6.T3.S1, under set -e):
+#     if ! pool_ensure_connected "$N"; then
+#         <lane unusable: retry acquire / M5.T4 exhaustion / surface error>
+#     fi
+#     exec ... AGENT_BROWSER_SESSION=abpool-<N> ...
+#
+# GOTCHA — get cdp-url is FORBIDDEN (P1.M4.T3.S1 §2): use pool_daemon_connected (2 args).
+# GOTCHA — the Chrome-aliveness sub-check is curl /json/version, NOT kill -0 (research §2).
+# GOTCHA — NEVER drops the lane: returns 1, leaves lease + chrome as-is. No _pool_release_*.
+# GOTCHA — pool_chrome_launch pool_die (instant-exit) is FATAL + propagates (research §1.3).
+# GOTCHA — pool_wait_cdp KILLS the pgroup on timeout: after rc 1 the relaunched chrome is dead.
+# GOTCHA — early chrome-id write BEFORE wait_cdp (reaper-safe — research §5).
+# GOTCHA — Singleton cleanup before relaunch (research §3 / pool_copy_master pattern).
+# GOTCHA — every `local` capture is split (BashFAQ 105); every rc-1 helper guarded.
+# Reads POOL_EPHEMERAL_ROOT (relaunch udd) + POOL_LANES_DIR (via helpers) + POOL_CHROME_PID/PGID
+# (set by pool_chrome_launch). No new globals exported.
+# PRECONDITION: pool_config_init + pool_state_init + a BOOTED lease for LANE (port>0).
+pool_ensure_connected() {
+    local lane="${1:-}"
+    local json session port ephemeral_dir now
+    local -a _f
+
+    # Validate lane.
+    [[ "$lane" =~ ^[0-9]+$ ]] \
+        || { _pool_log "pool_ensure_connected: bad lane '$lane'"; return 1; }
+
+    # --- a. Read the lease (ONE read, ONE jq fork — the pool_lane_is_stale "ONE fork" idiom). ---
+    # Lease missing/corrupt → return 1 (non-fatal; never pool_die — runs on the hot path).
+    # `if !` is errexit-exempt (a bare capture ABORTS on rc 1).
+    if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+        _pool_log "pool_ensure_connected: no/corrupt lease for lane $lane"
+        return 1
+    fi
+    # Extract the 3 fields we need in ONE jq fork (comma → 3 lines; mapfile -t strips \n).
+    # jq cannot fail here (valid JSON guaranteed by pool_lease_read's _pool_json_valid).
+    mapfile -t _f < <(jq -r '.session, .port, .ephemeral_dir' <<<"$json")
+    session="${_f[0]:-}"
+    port="${_f[1]:-}"
+    ephemeral_dir="${_f[2]:-}"
+
+    # A not-booted (provisional) lane has port:0 — ensure_connected is for BOOTED lanes.
+    # Reconstruct session/ephemeral_dir defensively if the lease fields are empty.
+    [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
+        || { _pool_log "pool_ensure_connected: lane $lane not booted (port='$port')"; return 1; }
+    [[ -n "$session" ]]      || session="abpool-$lane"
+    [[ -n "$ephemeral_dir" && "$ephemeral_dir" == /* ]] || ephemeral_dir="$POOL_EPHEMERAL_ROOT/$lane"
+
+    now="$(_pool_now)"
+
+    # --- b. ALREADY connected? (SIDE-EFFECT-FREE — never launches; the get cdp-url REPLACEMENT). ---
+    if pool_daemon_connected "$session" "$port"; then
+        pool_lease_update "$lane" last_seen_at "$now"   # observability heartbeat
+        return 0
+    fi
+
+    # --- c. NOT connected. Chrome alive? curl /json/version (NOT kill -0 — research §2). ---
+    if curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
+        # Chrome ALIVE → the daemon just lost its binding. RECONNECT (cheap ~ms attach).
+        if pool_daemon_connect "$session" "$port"; then
+            pool_lease_update "$lane" connected true
+            pool_lease_update "$lane" last_seen_at "$now"
+            _pool_log "pool_ensure_connected: lane $lane reconnected (same chrome, port=$port)"
+            return 0
+        fi
+        _pool_log "pool_ensure_connected: lane $lane reconnect FAILED (chrome alive, connect rc 1)"
+        pool_lease_update "$lane" last_seen_at "$now"
+        return 1
+    fi
+
+    # --- c. Chrome DEAD → RELAUNCH on the SAME dir+port (PRD §2.14 "Chrome crash mid-task"). ---
+    # Singleton cleanup BEFORE launch (research §3 / pool_copy_master pattern): defeats the
+    # PID-recycle false-alive that would make Chrome exit without binding. Safe: curl just
+    # proved the chrome is dead. SingletonSocket is AF_UNIX — rm -f handles all three.
+    rm -f -- "$ephemeral_dir/SingletonLock" "$ephemeral_dir/SingletonCookie" "$ephemeral_dir/SingletonSocket" \
+        2>/dev/null || true
+
+    # Launch the NEW chrome on the same port + same dir. pool_chrome_launch sets globals
+    # POOL_CHROME_PID/PGID (declare -g); returns 0 or pool_die's on INSTANT exit (FATAL —
+    # propagates; genuine misconfiguration, NOT a recoverable mid-task crash).
+    pool_chrome_launch "$port" "$ephemeral_dir" "$lane"
+
+    # Early chrome-id write (BEFORE wait_cdp — reaper-safe, research §5): if wait_cdp times
+    # out (kills the pgroup) or this process is SIGKILL'd mid-relaunch, the lease holds the
+    # new (dead-or-live) chrome identity so _pool_release_lane_internals / the reaper act
+    # correctly. ${:-0} is set -u safe (globals are set after a successful launch, but be
+    # defensive). pool_lease_update splices the value as raw JSON (bare digits OK).
+    pool_lease_update "$lane" chrome_pid  "${POOL_CHROME_PID:-0}"
+    pool_lease_update "$lane" chrome_pgid "${POOL_CHROME_PGID:-0}"
+
+    # Wait for the relaunched chrome's CDP. rc 1 = timeout AND the pgroup is ALREADY KILLED
+    # (pool_wait_cdp does the kill before returning 1). Non-fatal: set connected:false +
+    # touch last_seen_at, return 1. (The lane is NOT dropped — wrapper/reaper's job.)
+    if ! pool_wait_cdp "$port"; then
+        _pool_log "pool_ensure_connected: lane $lane relaunch CDP timeout (chrome killed)"
+        pool_lease_update "$lane" connected false
+        pool_lease_update "$lane" last_seen_at "$now"
+        return 1
+    fi
+
+    # CDP ready → re-bind the daemon. rc 1 = the (alive) chrome won't bind — set
+    # connected:false, return 1. (We do NOT kill the live chrome here — ensure_connected
+    # never drops the lane; the next ensure_connected / reaper handles it.)
+    if ! pool_daemon_connect "$session" "$port"; then
+        _pool_log "pool_ensure_connected: lane $lane relaunch connect FAILED (cdp up, connect rc 1)"
+        pool_lease_update "$lane" connected false
+        pool_lease_update "$lane" last_seen_at "$now"
+        return 1
+    fi
+
+    # Relaunch succeeded: a fresh chrome on the same port + dir, profile kept (PRD §2.14).
+    pool_lease_update "$lane" connected true
+    pool_lease_update "$lane" last_seen_at "$now"
+    _pool_log "pool_ensure_connected: lane $lane relaunched (new pid=${POOL_CHROME_PID:-0}, port=$port)"
+    return 0
+}
