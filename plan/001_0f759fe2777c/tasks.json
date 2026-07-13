@@ -549,7 +549,7 @@
           "type": "Milestone",
           "id": "P1.M6",
           "title": "Wrapper Shim (bin/agent-browser)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Build the transparent wrapper that intercepts agent-browser commands, resolves the owning pi process, routes to the correct ephemeral lane, forces the session override, and execs the real binary. This is the user-facing entry point that makes pooling invisible.",
           "tasks": [
             {
@@ -619,14 +619,14 @@
               "type": "Task",
               "id": "P1.M6.T3",
               "title": "Full request lifecycle integration + passthrough",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Wire together the complete wrapper flow: dispatch → owner resolve → find/acquire → ensure connected → exec. Handle all passthrough paths (no pi ancestor, DISABLE env, META commands).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M6.T3.S1",
                   "title": "Wire complete lifecycle: dispatch → resolve → find/acquire → ensure → exec",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T1.S1",
@@ -647,7 +647,7 @@
                   "type": "Subtask",
                   "id": "P1.M6.T3.S2",
                   "title": "bin/agent-browser executable — source lib/pool.sh via symlink-safe path",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M6.T3.S1"

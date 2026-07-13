@@ -3389,3 +3389,153 @@ pool_force_session() {
     export AGENT_BROWSER_SESSION="abpool-$lane"
     return 0
 }
+
+# =============================================================================
+# Wrapper shim — complete lifecycle (P1.M6.T3.S1)
+# =============================================================================
+# PRD §2.4 steps 0→5 — the orchestration entry point. Called by bin/agent-browser
+# (M6.T3.S2) as its FINAL statement (`pool_wrapper_main "$@"`; the shim runs nothing
+# after it). TERMINAL by design: every success path ends in `exec "$POOL_REAL_BIN" …`
+# (process replacement — never returns); every fatal path ends in `pool_die` (exit 1).
+# There is NO `return` on the success path — there is no caller state to resume.
+#
+# This is the ONLY place the full pipeline is wired. It COMPOSES (does not re-implement):
+#   - M6.T1.S1 pool_dispatch_classify   (step c: meta vs driving)
+#   - M6.T1.S2 pool_normalize_close/connect (step i: scope close --all, strip connect positional)
+#   - M6.T2.S1 pool_strip_session_args / pool_force_session (step j: neutralize --session + env)
+#   - M2    pool_owner_resolve          (step d: find the owning pi; ==0 ⇒ human terminal)
+#   - M3    pool_lease_find_mine        (step e: reuse my live lane)
+#   - M5    pool_acquire_locked / pool_wait_for_lane (step f: get a lane)
+#           pool_boot_lane              (step g: boot a provisional lane)
+#           pool_ensure_connected       (step h: per-call self-heal)
+#
+# THE LANE FLOWS VIA STDOUT, NOT A GLOBAL. pool_lease_find_mine / pool_acquire_locked /
+# pool_wait_for_lane all `printf '%s\n' "$N"` and set NO global (verified: no
+# POOL_FOUND_LANE / POOL_ACQUIRED_LANE in this file). The wrapper captures N via
+# `local N; … if N="$(…)"` — NEVER `local N="$(…)"` (SC2155 masks errexit; BashFAQ 105).
+#
+# BOOT-VS-ADOPT: pool_acquire_locked returns a PROVISIONAL lease (port=0) on the
+# choose-N path, OR an ADOPTED orphan (port>0, already booted) on the reuse-orphan path.
+# The wrapper reads `port="$(pool_lease_field "$N" port)" || port=""` and boots ONLY when
+# port ∈ {"0","",null}. Booting an adopted lane would re-copy/re-launch (wasteful + racy).
+#
+# RC TAXONOMY (which helpers need an `if`/`||` guard under set -e):
+#   rc 0 ALWAYS (no guard):  pool_dispatch_classify, pool_normalize_close/connect,
+#                            pool_strip_session_args, pool_config_init, pool_state_init,
+#                            pool_owner_resolve (config/state/owner pool_die on FATAL misconfig)
+#   rc 0/1 NON-FATAL (guard): pool_lease_find_mine, pool_acquire_locked, pool_wait_for_lane,
+#                            pool_lease_field, pool_force_session
+#   rc 0/1, rc 1 ⇒ lane GONE: pool_boot_lane      (rc 1 ⇒ _pool_release_lane_internals already ran)
+#   rc 0/1, rc 1 ⇒ lane KEPT: pool_ensure_connected (NEVER drops the lane; reaper's job later)
+#   pool_die FATAL (propagates): inside pool_boot_lane / pool_ensure_connected (chrome instant-exit)
+#
+# GOTCHA — TERMINAL: all four exits are exec (b/c/d/k) or pool_die. NO return on success.
+# GOTCHA — passthrough exec (b/c/d) passes the ORIGINAL "$@" UNCHANGED (PRD §2.4 step 0:
+#   "exec real binary unchanged"; §2.15: "skills get core → passthrough (unaffected)"). ONLY
+#   step k (driving) uses the cleaned "${POOL_CLEAN_ARGS[@]}".
+# GOTCHA — POOL_DISABLE is read AFTER pool_config_init (which freezes it @176). Step b reads
+#   the FROZEN global, not the raw env var.
+# GOTCHA — pool_boot_lane rc 1 ⇒ lane DROPPED ⇒ pool_die (no in-place retry; re-entering
+#   acquire with the same exhausted state would loop).
+# GOTCHA — pool_ensure_connected rc 1 ⇒ lane NOT dropped ⇒ pool_die (surface the failure;
+#   reaper cleans up on the agent's NEXT acquire). Do NOT retry in-place.
+# GOTCHA — the connect-normalize may leave a bare `connect` in POOL_NORM_ARGS; do NOT
+#   special-case it — pool_ensure_connected (step h) already bound the daemon, so exec'ing
+#   `agent-browser --session abpool-<N> connect` is a harmless no-op connect.
+# GOTCHA — close --all interception: pool_normalize_close sets POOL_CLOSE_ALL_SEEN=1 iff it
+#   stripped ≥1 --all from a close cmd. Log it for observability (PRD §2.15).
+# PRECONDITION: none (pool_config_init + pool_state_init are step a — the first thing run).
+# CONSUMES: POOL_DISABLE, POOL_REAL_BIN, POOL_OWNER_PID, POOL_WAIT, POOL_NORM_ARGS,
+#   POOL_CLOSE_ALL_SEEN, POOL_CLEAN_ARGS (all set by the helpers above).
+# EXPORTS (via pool_force_session): AGENT_BROWSER_SESSION=abpool-<N> (inherited by the step-k exec).
+pool_wrapper_main() {
+    # Declare ALL locals up front (SC2155: never `local x="$(…)"` — declare then assign).
+    local class N port
+
+    # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
+    # config freezes POOL_DISABLE, POOL_REAL_BIN, POOL_WAIT, POOL_LANES_DIR, POOL_LOCK_FILE.
+    # state idempotently mkdirs lanes/ + touches acquire.lock.
+    pool_config_init
+    pool_state_init
+
+    # --- b. safety valve (PRD §2.17): POOL_DISABLE==1 → passthrough, no pooling ---
+    # Read the FROZEN global (config_init just set it). ORIGINAL "$@" unchanged.
+    if [[ "${POOL_DISABLE:-0}" == "1" ]]; then
+        _pool_log "pool_wrapper_main: POOL_DISABLE=1 → passthrough"
+        exec "$POOL_REAL_BIN" "$@"
+    fi
+
+    # --- c. dispatch (step 0): meta → exec passthrough UNCHANGED -----------------
+    # pool_dispatch_classify is rc 0 ALWAYS (no guard); prints exactly one token meta|driving.
+    # Plain assignment (class declared above) → SC2155-clean + errexit-safe (classify never fails).
+    class="$(pool_dispatch_classify "$@")"
+    if [[ "$class" == "meta" ]]; then
+        _pool_log "pool_wrapper_main: meta command → passthrough"
+        exec "$POOL_REAL_BIN" "$@"           # UNCHANGED — skills/--help/session list/etc.
+    fi
+
+    # --- d. owner resolution (step 1): no pi ancestor → passthrough --------------
+    # pool_owner_resolve is rc 0 ALWAYS; sets POOL_OWNER_PID (==0 ⇒ human in terminal).
+    pool_owner_resolve
+    if [[ "${POOL_OWNER_PID:-0}" == "0" ]]; then
+        _pool_log "pool_wrapper_main: no pi ancestor → passthrough (human terminal)"
+        exec "$POOL_REAL_BIN" "$@"           # UNCHANGED — raw upstream tool for humans
+    fi
+
+    # --- e→g. find-or-acquire my lane (steps 2→3) --------------------------------
+    # Lane is STDOUT-only. Split capture (`local N` above; `N="$(…)"` here) inside an `if` keeps
+    # rc 1 set -e-safe (the condition is just false). NEVER `local N="$(…)"` (SC2155 masks rc 1).
+    if N="$(pool_lease_find_mine)"; then
+        # Found my LIVE lane → reuse it (skip acquire + boot). Go to step h (ensure connected).
+        _pool_log "pool_wrapper_main: reusing lane $N"
+    else
+        # Not found → acquire (step 3). Fallback to wait-for-lane on exhaustion.
+        if ! N="$(pool_acquire_locked)"; then
+            if ! N="$(pool_wait_for_lane)"; then
+                # True exhaustion: timeout + force-reap yielded nothing. Surface to the agent.
+                pool_die "agent-browser-pool: no lane available after ${POOL_WAIT:-600}s + force-reap"
+            fi
+        fi
+
+        # --- g. boot-vs-adopt ------------------------------------------------
+        # pool_lease_field is rc 0/1 (returns 1 on missing/corrupt) → guard with `|| port=""`
+        # (||-list is errexit-exempt). A PROVISIONAL lease has port=0; an ADOPTED orphan has port>0.
+        port="$(pool_lease_field "$N" port)" || port=""
+        if [[ "$port" == "0" || -z "$port" || "$port" == "null" ]]; then
+            # Provisional → boot it (copy+port+launch+connect). rc 1 ⇒ lane was DROPPED → pool_die
+            # (no in-place retry; re-entering acquire with the same exhausted state would loop).
+            _pool_log "pool_wrapper_main: booting provisional lane $N"
+            pool_boot_lane "$N" || pool_die "agent-browser-pool: boot failed for lane $N"
+        else
+            # Adopted orphan (port>0, already booted) → SKIP boot (would re-copy/re-launch).
+            _pool_log "pool_wrapper_main: adopted orphan lane $N (port=$port) → skip boot"
+        fi
+    fi
+
+    # --- h. ensure connected (step 4): per-call self-heal -----------------------
+    # rc 1 ⇒ lane unusable but NOT dropped (reaper's job on next acquire). pool_die surfaces it.
+    # Do NOT retry in-place (would hit the same dead Chrome).
+    pool_ensure_connected "$N" || pool_die "agent-browser-pool: lane $N not connected; aborting"
+
+    # --- i. arg normalization (step 5, first half) ------------------------------
+    # Both rc 0 ALWAYS (no guard). pool_normalize_close writes POOL_NORM_ARGS + POOL_CLOSE_ALL_SEEN;
+    # pool_normalize_connect OVERWRITES POOL_NORM_ARGS (chained: read ${POOL_NORM_ARGS[@]} → write it).
+    pool_normalize_close "$@"
+    pool_normalize_connect "${POOL_NORM_ARGS[@]}"
+
+    # --- j. session override (step 5, second half) ------------------------------
+    # pool_strip_session_args is rc 0 ALWAYS; writes POOL_CLEAN_ARGS (every --session removed).
+    # pool_force_session is rc 0/1; exports AGENT_BROWSER_SESSION=abpool-<N> (persists; inherited by exec).
+    pool_strip_session_args "${POOL_NORM_ARGS[@]}"
+    pool_force_session "$N" || pool_die "agent-browser-pool: bad lane '$N' for session force"
+
+    # Observability: log if we scoped a close --all (PRD §2.15: "close --all → cannot harm peers").
+    if [[ "${POOL_CLOSE_ALL_SEEN:-0}" == "1" ]]; then
+        _pool_log "pool_wrapper_main: intercepted close --all → scoped to lane $N"
+    fi
+
+    # --- k. EXEC the real binary (step 5, terminal) -----------------------------
+    # Process replacement (PID stays; exported AGENT_BROWSER_SESSION inherited). UNREACHABLE code
+    # after this line. The agent's command now runs against its locked, booted, connected lane.
+    exec "$POOL_REAL_BIN" "${POOL_CLEAN_ARGS[@]}"
+}
