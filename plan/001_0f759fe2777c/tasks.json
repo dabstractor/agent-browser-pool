@@ -383,7 +383,7 @@
           "type": "Milestone",
           "id": "P1.M5",
           "title": "Acquire, Release & Reaper Orchestration",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the high-level flow logic that orchestrates the lane lifecycle operations: the acquire flow (flock critical section + post-lock Chrome boot), release/teardown, the stale reaper (on-acquire and on-demand), reuse-orphan-if-responsive, and pool exhaustion handling with block-timeout + force-reap + alert.",
           "tasks": [
             {
@@ -480,7 +480,7 @@
               "type": "Task",
               "id": "P1.M5.T3",
               "title": "Stale reaper & orphan reuse",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Scan all lanes for stale owners and tear them down. Called inside acquire (step 3a) and on-demand via admin reap. Also handles reuse-orphan-if-responsive.",
               "subtasks": [
                 {
@@ -504,7 +504,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T3.S2",
                   "title": "reuse_orphan() — adopt responsive Chrome with dead owner",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T3.S1",
@@ -522,14 +522,14 @@
               "type": "Task",
               "id": "P1.M5.T4",
               "title": "Pool exhaustion handling",
-              "status": "Planned",
+              "status": "Researching",
               "description": "When no free/reusable lane is available, block with timeout, poll for releases, force-reap a dead-owner lane, and alert via notify-send + log.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M5.T4.S1",
                   "title": "Block-with-timeout + force-reap + alert",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1",

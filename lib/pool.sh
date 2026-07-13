@@ -2480,7 +2480,7 @@ pool_release_lane() {
 }
 
 # =============================================================================
-# Reaper & orphan reuse (P1.M5.T3.S1)
+# Reaper & orphan reuse (P1.M5.T3.S1, P1.M5.T3.S2)
 # =============================================================================
 # pool_reap_stale
 #
@@ -2592,4 +2592,183 @@ pool_reap_stale() {
 
     # (d) NON-FATAL always — never pool_die, never non-zero.
     return 0
+}
+
+# -----------------------------------------------------------------------------
+# pool_reuse_orphan
+#
+# PRD §2.4 step 3b / IQ4 "reuse-if-responsive" — the PUBLIC building-block entry
+# point that ADOPTS the first STALE lane whose Chrome is still RESPONSIVE. Scans
+# EVERY lane (pool_lanes_list), asks the tri-state predicate pool_lane_is_stale
+# whether each lane's owner is dead/recycled, and for the first stale lane whose
+# Chrome answers (pool_daemon_connected) DELEGATES to _pool_adopt_lane (reassign
+# owner to the current POOL_OWNER_*, set connected=true, stamp last_seen_at,
+# re-bind the daemon). Echoes the adopted lane N + return 0; or return 1 if no
+# responsive orphan. Skips the ~5-10s Chrome boot + master copy (the Chrome is
+# already running). NO reap, NO choose-N, NO launch.
+#
+# DESIGN — the acquire-vs-reuse-orphan SPLIT (research §1): the LANDED acquire
+# critical section (_pool_acquire_critical_section @ ~line 1966) INLINES its OWN
+# reuse-orphan loop (@ ~1977-1996), INTERLEAVED with reap (on a failed adopt it
+# REAPS the lane, then continues — its goal is to CLAIM a lane). This PUBLIC
+# function is REUSE-ONLY: it adopts the first responsive orphan and returns; on a
+# failed adopt it falls through to the NEXT stale lane (NO reap); on exhaustion it
+# returns 1. The CONTRACT's "Consumed by acquire step 3b" is LEGACY design intent
+# (the LANDED acquire already inlines reuse-orphan); the REAL callers are a future
+# acquire refactor / exhaustion retry / admin doctor reconcile. Do NOT wire this
+# into acquire (the inline is shipped + correct).
+#
+# WARNING — THE KEY DIVERGENCE FROM pool_reap_stale — FLOCK / SERIALIZATION
+# (research §3): adoption is NOT collision-safe. Two concurrent adopters of the
+# SAME orphan would both read the lease, both find it responsive, both rewrite
+# .owner, both re-bind the daemon, and both echo lane N → BOTH believe they own N.
+# (Contrast pool_reap_stale, which is idempotent — release twice = no-op → safely
+# unflocked.) THEREFORE pool_reuse_orphan REQUIRES SERIALIZATION. DECISION: this
+# function takes NO own flock; the CALLER MUST already hold an exclusive flock on
+# $POOL_LOCK_FILE. This mirrors the codebase convention (ONLY pool_acquire_locked
+# flocks; all building-block functions are lock-free) + pool_reap_stale.
+#
+# WARNING — DO NOT add `( flock 9; … ) 9>"$POOL_LOCK_FILE"` inside this function.
+# flock(2) locks are bound per OPEN FILE DESCRIPTION
+# (https://man7.org/linux/man-pages/man2/flock.2.html): a fresh 9>"$POOL_LOCK_FILE"
+# redirect opens a NEW file description, so a blocking flock taken here while the
+# caller already holds the lock via its own fd 9 is DENIED BY THE CALLER'S OWN LOCK
+# → BLOCKS FOREVER (self-deadlock). The caller serializes; this function is
+# lock-free.
+#
+# DELEGATE (do NOT duplicate — research §2/§6): the responsiveness gate is
+# pool_daemon_connected (M4.T3.S1, READ-ONLY, never launches); the adoption
+# (owner-reassign + connected + re-bind) is _pool_adopt_lane (M5.T1.S1). Do NOT
+# re-inline the jq .owner mutation, pool_daemon_connect, or a raw curl
+# /json/version probe (raw curl is INSUFFICIENT — adoption needs the daemon to
+# know the session so the re-bind is meaningful).
+#
+# LOGIC (CONTRACT a→e):
+#   guard. POOL_OWNER_PID numeric & !=0  else return 1   (passthrough owner must not adopt)
+#   a. for n in $(pool_lanes_list)  — snapshot; empty ⇒ 0 iters.
+#   b.   if pool_lane_is_stale "$n"; then   — TRI-STATE; the if-condition is errexit-exempt:
+#          rc 0 (stale) → enter body;  rc 1 (live) / rc 2 (no lease) → fall through (skip).
+#   c.      port/session = pool_lease_field "$n" (|| true inside $(); missing → "")
+#          if [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] && pool_daemon_connected "$session" "$port"; then
+#   d.        if _pool_adopt_lane "$n"; then printf '%s\n' "$n"; return 0; fi   # adopted → DONE
+#                    # adopt rc 1 (Chrome died mid-race) → fall through, try the NEXT orphan
+#          fi        # port=0 (provisional) OR not responsive → skip (NOT reaped; reuse-only)
+#        fi
+#   e. return 1   — no responsive orphan adopted; nothing echoed.
+#
+# CALLER CONTRACT (within a SERIALIZED context — caller holds $POOL_LOCK_FILE;
+# under set -e):
+#     local n
+#     if n="$(pool_reuse_orphan)"; then
+#         <proceed: the lane n is adopted, owner=reassigned, connected=true, daemon
+#          re-bound; go straight to EXEC / ensure_connected>
+#     else
+#         <no responsive orphan: reap-sweep / claim-a-new-lane / block / alert>
+#     fi
+#
+# GOTCHA — tri-state under set -e: a BARE `pool_lane_is_stale "$n"` whose rc is 1
+#   (live) or 2 (no lease) ABORTS the caller. The `if …; then …; fi` is MANDATORY
+#   (the condition is errexit-exempt). (pool_lane_is_stale GOTCHA @ ~line 1145-1148.)
+# GOTCHA — responsiveness gate under set -e: pool_daemon_connected returns 1 (not
+#   responsive) → a BARE call ABORTS. Use it under `&&`:
+#   `[[ port>0 ]] && pool_daemon_connected …` (the &&-list is errexit-exempt; rc 1
+#   short-circuits). Likewise `if _pool_adopt_lane "$n"; then …; fi` (rc 1 falls
+#   through to the next orphan).
+# GOTCHA — port=0 provisional lease is NEVER an orphan: the `[[ -gt 0 ]]` gate
+#   rejects it (no Chrome yet → nothing to reuse). It is skipped, NOT reaped
+#   (reuse-only).
+# GOTCHA — adopt-failure-mid-race: the Chrome can die between the gate
+#   (pool_daemon_connected rc 0) and the re-bind (pool_daemon_connect rc 1 inside
+#   _pool_adopt_lane) → _pool_adopt_lane rc 1 → fall through to the next orphan.
+#   The racy lane is NOT reaped; a later reap sweep / acquire handles it.
+# GOTCHA — stdout discipline: ONLY `printf '%s\n' "$n"` writes stdout (on
+#   success). Every helper is stdout-clean. On return 1 NOTHING is echoed →
+#   `n=$(pool_reuse_orphan)` yields "". No extra >/dev/null needed on
+#   _pool_adopt_lane (its pool_daemon_connect is already >/dev/null 2>&1; its
+#   _pool_log is file-only). _pool_adopt_lane logs the adoption itself → no
+#   double-logging here.
+# GOTCHA — `local var=$(…)` masks errexit (SC2155): split every capture (local
+#   declared FIRST, assign AFTER); guard pool_lease_field's rc-1 with || true
+#   INSIDE the $().
+# GOTCHA — NON-FATAL: never pool_die; returns 0 (adopted) / 1 (none). A corrupt
+#   lease ⇒ rc 2 skip; a dead-Chrome lane ⇒ not responsive ⇒ skip; an empty pool
+#   ⇒ 0 iterations ⇒ return 1.
+# GOTCHA — NO own flock (Design B): caller MUST hold $POOL_LOCK_FILE (adoption is
+#   not collision-safe). Adding an inner flock SELF-DEADLOCKS (flock(2) per-OFD).
+#   See the WARNING block above.
+# Reads POOL_LANES_DIR + POOL_OWNER_* (via _pool_adopt_lane) + POOL_REAL_BIN
+# (via the helpers). PRECONDITION: pool_config_init + pool_owner_resolve AND the
+# caller holds $POOL_LOCK_FILE.
+# -----------------------------------------------------------------------------
+pool_reuse_orphan() {
+    local n port session
+
+    # ── Guard: a passthrough owner (POOL_OWNER_PID==0, no pi ancestor) must NOT adopt a lane ──
+    # (it would be immediately stale to everyone; _pool_adopt_lane itself returns 1 on a
+    # non-numeric POOL_OWNER_PID). Mirrors _pool_acquire_critical_section's defense.
+    # `[[ ]] || return 1` is errexit-exempt. CONTRACT step 3b INPUT = the current POOL_OWNER_*.
+    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ && "$POOL_OWNER_PID" != "0" ]] || return 1
+
+    # (a) Iterate ALL lanes. pool_lanes_list: newline-separated, numerically-sorted lane
+    #     numbers; rc 0 always; empty/missing dir ⇒ 0 iterations. The unquoted command
+    #     substitution is the documented idiom (digits-only; word-splits on IFS into exactly
+    #     the lane numbers). The list is a SNAPSHOT (captured once before the loop) — adopting
+    #     a lane mid-loop (rewriting its lease) cannot mutate the iteration set.
+    for n in $(pool_lanes_list); do
+
+        # (b) TRI-STATE verdict. pool_lane_is_stale: 0=stale / 1=live / 2=no-lease. The `if`
+        #     condition is errexit-exempt — rc 1 (live) and rc 2 (no lease) fall through cleanly
+        #     (skip); ONLY rc 0 (stale) enters the body. A BARE call would ABORT under set -e on
+        #     rc 1/2 (pool_lane_is_stale GOTCHA @ ~line 1145-1148). (CONTRACT 3b(a/b).)
+        if pool_lane_is_stale "$n"; then
+
+            # (c) Read the orphan's port + session for the responsiveness gate.
+            #     pool_lease_field: top-level `port`/`session` read; rc 1 on missing/corrupt
+            #     (TOCTOU between the staleness verdict and this read); echoes "null" for a
+            #     missing path. The `|| true` INSIDE the $() makes the capture set -e-safe
+            #     (yields "" on failure). The assignment is split (local declared above) —
+            #     no SC2155 / errexit masking.
+            port="$(pool_lease_field "$n" port 2>/dev/null || true)"
+            session="$(pool_lease_field "$n" session 2>/dev/null || true)"
+
+            # (c) RESPONSIVENESS GATE (CONTRACT 3b(c)). A provisional lease has port=0 (no
+            #     Chrome yet) → the `[[ -gt 0 ]]` test rejects it (never an orphan).
+            #     pool_daemon_connected: READ-ONLY two-probe check (daemon `session list` +
+            #     curl /json/version); NEVER launches; rc 0 = responsive, rc 1 = not. Raw
+            #     curl ALONE is insufficient for adoption (the daemon must know the session
+            #     so the re-bind is meaningful). The `[[ ]] && func` list is errexit-exempt —
+            #     rc 1 (not responsive / bad port) short-circuits (skip this lane), NO abort.
+            #     A BARE pool_daemon_connected would ABORT under set -e on rc 1.
+            if [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
+               && pool_daemon_connected "$session" "$port"; then
+
+                # (d) ADOPT (CONTRACT 3b(d) — reassign owner / connected=true / last_seen_at /
+                #     ensure-connected, all ALREADY implemented by _pool_adopt_lane). The gate
+                #     above is the "ensure connected" CHECK; _pool_adopt_lane does the
+                #     owner-reassign + the daemon re-bind (pool_daemon_connect) — the
+                #     "if not, connect" ACT. DELEGATE — do NOT re-inline the jq .owner mutation
+                #     or pool_daemon_connect. `if _pool_adopt_lane "$n"; then …; fi` is
+                #     errexit-exempt: rc 1 (Chrome died between the gate and the re-bind) →
+                #     fall through to the NEXT stale lane (try the next orphan); the racy lane
+                #     is NOT reaped (reuse-only). On rc 0 → echo the lane + return 0 (DONE —
+                #     first responsive orphan adopted).
+                if _pool_adopt_lane "$n"; then
+                    # The ONLY stdout write: the adopted lane N. Every helper is stdout-clean
+                    # (pool_lease_field captured in $(); pool_daemon_connected redirects both
+                    # probes >/dev/null; _pool_adopt_lane's pool_daemon_connect is
+                    # >/dev/null 2>&1 and _pool_log writes the LOG FILE). _pool_adopt_lane
+                    # logs the adoption itself ("pool_acquire(adopt): reused orphan lane N …")
+                    # → no second log line here.
+                    printf '%s\n' "$n"
+                    return 0
+                fi
+            fi
+            # port=0 (provisional) OR not responsive OR adopt-failed → skip this lane (NOT
+            # reaped; reuse-only — a later reap sweep / acquire handles it). Continue.
+        fi
+    done
+
+    # (e) No responsive orphan was adoptable. CONTRACT step 3b(e). Nothing echoed (so
+    #     `n=$(pool_reuse_orphan)` yields the empty string). NON-FATAL (never pool_die).
+    return 1
 }
