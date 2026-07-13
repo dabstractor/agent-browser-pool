@@ -182,14 +182,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Lease JSON I/O — atomic write & read",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Define the lease JSON schema and implement safe read/write operations.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Lease schema + atomic write function",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S1",
@@ -205,7 +205,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Lease read function + validation",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"

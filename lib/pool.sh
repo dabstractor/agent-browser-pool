@@ -647,3 +647,151 @@ pool_owner_alive() {
     # (d) Alive and the same process invocation that took the lease.
     return 0
 }
+
+# =============================================================================
+# Lease management — JSON write & atomic update (P1.M3.T1.S1)
+# =============================================================================
+
+# pool_lease_write LANE EPHEMERAL_DIR PORT SESSION OWNER_PID OWNER_COMM \
+#                  OWNER_STARTTIME OWNER_CWD CHROME_PID CHROME_PGID CONNECTED
+#
+# Build the FULL lease object (PRD §2.8 schema) with jq -n and publish it
+# atomically to $POOL_LANES_DIR/<LANE>.json. version is fixed at 1;
+# acquired_at and last_seen_at are both stamped to $(_pool_now) (captured ONCE,
+# so they match). Composes _pool_atomic_write (M1.T2.S1) for the tmp+mv publish.
+#
+# CONSUMERS: M5.T1.S1 acquire (provisional claim: PORT/CHROME_PID/CHROME_PGID=0,
+# CONNECTED=false) ; the read/query layer (M3.T1.S2 / M3.T2.*) reads what this
+# writes.
+#
+# TYPING (research §1): numbers + the boolean + timestamps use --argjson; strings
+# (ephemeral_dir, session, owner.comm, owner.cwd) use --arg. The #1 lease bug is
+# --arg on a number → a quoted string; --argjson keeps the type.
+#
+# GOTCHA — connected must be a JSON BOOLEAN: --argjson connected 1 would store the
+# NUMBER 1, not true. Validate connected ∈ {true,false} explicitly.
+# GOTCHA — non-numeric numerics make the jq build fail (exit 1 inside $(…)) → the
+# `|| pool_die` fires.
+# GOTCHA — $(jq …) strips jq's trailing newline, so the file is newline-less
+# (harmless; every JSON consumer handles it). _pool_atomic_write's printf '%s'
+# preserves the exact bytes.
+# GOTCHA — a jq BUILD failure happens BEFORE _pool_atomic_write, so the existing
+# lease (if any) is never corrupted by a failed build.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR) and pool_state_init (to
+# create the dir) must have run. A missing dir → _pool_atomic_write pool_die.
+pool_lease_write() {
+    local lane="${1:-}"
+    local ephemeral_dir="${2:-}"
+    local port="${3:-}"
+    local session="${4:-}"
+    local owner_pid="${5:-}"
+    local owner_comm="${6:-}"
+    local owner_starttime="${7:-}"
+    local owner_cwd="${8:-}"
+    local chrome_pid="${9:-}"
+    local chrome_pgid="${10:-}"
+    local connected="${11:-}"
+    local now json lease_file
+
+    # Validate lane (the index) and connected (must be a JSON boolean literal).
+    # `[[ ]] || pool_die` is errexit-exempt.
+    [[ "$lane" =~ ^[0-9]+$ ]] \
+        || pool_die "pool_lease_write: lane must be a non-negative integer, got: '$lane'"
+    [[ "$connected" == "true" || "$connected" == "false" ]] \
+        || pool_die "pool_lease_write: connected must be 'true' or 'false' (a JSON boolean), got: '$connected'"
+
+    # One timestamp capture → acquired_at == last_seen_at for a fresh lease.
+    now="$(_pool_now)"
+
+    # Build the JSON. Every field name + value is jq DATA (--arg/--argjson); the
+    # filter is a fixed literal → injection-safe. PLAIN assignment (not
+    # `local x=$(…)`) so jq's exit status reaches `|| pool_die` (SC2155).
+    json="$(jq -n \
+        --argjson version 1 \
+        --argjson lane "$lane" \
+        --arg ephemeral_dir "$ephemeral_dir" \
+        --argjson port "$port" \
+        --arg session "$session" \
+        --argjson owner_pid "$owner_pid" \
+        --arg owner_comm "$owner_comm" \
+        --argjson owner_starttime "$owner_starttime" \
+        --arg owner_cwd "$owner_cwd" \
+        --argjson chrome_pid "$chrome_pid" \
+        --argjson chrome_pgid "$chrome_pgid" \
+        --argjson acquired_at "$now" \
+        --argjson last_seen_at "$now" \
+        --argjson connected "$connected" \
+        '{version:$version, lane:$lane, ephemeral_dir:$ephemeral_dir, port:$port,
+          session:$session,
+          owner:{pid:$owner_pid,comm:$owner_comm,starttime:$owner_starttime,cwd:$owner_cwd},
+          chrome_pid:$chrome_pid, chrome_pgid:$chrome_pgid,
+          acquired_at:$acquired_at, last_seen_at:$last_seen_at, connected:$connected}')" \
+        || pool_die "pool_lease_write: failed to build lease JSON for lane $lane" \
+                    "(check numeric field values: port=$port owner_pid=$owner_pid" \
+                    "owner_starttime=$owner_starttime chrome_pid=$chrome_pid" \
+                    "chrome_pgid=$chrome_pgid)"
+
+    # Atomic publish (tmp in same dir → same FS → atomic rename). pool_die on failure.
+    lease_file="$POOL_LANES_DIR/$lane.json"
+    _pool_atomic_write "$lease_file" "$json"
+}
+
+# pool_lease_update LANE FIELD VALUE
+#
+# Read the EXISTING lease for LANE, set the top-level FIELD to VALUE (spliced as
+# raw JSON via --argjson), and re-publish atomically. Sibling fields and the
+# `owner` sub-object are PRESERVED. Used by the post-lock boot (M5.T1.S2:
+# port/chrome_pid/chrome_pgid/connected) and the heartbeat (M5.T1.S3:
+# last_seen_at).
+#
+# FIELD is TOP-LEVEL only (regex ^[a-zA-Z_][a-zA-Z0-9_]*$); dotted `owner.*`
+# updates are NOT supported (owner is written once at acquire, never mutated).
+#
+# VALUE typing: it is parsed as JSON by --argjson, so 53427 → number,
+# true/false → boolean, '"str"' → string (caller must quote). An empty/non-JSON
+# value makes jq exit 2 → pool_die.
+#
+# INJECTION SAFETY (research §2): the filter is the fixed literal `.[$f] = $v`;
+# FIELD and VALUE enter jq as DATA (--arg/--argjson), never spliced into the
+# program. The field regex is defense-in-depth.
+# GOTCHA — a missing or corrupted lease is a pool_die (update assumes a valid
+# lease just written by THIS process under flock; corruption is exceptional).
+# GOTCHA — the mutate is computed BEFORE _pool_atomic_write, so a jq failure never
+# touches the existing lease.
+# PRECONDITION: pool_config_init + pool_state_init; the lease must already exist
+# (written by pool_lease_write).
+pool_lease_update() {
+    local lane="${1:-}"
+    local field="${2:-}"
+    local value="${3:-}"
+    local lease_file updated
+
+    # Validate lane + field name (safe identifier — defense-in-depth even though
+    # .[$f] is already injection-safe).
+    [[ "$lane" =~ ^[0-9]+$ ]] \
+        || pool_die "pool_lease_update: lane must be a non-negative integer, got: '$lane'"
+    [[ "$field" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] \
+        || pool_die "pool_lease_update: invalid field name: '$field' (top-level identifier only)"
+
+    lease_file="$POOL_LANES_DIR/$lane.json"
+
+    # The lease must already exist.
+    [[ -f "$lease_file" ]] \
+        || pool_die "pool_lease_update: lease file does not exist: $lease_file"
+
+    # Syntax pre-check for a clear error (composes the M1.T2.S1 predicate).
+    if ! _pool_json_valid "$lease_file"; then
+        pool_die "pool_lease_update: lease file is not valid JSON: $lease_file"
+    fi
+
+    # Mutate one top-level field; preserve siblings + owner. PLAIN assignment so
+    # jq's exit status reaches `|| pool_die` (SC2155). A non-JSON value (empty,
+    # unquoted text) → jq --argjson exit 2 → pool_die.
+    updated="$(jq --argjson v "$value" --arg f "$field" '.[$f] = $v' "$lease_file")" \
+        || pool_die "pool_lease_update: failed to update lane $lane field '$field'" \
+                    "(value must be valid JSON: number, true/false, or a quoted string;" \
+                    "got: '$value')"
+
+    # Atomic re-publish.
+    _pool_atomic_write "$lease_file" "$updated"
+}
