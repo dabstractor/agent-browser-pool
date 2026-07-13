@@ -2383,3 +2383,98 @@ pool_ensure_connected() {
     _pool_log "pool_ensure_connected: lane $lane relaunched (new pid=${POOL_CHROME_PID:-0}, port=$port)"
     return 0
 }
+
+# =============================================================================
+# Release & teardown (P1.M5.T2.S1)
+# =============================================================================
+# PRD §2.5 "Release semantics" — the PUBLIC, idempotent, non-fatal teardown that fully
+# releases one lane: disconnect the daemon session, kill the Chrome process group, remove
+# the ephemeral dir, delete the lease. Consumed by the reaper (M5.T3 reap_stale), the admin
+# CLI (M7.T3 release [<N>|all]), and exhaustion force-reap (M5.T4). NOT used by acquire's
+# in-lock REAP-STALE (that calls the private kernel directly — the close subprocess is
+# forbidden under the short acquire flock, PRD §2.19).
+#
+# DESIGN — DELEGATE (M5.T1.S1 contract): the completed acquire PRP states verbatim:
+#   "M5.T2.S1's public pool_release_lane() will COMPOSE _pool_release_lane_internals
+#    rather than duplicate it." So the KILL (pool_chrome_kill pgroup teardown) + RM DIR
+#   (prefix-guarded rm -rf) + RM LEASE (rm -f) all happen via _pool_release_lane_internals.
+#   The ONE step this public layer adds — that the kernel deliberately omits (per
+#   pool_chrome_kill's docstring: "Daemon/session disconnect is … release's lease-delete
+#   (M5.T2.S1)") — is the daemon `close`.
+#
+# LOGIC (CONTRACT 3a→3g; the c↔d order is swapped — see GOTCHA — immaterial, host-verified):
+#   a. validate lane (^[0-9]+$) else return 0 (path-traversal defense).
+#   b. pool_lease_read "$lane" → json. rc 1 (missing/corrupt) ⇒ already released ⇒ return 0
+#      (idempotent). Extract session (the ONE field the kernel does not read). Defensive
+#      reconstruct → "abpool-$lane" if empty/null.
+#   c. DISCONNECT daemon: $POOL_REAL_BIN --session "$session" close 2>/dev/null || true.
+#      Run BEFORE the kill (graceful detach while the Chrome may still be reachable).
+#   d. _pool_release_lane_internals "$lane" → KILL pgroup + RM DIR + RM LEASE (the kernel,
+#      non-fatal, idempotent). It re-reads the lease + does all destructive work.
+#   e. _pool_log … ; return 0.
+#
+# CALLER CONTRACT (the reaper M5.T3 / admin M7.T3 / exhaustion M5.T4, under set -e):
+#     for n in $(pool_lanes_list); do
+#         if pool_lane_is_stale "$n"; then pool_release_lane "$n"; fi   # rc 0 always
+#     done
+#   OR explicit: pool_release_lane "$N". No flock needed (lane-local + idempotent).
+#
+# GOTCHA — DELEGATE: do NOT re-implement kill/rm/lease (the kernel does it; duplicating
+#   violates the M5.T1.S1 contract + the prefix-guarded rm logic). Read session, close, delegate.
+# GOTCHA — read session BEFORE delegating: the kernel DELETES the lease; after delegation
+#   pool_lease_read returns "no lease". So extract session up front.
+# GOTCHA — close BEFORE kill (d→c swap vs the literal CONTRACT): graceful detach + the kernel
+#   bundles kill+rm+rmlease. IMMATERIAL — close is disconnect-only (Chrome survives it),
+#   rc always 0, no strays (research §3, HOST-VERIFIED on agent-browser 0.28.0).
+# GOTCHA — close 2>/dev/null || true: rc is ALWAYS 0 on 0.28.0, but the guard is future-proof +
+#   the idempotency mechanism + non-fatal intent. close does NOT kill Chrome (pool_chrome_kill
+#   does); the session LINGERS after close (harmless; re-acquire re-binds via connect).
+# GOTCHA — NON-FATAL always: never pool_die, never non-zero. Missing lease ⇒ return 0;
+#   bad lane ⇒ return 0; POOL_REAL_BIN unset ⇒ skip close (kernel still tears down).
+# GOTCHA — NO flock: release is lane-local + idempotent. Flocking is the caller's concern.
+# GOTCHA — every `local` capture is split (BashFAQ 105); pool_lease_read guarded (rc 1 non-fatal).
+# Reads POOL_REAL_BIN (close subprocess) + POOL_LANES_DIR (via helpers). No new globals exported.
+# PRECONDITION: pool_config_init (+ pool_state_init by the caller).
+pool_release_lane() {
+    local lane="${1:-}"
+    local json session
+
+    # (a) Validate lane (path-traversal defense; a bogus lane "has nothing to release").
+    #     `[[ ]] || return 0` is errexit-exempt. Matches the kernel.
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 0
+
+    # (b) Read the lease. rc 1 (missing OR corrupt) ⇒ already released ⇒ return 0 (idempotent).
+    #     `if !` is errexit-exempt (a bare capture would ABORT under set -e on rc 1).
+    if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+        return 0
+    fi
+
+    # Extract `session` — the ONE field the kernel does NOT read (needed for the daemon close).
+    # jq cannot fail here (valid JSON guaranteed by pool_lease_read's _pool_json_valid). The
+    # assignment is split (local declared above) — no SC2155 / errexit masking. jq -r on a
+    # missing field outputs the literal "null" → guard both empty AND "null", reconstruct.
+    session="$(jq -r '.session' <<<"$json")"
+    [[ -n "$session" && "$session" != "null" ]] || session="abpool-$lane"
+
+    # (c) DISCONNECT the daemon session — graceful detach while the Chrome may still be
+    #     reachable (close is DISCONNECT-ONLY: it does NOT kill the Chrome — host-verified,
+    #     research §3). rc is ALWAYS 0 on agent-browser 0.28.0 (fresh/live/dead/repeated);
+    #     `2>/dev/null || true` is future-proof + the idempotency mechanism. The session
+    #     LINGERS in the daemon's session list after close (M4.T3.S1 research §3) — harmless:
+    #     a re-acquired lane (same N → same abpool-N) re-binds via pool_daemon_connect
+    #     (idempotent, M4.T3.S1 research §1). Guard POOL_REAL_BIN (set -u safety; release is
+    #     non-fatal — if unset, skip close, the kernel still tears down Chrome+dir+lease).
+    if [[ -n "${POOL_REAL_BIN:-}" ]]; then
+        "$POOL_REAL_BIN" --session "$session" close 2>/dev/null || true
+    fi
+
+    # (d) Delegate the Chrome teardown + dir removal + lease deletion to the shared kernel
+    #     (M5.T1.S1 contract: COMPOSE, do NOT duplicate). The kernel re-reads the lease,
+    #     calls pool_chrome_kill (pgroup SIGTERM→SIGKILL + bare-pid fallback; idempotent),
+    #     rm -rf the reconstructed prefix-guarded $POOL_EPHEMERAL_ROOT/$lane, and rm -f the
+    #     lease. It returns 0 ALWAYS (non-fatal). So pool_release_lane inherits rc 0.
+    _pool_release_lane_internals "$lane"
+
+    _pool_log "pool_release: released lane $lane (daemon session '$session' disconnected, chrome killed, dir+lease removed)"
+    return 0
+}
