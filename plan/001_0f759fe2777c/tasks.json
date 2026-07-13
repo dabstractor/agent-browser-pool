@@ -281,7 +281,7 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Lane Lifecycle Operations",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Implement the low-level operations for creating and destroying lanes: btrfs CoW copy from master, Singleton lock cleanup, free TCP port discovery, Chrome launch with setsid + anti-throttle flags, CDP readiness wait, daemon connect, and process-group teardown. These are the building blocks the acquire/release flows orchestrate.",
           "tasks": [
             {
@@ -313,7 +313,7 @@
               "type": "Task",
               "id": "P1.M4.T2",
               "title": "Port allocation & Chrome launch",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Find a free TCP port in the pool range, launch Chrome with setsid and anti-throttle flags, and wait for the CDP endpoint.",
               "subtasks": [
                 {
@@ -335,7 +335,7 @@
                   "type": "Subtask",
                   "id": "P1.M4.T2.S2",
                   "title": "Chrome launch with setsid + anti-throttle + CDP readiness wait",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M4.T2.S1"
@@ -354,14 +354,14 @@
               "type": "Task",
               "id": "P1.M4.T3",
               "title": "Daemon connect & teardown primitives",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Connect the agent-browser daemon to a Chrome CDP endpoint, and tear down a Chrome process group cleanly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T3.S1",
                   "title": "agent-browser connect + verify + process group teardown",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S2"

@@ -1414,3 +1414,177 @@ pool_find_free_port() {
     # (c) Exhausted — rc 1, NOT pool_die. Caller handles via M5.T4 (block/force-reap/alert).
     return 1
 }
+
+# =============================================================================
+# Lane lifecycle — Chrome launch & CDP readiness (P1.M4.T2.S2)
+# =============================================================================
+# Launch one pooled Chrome as its own process-group leader (pgid==pid via setsid) on a
+# chosen port + ephemeral profile dir, then wait for its CDP endpoint to answer. Implements
+# PRD §2.6 (Chrome launch per lane — the EXACT flag list) + §2.4 step 3g (LAUNCH setsid …;
+# record chrome_pid + pgid) + 3h (WAIT for CDP /json/version). Consumed by the acquire
+# POST-LOCK boot (M5.T1.S2: copy → find_free_port → launch → wait_cdp → connect → update
+# lease), OUTSIDE the flock critical section (key_findings FINDING 2 — concurrent boots).
+
+# pool_chrome_launch PORT USER_DATA_DIR LANE
+#
+# Launch Chrome (via setsid, so pgid==pid) on PORT with USER_DATA_DIR, writing combined
+# stdout/stderr to $POOL_STATE_DIR/chrome-<LANE>.log. Exports globals POOL_CHROME_PID and
+# POOL_CHROME_PGID (== POOL_CHROME_PID — the setsid contract; release does kill -- -<pgid>).
+# Returns 0 on success; pool_die on bad args / instant Chrome death / missing log dir.
+#
+# LOGIC (CONTRACT 3a):
+#   - flag list: --remote-debugging-port=<port> --user-data-dir=<ABSOLUTE udd>
+#     --no-first-run --no-default-browser-check --disable-background-timer-throttling
+#     --disable-backgrounding-occluded-windows --disable-renderer-backgrounding
+#     --disable-features=CalculateNativeWinOcclusion --disable-back-forward-cache
+#     ( + --headless=new iff POOL_HEADLESS==1 )
+#   - log file: $POOL_STATE_DIR/chrome-<lane>.log
+#   - launch: setsid "$POOL_CHROME_BIN" <flags> > "$log" 2>&1 &
+#   - capture POOL_CHROME_PID=$!
+#   - POOL_CHROME_PGID=$(ps -o pgid= -p $PID | tr -d ' ')  (GUARDED — see GOTCHA)
+#   - export both as globals (declare -g).
+#
+# CONSUMER: M5.T1.S2 acquire post-lock boot. CONTRACT: rc 0 → Chrome is launched + the two
+#   globals are set (pgid==pid); any failure exits the process via pool_die. The caller then
+#   calls pool_wait_cdp <port>, then reads POOL_CHROME_PID/POOL_CHROME_PGID into the lease.
+#
+# GOTCHA — setsid $!/pgid contract (HOST-VERIFIED, research §1): `setsid CMD &; SP=$!`
+#   gives pgid==pid==sid for CMD because util-linux setsid (default, NO --fork) exec's the
+#   command after setsid(2) when the caller is not a pgroup leader. Do NOT add --fork/-f
+#   (it would fork and break pgid==pid → release would leak orphans).
+# GOTCHA — the pgid capture ABORTS under set -e on instant death (HOST-VERIFIED, research
+#   §5): `ps -o pgid= -p $PID` returns rc 1 + empty if Chrome already exited (bad port /
+#   missing binary). A BARE $(…) would ABORT the pool. Capture with `|| true`, then a
+#   `[[ -z ]]` check → pool_die with the log path. Highest-impact gotcha in this task.
+# GOTCHA — the log redirect needs an existing dir: `> "$log" 2>&1 &` fails to open if the
+#   dir is missing → the job exits instantly → trips the §5 guard. Defensively mkdir -p
+#   $POOL_STATE_DIR first (pool_state_init already does this, but be robust).
+# GOTCHA — POOL_CHROME_BIN may be a bare name (resolved via PATH by setsid/execvp) or an
+#   absolute path (canonicalized by pool_config_init). Both work — pass it quoted.
+# GOTCHA — NO bare ~ (PRD §2.2): USER_DATA_DIR is validated ABSOLUTE before launch.
+# GOTCHA — POOL_CHROME_PID/POOL_CHROME_PGID naming follows the codebase POOL_* convention
+#   (every global is POOL_*; pool_owner_resolve sets POOL_OWNER_PID). The contract's bare
+#   CHROME_PID/CHROME_PGID is shorthand. (research §6)
+# Reads ONLY POOL_CHROME_BIN + POOL_HEADLESS + POOL_STATE_DIR (frozen by pool_config_init).
+# Writes only the Chrome log. No new env-vars/files.
+# PRECONDITION: pool_config_init (for the three globals).
+pool_chrome_launch() {
+    local port="${1:-}"
+    local user_data_dir="${2:-}"
+    local lane="${3:-}"
+    local log_file flags pgid
+
+    # Validate args. All `[[ ]] || pool_die` are errexit-exempt.
+    [[ "$port" =~ ^[0-9]+$ ]] \
+        || pool_die "pool_chrome_launch: port must be a non-negative integer, got: '${port:-<unset>}'"
+    [[ -n "$user_data_dir" ]] \
+        || pool_die "pool_chrome_launch: user_data_dir is empty"
+    [[ "$user_data_dir" == /* ]] \
+        || pool_die "pool_chrome_launch: user_data_dir must be ABSOLUTE (PRD §2.2): $user_data_dir"
+    [[ "$lane" =~ ^[0-9]+$ ]] \
+        || pool_die "pool_chrome_launch: lane must be a non-negative integer, got: '${lane:-<unset>}'"
+    [[ -n "$POOL_CHROME_BIN" ]] \
+        || pool_die "pool_chrome_launch: POOL_CHROME_BIN is empty (run pool_config_init first)"
+
+    # Ensure the log dir exists so the backgrounded redirect can open the log file.
+    # pool_state_init already mkdir -p's the lanes subdir (a child of POOL_STATE_DIR), but
+    # be robust: this function may be called in a test that skipped pool_state_init.
+    mkdir -p -- "$POOL_STATE_DIR" \
+        || pool_die "pool_chrome_launch: cannot create log dir: $POOL_STATE_DIR"
+    log_file="$POOL_STATE_DIR/chrome-$lane.log"
+
+    # Build the flag list (array — survives any future arg with spaces; no word-splitting).
+    flags=(
+        --remote-debugging-port="$port"
+        --user-data-dir="$user_data_dir"
+        --no-first-run
+        --no-default-browser-check
+        --disable-background-timer-throttling
+        --disable-backgrounding-occluded-windows
+        --disable-renderer-backgrounding
+        --disable-features=CalculateNativeWinOcclusion
+        --disable-back-forward-cache
+    )
+    [[ "$POOL_HEADLESS" == "1" ]] && flags+=(--headless=new)
+
+    # Launch: setsid makes Chrome its own session/group leader (pgid==pid). The redirection
+    # captures Chrome's combined stdout/stderr to the per-lane log. `&` backgrounds it; $!
+    # is Chrome's pid (setsid exec'd it — research §1). Backgrounding is errexit-exempt.
+    setsid -- "$POOL_CHROME_BIN" "${flags[@]}" >"$log_file" 2>&1 &
+    POOL_CHROME_PID=$!; declare -g POOL_CHROME_PID
+
+    # Capture the process-group id. GUARDED (research §5): `ps -o pgid= -p $PID` returns
+    # rc 1 + empty if Chrome already died (instant exit). A bare $(…) would ABORT under
+    # set -e; `|| true` keeps us alive, then `[[ -z ]]` converts "already dead" into a
+    # clean pool_die with the log path so the operator can read Chrome's stderr.
+    pgid="$(ps -o pgid= -p "$POOL_CHROME_PID" 2>/dev/null | tr -d ' ')" || true
+    if [[ -z "$pgid" ]]; then
+        # Chrome died before we could read its pgroup. Best-effort reap of the bare pid,
+        # then die with the log path (Chrome's stderr is in there).
+        kill "$POOL_CHROME_PID" 2>/dev/null || true
+        pool_die "pool_chrome_launch: Chrome (pid $POOL_CHROME_PID) exited immediately;" \
+                 "see log: $log_file"
+    fi
+    POOL_CHROME_PGID="$pgid"; declare -g POOL_CHROME_PGID
+
+    # Observability: one line. _pool_log writes ISO-8601 + msg to the pool log + stderr.
+    # (Best-effort: _pool_log never fails the caller — it falls back to stderr.)
+    _pool_log "pool_chrome_launch: lane=$lane port=$port pid=$POOL_CHROME_PID pgid=$POOL_CHROME_PGID headless=$POOL_HEADLESS"
+
+    return 0
+}
+
+# pool_wait_cdp PORT
+#
+# Poll Chrome's CDP HTTP endpoint (http://127.0.0.1:<PORT>/json/version) until it answers
+# (HTTP 200 → curl -sf exits 0) or the budget is exhausted. Returns 0 if CDP is ready;
+# returns 1 on timeout AFTER killing the Chrome process group (so a half-booted Chrome
+# does not leak). NON-FATAL: never pool_die — the caller (M5.T1.S2) owns the PRD §2.14
+# "retry launch once; then fail, drop lane" policy.
+#
+# LOGIC (CONTRACT 3b):
+#   - loop up to 60 times (30s total): curl -sf http://127.0.0.1:<port>/json/version
+#   - return 0 if CDP responds (curl rc 0)
+#   - on timeout: kill -- -<POOL_CHROME_PGID> (if set + numeric), then return 1.
+#
+# CONSUMER: M5.T1.S2 acquire post-lock boot, called immediately after pool_chrome_launch.
+#   CONTRACT: rc 0 → Chrome's CDP is ready, proceed to connect (M4.T3.S1); rc 1 → timed
+#   out, Chrome pgroup already killed here, caller retries launch once then drops the lane.
+#   Caller MUST guard under set -e: `if pool_wait_cdp "$port"; then …; else <retry path>; fi`.
+#
+# GOTCHA — 60×0.5s=30s (research §7): CONTRACT 3b ("Loop up to 60 times (30s total)") +
+#   external_deps §2.2 (`seq 1 60`) agree; PRD §2.4 step 3h / §2.14 "15s" is a stale
+#   summary. We use a bash (( )) counter (no seq fork). The budget is ONE named constant.
+# GOTCHA — curl -sf exit codes: connection-refused (Chrome still booting) = rc 7 → keep
+#   looping; HTTP 200 = rc 0 → ready. No --max-time needed (refused is instant); the bare
+#   `curl -sf` matches external_deps §2.2 exactly.
+# GOTCHA — kill -- -<pgid> needs the `--` (pgid is a positive int but the arg starts with
+#   '-'). Guarded by a numeric check so pool_wait_cdp is safe to call standalone in tests
+#   (no prior launch → POOL_CHROME_PGID unset → skip the kill, just return 1).
+# GOTCHA — NON-FATAL (return 1, NOT pool_die): same family as pool_find_free_port.
+# Reads only $1 (port) + the global POOL_CHROME_PGID (set by pool_chrome_launch). No writes
+# beyond the process-group signal.
+# PRECONDITION: pool_chrome_launch (for POOL_CHROME_PGID) when used in the real boot; none
+#   required for a standalone timeout test (the pgid guard makes it safe).
+# shellcheck disable=SC2034 # POOL_CDP_TRIES is the single tunable budget.
+pool_wait_cdp() {
+    local port="${1:-}"
+    local i
+    local -ri POOL_CDP_TRIES=60    # ×0.5s sleep = 30s budget (research §7; tunable)
+
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1   # bad port → non-fatal rc 1 (defensive)
+
+    for (( i = 0; i < POOL_CDP_TRIES; i++ )); do
+        if curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.5
+    done
+
+    # Timeout — tear down the process group so a half-booted Chrome does not leak.
+    # The numeric guard makes this safe when called without a prior pool_chrome_launch.
+    if [[ "${POOL_CHROME_PGID:-}" =~ ^[0-9]+$ ]]; then
+        kill -- -"$POOL_CHROME_PGID" 2>/dev/null || true
+    fi
+    return 1
+}
