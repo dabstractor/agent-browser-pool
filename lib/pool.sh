@@ -3539,3 +3539,149 @@ pool_wrapper_main() {
     # after this line. The agent's command now runs against its locked, booted, connected lane.
     exec "$POOL_REAL_BIN" "${POOL_CLEAN_ARGS[@]}"
 }
+
+# =============================================================================
+# Admin CLI — status (P1.M7.T1.S1)
+# =============================================================================
+# pool_admin_status
+#
+# Print a READ-ONLY lane table to stdout for `agent-browser-pool status`
+# (PRD §1.5 / §2.12). No input. Iterates EVERY lane (pool_lanes_list), reads each
+# lease (pool_lease_read), computes a human age from acquired_at (_pool_age_str),
+# and derives a STATE verdict (pool_lane_is_stale + the `connected` field).
+#
+# OUTPUT COLUMNS (PRD §2.12 order), one space-separated aligned row per lane:
+#   LANE       lane number (int)                 — from pool_lanes_list
+#   PORT       Chrome DevTools port (int)        — .port
+#   SESSION    AGENT_BROWSER_SESSION string      — .session   (truncated 16)
+#   OWNER_PID  owning pi process pid (int)       — .owner.pid
+#   OWNER_CWD  owner's working dir (path)        — .owner.cwd (truncated 24)
+#   CHROME_PID Chrome process pid (int)          — .chrome_pid
+#   AGE        time since acquired_at            — _pool_age_str (Ns/Nm/Nh/Nd)
+#   STATE      verdict (see below)               — live | STALE | disconnected
+#
+# STATE precedence (STALE > disconnected > live), from the tri-state
+# pool_lane_is_stale (rc 0=STALE / 1=LIVE / 2=NO-LEASE) + the JSON boolean
+# `connected` (compare the STRING "false" — never `jq -e`):
+#   pool_lane_is_stale rc 0                         → STALE
+#   rc 1 (live) or rc 2 (no-lease/TOCTOU):
+#       connected == "false"                        → disconnected
+#       else                                        → live
+# A STALE owner wins regardless of connectivity (the lane is a reapable leak).
+#
+# EMPTY POOL → prints the single line "No active lanes." and returns 0 (no header).
+#
+# CONTRACT:
+#   - READ-ONLY: kills nothing, deletes nothing. The only side effect is
+#     pool_state_init's idempotent mkdir -p of POOL_LANES_DIR.
+#   - NEVER calls pool_die; NEVER returns non-zero. A corrupt lease (invalid JSON)
+#     or a TOCTOU deletion degrades to a row of "?" fields with state STALE, then
+#     continues. The corrupt-lease warning is logged by pool_lease_read to the log
+#     FILE + stderr (NOT stdout) → stdout stays a clean, pipeable table.
+#   - A stray non-numeric *.json is skipped by pool_lanes_list (never iterated).
+#
+# set -e GUARDS (all live — set -euo pipefail at lib/pool.sh:23):
+#   - pool_lease_read returns rc 1 on missing/corrupt → MUST guard:
+#     `if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then …`.
+#   - pool_lane_is_stale is tri-state (rc 0/1/2) → MUST call inside `if …; then …`.
+#   - never `local x="$(…)"` (SC2155); declare then assign.
+#   - `(( ))` only inside if/elif; `$(( ))` expansion is always safe.
+#   - acquired_at from a missing field is the STRING "null" → `$(( now - null ))`
+#     is an arithmetic error; guard `[[ "$acquired_at" =~ ^[0-9]+$ ]]` first.
+#
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR) + pool_state_init (mkdir it).
+# CONSUMERS: M7.T5.S1 bin/agent-browser-pool dispatcher: `case status) pool_admin_status ;;`.
+pool_admin_status() {
+    # Declare ALL locals up front (SC2155: never `local x="$(…)"`).
+    local -a lanes fields
+    local fmt json lane
+    local port session owner_pid owner_cwd chrome_pid acquired_at connected
+    local age state
+
+    # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
+    # Mirrors pool_wrapper_main step "a" (lib/pool.sh:3455-3459). pool_state_init's
+    # idempotent mkdir -p guarantees POOL_LANES_DIR exists for the pool_lanes_list glob.
+    pool_config_init
+    pool_state_init
+
+    # Shared fixed-width format string (header + every row). %-N.Ns = truncate to
+    # exactly N cols (bare %-Ns does NOT truncate → long cwd/session would misalign).
+    # Widths ≥ both the header label and typical data (research §6 / design-decisions D4).
+    fmt='%4s %6s %-16.16s %10s %-24.24s %10s %5s %-12s\n'
+
+    # --- b. snapshot lanes into an array (also a clean empty-pool check) ---------
+    # Process substitution exit status is NOT propagated → set -e safe (pool_lanes_list
+    # returns 0 always anyway). mapfile of empty output → empty array.
+    mapfile -t lanes < <(pool_lanes_list)
+
+    # --- c. empty pool → single message, rc 0, NO header ------------------------
+    # `(( ))` inside `if` is errexit-exempt (the returns-1-on-zero gotcha does not apply).
+    if (( ${#lanes[@]} == 0 )); then
+        printf 'No active lanes.\n'
+        return 0
+    fi
+
+    # --- d. header row ----------------------------------------------------------
+    # SC2059 disabled: $fmt is a trusted compile-time constant (hardcoded above), NOT
+    # external input — using it as the format string is what GUARANTEES the header and
+    # every data row share ONE identical column layout (the alignment invariant).
+    # shellcheck disable=SC2059
+    printf -- "$fmt" \
+        "LANE" "PORT" "SESSION" "OWNER_PID" "OWNER_CWD" "CHROME_PID" "AGE" "STATE"
+
+    # --- e. one row per lane ----------------------------------------------------
+    for lane in "${lanes[@]}"; do
+        # Read the lease. A bare capture ABORTS under set -e on rc 1 (missing/corrupt) →
+        # guard with `if !`. 2>/dev/null suppresses jq's corrupt-parse stderr (the
+        # WARNING is logged to file+stderr by pool_lease_read, NOT printed to stdout).
+        if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+            # Missing (TOCTOU) OR corrupt: degraded row, keep the table intact.
+            # pool_lanes_list already validated lane is numeric, so it is a real lane id.
+            # shellcheck disable=SC2059
+            printf -- "$fmt" "$lane" "?" "?" "?" "?" "?" "?" "STALE"
+            continue
+        fi
+
+        # Extract all row fields in ONE jq fork (mirrors pool_lane_is_stale @1175-1178:
+        # mapfile -t < <(jq -r '.a, .b, .c' <<<"$json")). `:-` defends a short read.
+        mapfile -t fields < <(jq -r \
+            '.port, .session, .owner.pid, .owner.cwd, .chrome_pid, .acquired_at, .connected' \
+            <<<"$json")
+        port="${fields[0]:-}"
+        session="${fields[1]:-}"
+        owner_pid="${fields[2]:-}"
+        owner_cwd="${fields[3]:-}"
+        chrome_pid="${fields[4]:-}"
+        acquired_at="${fields[5]:-}"
+        connected="${fields[6]:-}"
+
+        # AGE from acquired_at. _pool_age_str is rc 0 always, but acquired_at MUST be
+        # numeric first: a missing field → "null" → `$(( now - null ))` arithmetic
+        # error under set -e. Guard, then call (rc 0 — no further guard needed).
+        if [[ "$acquired_at" =~ ^[0-9]+$ ]]; then
+            age="$(_pool_age_str "$acquired_at")"
+        else
+            age="?"
+        fi
+
+        # STATE verdict (precedence STALE > disconnected > live).
+        # pool_lane_is_stale is TRI-STATE → MUST call inside `if` (a bare rc-1/2 call
+        # ABORTS). rc 0 → STALE; rc 1 (live) OR rc 2 (no-lease/TOCTOU) → decide by
+        # connectivity (connected is a JSON boolean; compare the STRING "false").
+        if pool_lane_is_stale "$lane"; then
+            state="STALE"
+        else
+            if [[ "$connected" == "false" ]]; then
+                state="disconnected"
+            else
+                state="live"
+            fi
+        fi
+
+        # shellcheck disable=SC2059
+        printf -- "$fmt" \
+            "$lane" "$port" "$session" "$owner_pid" "$owner_cwd" "$chrome_pid" "$age" "$state"
+    done
+
+    return 0
+}

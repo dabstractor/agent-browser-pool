@@ -673,14 +673,14 @@
               "type": "Task",
               "id": "P1.M7.T1",
               "title": "status command — lane table display",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Display all lanes with port, session, owner PID+cwd, Chrome PID, age, and state (live/stale/disconnected).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T1.S1",
                   "title": "status — format and display lane table",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T1.S2",
@@ -698,14 +698,14 @@
               "type": "Task",
               "id": "P1.M7.T2",
               "title": "reap command — on-demand stale cleanup",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Trigger the stale reaper on demand and report what was cleaned.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M7.T2.S1",
                   "title": "reap — trigger pool_reap_stale and report",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M5.T3.S1"
