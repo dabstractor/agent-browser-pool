@@ -929,3 +929,125 @@ pool_lease_exists() {
     _pool_json_valid "$file" || return 1
     return 0
 }
+
+# =============================================================================
+# Lease management — query operations (P1.M3.T2.S1)
+# =============================================================================
+# Cross-lane iteration + owner-correlation queries. Composes the S2 read helpers
+# (pool_lease_field), the M2.T2.S1 identity predicate (pool_owner_alive), and the
+# M2.T1.S1 owner globals (POOL_OWNER_PID). Consumed by the wrapper lifecycle step 2
+# (M6.T3.S1 reuse-vs-acquire), the reap/ensure-connected orchestration (M5), and the
+# admin CLI (M7 status/doctor). NON-FATAL by design: "no match"/"no lease" returns 1
+# (the wrapper's signal to acquire), mirroring _pool_json_valid / pool_owner_alive /
+# the S2 readers.
+
+# pool_lanes_list
+#
+# Enumerate every NUMERIC lane stem from $POOL_LANES_DIR/*.json, echo each N on its
+# own line, numerically sorted ascending (sort -n). Always returns 0 — an empty or
+# missing lanes dir is a VALID state (the wrapper's first-ever acquire; PRD §2.4
+# step 2 scans this), never an error.
+#
+# CONSUMERS: pool_lease_find_mine / pool_lease_find_mine_any (below); M5.T3 reap;
+# M7.T1 status; M7.T4 doctor; M5.T4 force-reap (find oldest dead-owner lane).
+#
+# GOTCHA — nullglob is NOT set: a no-match glob expands to the LITERAL
+# "$POOL_LANES_DIR/*.json". `[[ -f "$f" ]] || continue` rejects that literal (and
+# subdirs, and non-files). Host-verified 2026-07-12.
+# GOTCHA — numeric filter: a stray non-numeric *.json (e.g. an editor artifact) is
+# skipped by the ^[0-9]+$ test, matching the lane-validation contract used by every
+# lease function (S1/S2). Lane numbers are the only thing we ever echo.
+# GOTCHA — for n in $(pool_lanes_list): output is digits-only/newline-separated, so
+# the unquoted command substitution word-splits into exactly the lane numbers
+# (intentional; quoting would make it one word). Safe because no lane has whitespace.
+# GOTCHA — | sort -n runs the loop body in a subshell; the function's status is
+# sort's (always 0). The explicit `return 0` documents intent and is pipefail-safe.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR). The dir need not exist — a
+# missing dir surfaces as a no-match glob → 0 iterations → no output (correct).
+pool_lanes_list() {
+    local f base n
+    for f in "$POOL_LANES_DIR"/*.json; do
+        [[ -f "$f" ]] || continue
+        base="${f##*/}"
+        n="${base%.json}"
+        [[ "$n" =~ ^[0-9]+$ ]] || continue
+        printf '%s\n' "$n"
+    done | sort -n
+    return 0
+}
+
+# pool_lease_find_mine
+#
+# Find MY valid lease: scan every lane; on the first lane whose owner.pid ==
+# POOL_OWNER_PID AND pool_owner_alive(pid, starttime, comm) → echo that lane N and
+# return 0. If no valid match → return 1. Implements PRD §2.4 step 2 ("Find MY
+# lease: owner.pid==pid && comm=='pi' && starttime match").
+#
+# CONSUMERS: M6.T3.S1 wrapper lifecycle step 2 (rc 0 → reuse lane N; rc 1 → acquire);
+# M5.T1.S3 ensure_connected (reuse gate).
+#
+# ORDERING (CONTRACT): owner.pid == POOL_OWNER_PID (cheap string equality) BEFORE
+# pool_owner_alive (3× /proc reads). Most lanes are not mine; only the (≤1, by the
+# §2.8 invariant) pid-matching lane reaches the liveness check.
+# GOTCHA — corrupt/mid-deletion leases are SKIPPED, not fatal: pool_lease_field
+# returns 1 on missing/corrupt (S2 contract); `|| continue` keeps the scan alive
+# under set -e (one bad lane must never break the hot wrapper path).
+# GOTCHA — pool_owner_alive is passed the LEASE's stored starttime + comm so it can
+# compare them against the LIVE process → defeats PID recycling (PRD §2.8/§2.14).
+# GOTCHA — POOL_OWNER_PID == "0" (passthrough) passes the guard; the loop finds no
+# real pid==0 lease → return 1 (correct). Unset/empty/non-numeric → return 1 fast.
+# GOTCHA — CALLERS under set -e MUST guard: `if n="$(pool_lease_find_mine)"; then …`.
+#   A bare `n="$(pool_lease_find_mine)"` ABORTS on the rc-1 path (same hazard as
+#   pool_lease_read — S2 research §2).
+# PRECONDITION: pool_config_init + pool_owner_resolve (for POOL_OWNER_PID).
+pool_lease_find_mine() {
+    local n pid st comm
+    # No resolved owner → no lease. `[[ ]] || return 1` is errexit-exempt.
+    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ ]] || return 1
+    for n in $(pool_lanes_list); do
+        pid="$(pool_lease_field "$n" owner.pid 2>/dev/null)" || continue
+        # Cheap equality first; skip non-mine lanes without touching /proc.
+        [[ "$pid" == "$POOL_OWNER_PID" ]] || continue
+        st="$(pool_lease_field "$n" owner.starttime 2>/dev/null)" || continue
+        comm="$(pool_lease_field "$n" owner.comm 2>/dev/null)" || continue
+        # Live + same process invocation? (pool_owner_alive returns 1 on dead/
+        # recycled — the `if` is simply false → keep scanning.) One owner ≤1 lane
+        # (§2.8) ⟹ the scan falls through to return 1 if this one is stale.
+        if pool_owner_alive "$pid" "$st" "$comm"; then
+            printf '%s\n' "$n"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# pool_lease_find_mine_any
+#
+# Diagnostic variant of find_mine: return the first lane whose owner.pid ==
+# POOL_OWNER_PID REGARDLESS of liveness (no pool_owner_alive call). Surfaces a STALE
+# lease that nonetheless names this PID — for the reaper (M5.T3), doctor (M7.T4),
+# and explicit release (M7.T3) self-cleanup paths. Echo the lane N and return 0 on
+# the first pid-match; return 1 if no lane names this PID.
+#
+# CONSUMERS: M5.T3 reap (self-reap / diagnostic), M7.T4 doctor (reconcile), M7.T3
+# release [<N>|all] (find my lanes to tear down).
+#
+# DIFFERENCE from find_mine: no pool_owner_alive → returns a lane even when the owner
+# is dead/recycled. find_mine = "valid mine"; find_mine_any = "claiming to be mine".
+# GOTCHA — first-match semantics (return immediately). §2.8 invariant ⟹ ≤1 such
+# lane, so first-match == only-match in correct operation.
+# GOTCHA — corrupt lanes skipped via `|| continue` (same as find_mine).
+# GOTCHA — CALLERS under set -e MUST guard: `if n="$(pool_lease_find_mine_any)"; then`.
+# PRECONDITION: pool_config_init + pool_owner_resolve (for POOL_OWNER_PID).
+pool_lease_find_mine_any() {
+    local n pid
+    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ ]] || return 1
+    for n in $(pool_lanes_list); do
+        pid="$(pool_lease_field "$n" owner.pid 2>/dev/null)" || continue
+        if [[ "$pid" == "$POOL_OWNER_PID" ]]; then
+            printf '%s\n' "$n"
+            return 0
+        fi
+    done
+    return 1
+}
