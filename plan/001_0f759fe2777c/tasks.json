@@ -397,7 +397,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S1",
                   "title": "flock critical section — reap-stale + reuse-orphan + choose-N + provisional claim",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M3.T2.S2",
@@ -417,7 +417,7 @@
                   "type": "Subtask",
                   "id": "P1.M5.T1.S2",
                   "title": "Post-lock boot — copy + port + launch + connect + update lease",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M5.T1.S1",

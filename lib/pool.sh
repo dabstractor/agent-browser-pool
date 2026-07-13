@@ -1774,3 +1774,282 @@ pool_chrome_kill() {
 
     return 0
 }
+
+# =============================================================================
+# Acquire — flock critical section (P1.M5.T1.S1)
+# =============================================================================
+# The flock-guarded acquire critical section: REAP-STALE + REUSE-ORPHAN + CHOOSE-N +
+# CLAIM (PRD §2.4 step 3a–3d). Implements key_findings FINDING 2 (claim under the SHORT
+# flock, boot Chrome AFTER releasing — no launch/copy/wait inside the lock) + §2.9
+# (rc 1 ⇒ exhaustion → M5.T4) + §2.10 (lazy reaper on acquire) + §2.19 (atomic lease
+# writes). Consumed by the acquire post-lock boot (M5.T1.S2) and the exhaustion loop
+# (M5.T4). The private release kernel (_pool_release_lane_internals) is ALSO composed by
+# M5.T2.S1's public pool_release_lane and M5.T3.S1's reap (shared teardown path).
+
+# _pool_release_lane_internals LANE
+#
+# The release KERNEL: tear down one lane's Chrome + ephemeral dir + lease. Idempotent +
+# NON-FATAL (return 0 always; every kill/rm `2>/dev/null || true`; a missing/corrupt lease
+# is a clean no-op). Called by _pool_acquire_critical_section's REAP-STALE step (3a) for
+# each non-adoptable stale lane, AND (by contract) by M5.T2.S1 pool_release_lane +
+# M5.T3.S1 reap_stale.
+#
+# LOGIC:
+#   1. pool_lease_read "$lane" → JSON (rc 1 = missing/corrupt → return 0, nothing to release).
+#   2. ONE jq fork: extract .chrome_pid, .chrome_pgid, .ephemeral_dir.
+#   3. pool_chrome_kill "$chrome_pid" "$chrome_pgid"  (idempotent; handles 0/0 provisional).
+#   4. rm -rf the ephemeral dir — RECONSTRUCTED as "$POOL_EPHEMERAL_ROOT/$lane" AND guarded
+#      ([[ -n && == "$POOL_EPHEMERAL_ROOT"/* ]]) before any rm (NEVER rm an arbitrary lease path).
+#   5. rm -f "$POOL_LANES_DIR/$lane.json"  (the lease file).
+#   return 0.
+#
+# GOTCHA — idempotent + non-fatal: runs in the reap loop over many lanes; one already-dead
+#   lane must NEVER abort the pool under set -e. pool_lease_read rc 1 ⇒ return 0.
+# GOTCHA — rm -rf SAFETY: reconstruct the dir from the lane number + POOL_EPHEMERAL_ROOT
+#   (don't trust the lease's ephemeral_dir field) AND prefix-guard. research §6.
+# GOTCHA — pool_chrome_kill already self-guards 0/0 (provisional lease) + every kill || true.
+# Reads POOL_EPHEMERAL_ROOT + POOL_LANES_DIR (frozen). Writes: signals + rm + lease delete.
+# PRECONDITION: pool_config_init.
+_pool_release_lane_internals() {
+    local lane="${1:-}"
+    local json chrome_pid chrome_pgid ephemeral_dir dir
+    local -a _f
+
+    # Validate lane (path-traversal defense; a bogus lane "has nothing to release").
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 0
+
+    # (1) Read the lease. rc 1 (missing OR corrupt) → nothing to release → return 0.
+    #     `if !` is errexit-exempt (a bare capture would ABORT under set -e on rc 1).
+    if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+        return 0
+    fi
+
+    # (2) ONE jq fork: extract the fields _pool_acquire needs. Comma → 3 lines; mapfile -t
+    #     strips trailing newlines. jq cannot fail here (valid JSON guaranteed by
+    #     pool_lease_read's _pool_json_valid pre-check); the herestring is in-memory.
+    mapfile -t _f < <(jq -r '.chrome_pid, .chrome_pgid, .ephemeral_dir' <<<"$json")
+    chrome_pid="${_f[0]:-}"
+    chrome_pgid="${_f[1]:-}"
+    ephemeral_dir="${_f[2]:-}"
+
+    # (3) Kill the Chrome process group (idempotent; handles 0/0 provisional lease).
+    pool_chrome_kill "$chrome_pid" "$chrome_pgid"
+
+    # (4) rm -rf the ephemeral dir — RECONSTRUCT from lane + POOL_EPHEMERAL_ROOT (do NOT
+    #     trust the lease's ephemeral_dir), AND prefix-guard. Defense-in-depth: even a
+    #     corrupt/hostile lease cannot make us rm an arbitrary path. `|| true` for safety.
+    dir="$POOL_EPHEMERAL_ROOT/$lane"
+    if [[ -n "$dir" && "$dir" == "$POOL_EPHEMERAL_ROOT"/* && "$dir" != "$POOL_EPHEMERAL_ROOT/" ]]; then
+        rm -rf -- "$dir" 2>/dev/null || true
+    fi
+    # (Defense-in-depth: if the lease's ephemeral_dir DIFFERS from the reconstructed path
+    #  and is a distinct valid sub-tree under POOL_EPHEMERAL_ROOT, remove it too — covers a
+    #  historical layout change. Same guard.)
+    if [[ -n "$ephemeral_dir" && "$ephemeral_dir" == "$POOL_EPHEMERAL_ROOT"/* \
+          && "$ephemeral_dir" != "$POOL_EPHEMERAL_ROOT/" && "$ephemeral_dir" != "$dir" ]]; then
+        rm -rf -- "$ephemeral_dir" 2>/dev/null || true
+    fi
+
+    # (5) Delete the lease file. `|| true` (already-deleted / TOCTOU).
+    rm -f -- "$POOL_LANES_DIR/$lane.json" 2>/dev/null || true
+
+    _pool_log "pool_acquire(reap): released stale lane $lane (chrome_pid=${chrome_pid:-0})"
+    return 0
+}
+
+# _pool_adopt_lane LANE
+#
+# REUSE-ORPHAN adoption (PRD §2.4 step 3b / IQ4): reassign a responsive-but-orphaned lane's
+# owner to the CURRENT claimer, mark connected, and re-bind the daemon. Called by
+# _pool_acquire_critical_section when a STALE lane has a RESPONSIVE Chrome
+# (pool_daemon_connected == 0). Skips the copy/launch (the Chrome is already running).
+#
+# LOGIC:
+#   1. pool_lease_read "$lane" → JSON (rc 1 ⇒ return 1, can't adopt a missing lease).
+#   2. Extract .port + .session (for the daemon re-bind).
+#   3. jq mutate: .owner = {pid,comm,starttime,cwd from POOL_OWNER_*} | .connected = true
+#      | .last_seen_at = $(_pool_now). Inject-safe (--arg/--argjson DATA, fixed filter).
+#   4. _pool_atomic_write the mutated JSON back to the lease file (tmp+mv, same FS).
+#   5. pool_daemon_connect "$session" "$port" — re-bind the daemon to the (still-running)
+#      Chrome. rc 0 ⇒ return 0 (adopted). rc 1 ⇒ the Chrome died between the responsiveness
+#      probe and now → return 1 (caller will REAP it instead).
+#
+# WHY A DIRECT jq MUTATION (not pool_lease_update): pool_lease_update is TOP-LEVEL FIELD ONLY
+#   and CANNOT touch the nested .owner sub-object (M3.T1.S1 docstring: "owner is written
+#   once at acquire, never mutated"). Adoption is the ONE deliberate owner mutation. The jq
+#   `.owner = {…} | .connected = true | .last_seen_at = $now` filter is inject-safe (all
+#   values are --arg/--argjson DATA, never spliced into the program). research §4.
+#
+# GOTCHA — the responsiveness probe (pool_daemon_connected) runs in the CALLER BEFORE this;
+#   this function only does the REASSIGN + RE-BIND. A race where the Chrome dies between the
+#   probe and pool_daemon_connect is handled by connect returning rc 1 ⇒ caller reaps.
+# GOTCHA — `connected` MUST be a JSON boolean (true), not the number 1. pool_daemon_connect
+#   is an ATTACH (~ms) — safe inside the lock (research §2); it is NOT a Chrome launch.
+# GOTCHA — owner reassignment writes the CURRENT POOL_OWNER_* identity (the adopter), so the
+#   lane is now "mine" and survives pool_lane_is_stale for the adopter.
+# NON-FATAL (return 0 adopted / 1 Chrome-died-mid-adopt). Reads POOL_OWNER_* + POOL_LANES_DIR.
+# PRECONDITION: pool_config_init + pool_owner_resolve.
+_pool_adopt_lane() {
+    local lane="${1:-}"
+    local json port session now updated_lease
+
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+    if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+        return 1   # can't adopt a missing/corrupt lease
+    fi
+
+    # Extract port + session for the re-bind. PLAIN assignment (not local x=$(…)) so jq's
+    # exit status is preserved — but jq cannot fail on valid JSON; guard anyway.
+    port="$(jq -r '.port' <<<"$json")"
+    session="$(jq -r '.session' <<<"$json")"
+
+    # Validate the owner identity globals are present (defensive; pool_owner_resolve sets them).
+    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ ]] || return 1
+
+    # Mutate: rewrite .owner to the CURRENT claimer, set connected=true, stamp last_seen_at.
+    # All values enter jq as DATA (--arg/--argjson) → inject-safe. starttime/cwd via --arg
+    # (strings) OR --argjson (numbers) — starttime is digits → --argjson; cwd/comm → --arg.
+    now="$(_pool_now)"
+    if ! updated_lease="$(jq \
+            --argjson now "$now" \
+            --argjson pid "$POOL_OWNER_PID" \
+            --arg comm "$POOL_OWNER_COMM" \
+            --argjson starttime "${POOL_OWNER_STARTTIME:-0}" \
+            --arg cwd "${POOL_OWNER_CWD:-}" \
+            '.owner = {pid:$pid, comm:$comm, starttime:$starttime, cwd:$cwd}
+             | .connected = true
+             | .last_seen_at = $now' \
+            <<<"$json" 2>/dev/null)"; then
+        return 1   # jq build failure — caller reaps
+    fi
+
+    # Atomic publish (tmp+mv same dir = same FS). _pool_atomic_write pool_die's on a real
+    # FS failure (exceptional); that exits the subshell → flock released → propagates.
+    _pool_atomic_write "$POOL_LANES_DIR/$lane.json" "$updated_lease"
+
+    # Re-bind the daemon to the (still-running) Chrome. An ATTACH — safe inside the lock.
+    # rc 1 ⇒ Chrome died between the probe and now ⇒ tell the caller to reap (return 1).
+    if ! pool_daemon_connect "$session" "$port"; then
+        return 1
+    fi
+
+    _pool_log "pool_acquire(adopt): reused orphan lane $lane (port=$port, owner pid=$POOL_OWNER_PID)"
+    return 0
+}
+
+# _pool_acquire_critical_section
+#
+# THE FLOCK BODY — runs inside `( flock 9; <this> ) 9>"$POOL_LOCK_FILE"`. A FUNCTION (so it
+# can `return` and inherit all globals). Performs PRD §2.4 step 3a–3d:
+#   a. REAP-STALE + REUSE-ORPHAN (interleaved per lane): for each lane, pool_lane_is_stale
+#      rc 0 (stale) → if pool_daemon_connected(session,port)==0 (responsive Chrome) → ADOPT
+#      (_pool_adopt_lane; echo N; return 0); else REAP (_pool_release_lane_internals).
+#      rc 1 (live) / rc 2 (no lease) → skip.
+#   c. CHOOSE-N: pool_find_free_lane → N (always echoes + rc 0; set -e safe).
+#   d. CLAIM: pool_lease_write(N, ephemeral_dir, 0, abpool-N, owner..., 0, 0, "false").
+#   echo N; return 0.  Fall-through (POOL_OWNER_PID==0 OR no free lane) → return 1.
+#
+# OUTPUT: echoes the claimed/adopted lane N on success (return 0); echoes nothing on
+# exhaustion (return 1). The CALLER distinguishes provisional (port:0/connected:false → S2
+# boots) vs adopted (port>0/connected:true → S3 ensures) by reading the lease. research §5.
+#
+# GOTCHA — TRI-STATE pool_lane_is_stale: `if pool_lane_is_stale "$n"; then …; fi` runs the
+#   body on rc 0 (stale) only; rc 1 (live) / rc 2 (no-lease) fall through. A BARE call
+#   ABORTS under set -e on rc 1/2.
+# GOTCHA — reuse-orphan uses pool_daemon_connected (read-only, NEVER launches — P1.M4.T3.S1
+#   research §2 forbids get cdp-url). Only port>0 lanes can be orphans (provisional port=0
+#   has no Chrome yet → always reaped, never adopted).
+# GOTCHA — POOL_OWNER_PID==0 ⇒ return 1 (a passthrough owner must not claim; defense-in-depth).
+# GOTCHA — _pool_adopt_lane return 1 (Chrome died mid-adopt) ⇒ fall through to REAP that lane.
+# Reads POOL_OWNER_*, POOL_EPHEMERAL_ROOT, POOL_LANES_DIR. Non-fatal on exhaustion (rc 1).
+# PRECONDITION: pool_config_init + pool_owner_resolve (+ pool_state_init by the wrapper).
+_pool_acquire_critical_section() {
+    local n port session N ephemeral_dir
+
+    # Defensive: a passthrough owner (no pi ancestor → POOL_OWNER_PID==0) must NOT claim a
+    # lane (it would be immediately stale to everyone). The wrapper gates passthrough BEFORE
+    # acquire in M6; this is defense-in-depth. `[[ ]] || return 1` is errexit-exempt.
+    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ && "$POOL_OWNER_PID" != "0" ]] || return 1
+
+    # (a/b) REAP-STALE + REUSE-ORPHAN, interleaved per lane in ascending order.
+    for n in $(pool_lanes_list); do
+        # TRI-STATE capture: pool_lane_is_stale 0=stale / 1=live / 2=no-lease.
+        # `if …; then` runs the body on rc 0 (stale) only; rc 1/2 fall through (skip).
+        if pool_lane_is_stale "$n"; then
+            # Stale. Is it an ORPHAN (responsive Chrome)? Only lanes with a real port can be.
+            port="$(pool_lease_field "$n" port 2>/dev/null)" || port=""
+            session="$(pool_lease_field "$n" session 2>/dev/null)" || session=""
+            if [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
+               && pool_daemon_connected "$session" "$port"; then
+                # REUSE-ORPHAN: adopt. If adoption succeeds → we're DONE (return this lane).
+                # If adoption fails (Chrome died mid-adopt) → fall through to reap it.
+                if _pool_adopt_lane "$n"; then
+                    printf '%s\n' "$n"
+                    return 0
+                fi
+            fi
+            # REAP-STALE: not adoptable (or adoption failed) → release the lane's resources.
+            _pool_release_lane_internals "$n"
+        fi
+    done
+
+    # (c) CHOOSE-N: lowest free lane. Always echoes + rc 0 → bare capture is set -e safe.
+    N="$(pool_find_free_lane)"
+
+    # (d) CLAIM: write the PROVISIONAL lease (port=0, chrome_pid=0, chrome_pgid=0,
+    #     connected=false, owner=current). pool_lease_write validates connected ∈
+    #     {"true","false"} + builds via jq + publishes atomically. A build/FS failure
+    #     pool_die's → exits the subshell → flock released → propagates (exceptional).
+    ephemeral_dir="$POOL_EPHEMERAL_ROOT/$N"
+    pool_lease_write "$N" "$ephemeral_dir" 0 "abpool-$N" \
+        "$POOL_OWNER_PID" "$POOL_OWNER_COMM" "${POOL_OWNER_STARTTIME:-0}" "${POOL_OWNER_CWD:-}" \
+        0 0 "false"
+
+    _pool_log "pool_acquire(claim): provisional lane $N for owner pid=$POOL_OWNER_PID"
+    printf '%s\n' "$N"
+    return 0
+}
+
+# pool_acquire_locked
+#
+# PUBLIC ENTRY POINT — acquire a lane under an exclusive flock on $POOL_LOCK_FILE. Runs
+# _pool_acquire_critical_section inside the canonical `( flock 9; body ) 9>file` subshell
+# (key_findings FINDING 2; flock(1) man-page-recommended shell form). The lock is held ONLY
+# for scan+reap+reuse+choose+claim (NO Chrome launch/copy/wait — those are S2, post-lock).
+#
+# Echoes the claimed/adopted lane N + return 0 on success; echoes nothing + return 1 on
+# exhaustion (all lanes live / passthrough owner) → M5.T4. The lock auto-releases on return
+# (incl. pool_die/SIGKILL — the kernel closes fd 9 on subshell exit; research §1.2).
+#
+# CALLER CONTRACT (under set -e — split the capture per BashFAQ 105):
+#     local N
+#     if N="$(pool_acquire_locked)"; then
+#         port="$(pool_lease_field "$N" port)"
+#         if [[ "$port" == "0" || -z "$port" || "$port" == "null" ]]; then
+#             <S2 post-lock boot: copy→port→launch→connect→update lease>
+#         else
+#             <S3 adopted: ensure_connected only; skip the boot>
+#         fi
+#     else
+#         <M5.T4 exhaustion: block-with-timeout / force-reap / alert>
+#     fi
+#
+# GOTCHA — `local N; N="$(pool_acquire_locked)"` MUST be split: `local N=$(…)` masks errexit
+#   (local returns 0). research §1.5 / BashFAQ 105.
+# GOTCHA — pool_state_init is called first so `9>"$POOL_LOCK_FILE"` cannot fail on a missing
+#   parent dir (idempotent; pool_die only on a real FS error).
+# Reads POOL_LOCK_FILE (+ everything _pool_acquire_critical_section reads). No new globals.
+# PRECONDITION: pool_config_init + pool_owner_resolve (+ pool_state_init, called here).
+pool_acquire_locked() {
+    # Ensure the lock file + lanes dir exist (idempotent) so the fd-9 redirect opens cleanly.
+    pool_state_init
+
+    # The canonical flock idiom. fd 9 is opened on POOL_LOCK_FILE; `flock 9` (blocking,
+    # returns 0) acquires the exclusive lock; the body function runs (inherited — it's a
+    # subshell fork); the subshell's exit status == the function's return code; stdout (echo
+    # N) propagates to the caller's $(…). The lock is released when the subshell exits.
+    (
+        flock 9
+        _pool_acquire_critical_section
+    ) 9>"$POOL_LOCK_FILE"
+}
