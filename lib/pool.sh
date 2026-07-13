@@ -1107,3 +1107,91 @@ pool_find_free_lane() {
         fi
     done
 }
+
+# =============================================================================
+# Lease management — query operations (P1.M3.T2.S3)
+# =============================================================================
+# Per-lane staleness verdict for the lazy reaper. Implements PRD §2.5 (release is
+# owner-liveness-driven) + §2.14 (the three stale failure modes: pid dead / comm!=pi
+# / starttime mismatch) + §2.10 (reaper is lazy, on acquire). Reads a lane's lease,
+# extracts its owner.{pid,starttime,comm} triple, and delegates the identity check to
+# pool_owner_alive (M2.T2.S1). Consumed by the reaper (M5.T3.S1) and the acquire flock
+# step 3a REAP-STALE (M5.T1.S1) — it runs BEFORE pool_find_free_lane (step 3c) so freed
+# lane numbers are reusable in the same critical section.
+
+# pool_lane_is_stale LANE
+#
+# TRI-STATE verdict (NOT a boolean):
+#   0 = STALE     — owner dead/recycled/unverifiable → caller reaps the lane.
+#   1 = LIVE      — owner alive + identity matches → caller keeps the lane.
+#   2 = NO LEASE  — lease file missing OR corrupt → caller skips (nothing to reap).
+#
+# The rc convention is INVERTED vs pool_owner_alive (which returns 0=alive / 1=dead):
+#   pool_owner_alive -> 1 (dead)  ==>  pool_lane_is_stale -> 0 (stale)
+#   pool_owner_alive -> 0 (alive) ==>  pool_lane_is_stale -> 1 (live)
+# The inversion is deliberate: it makes the reaper idiom
+#   `if pool_lane_is_stale "$n"; then pool_release_lane "$n"; fi`
+# read naturally — rc 0 ("true") IS the "yes, stale" answer (shell convention).
+#
+# LOGIC (CONTRACT a→d):
+#   a. pool_lease_read "$lane". rc 1 (missing OR corrupt) → return 2 (skip).
+#   b. Extract owner.{pid,starttime,comm} from the in-memory JSON (ONE jq fork).
+#   c. pool_owner_alive "$pid" "$starttime" "$comm". rc 1 → return 0 (stale).
+#   d. rc 0 (alive) → return 1 (live).
+#
+# CONSUMERS: M5.T3.S1 reap_stale (the lazy reaper, per-lane in the scan loop);
+#   M5.T1.S1 acquire flock step 3a (reap-stale before choose-N).
+#
+# GOTCHA — CALLERS under set -e MUST guard: a BARE `pool_lane_is_stale "$n"` whose rc
+#   is 1 (live) or 2 (no lease) ABORTS the caller. Use `if pool_lane_is_stale "$n";
+#   then reap; fi` (rc 1/2 fall through) or `pool_lane_is_stale "$n" && rc=0 || rc=$?`
+#   to capture all three codes. Same hazard family as pool_lease_read/find_mine.
+# GOTCHA — compose ONLY pool_lease_read + pool_owner_alive (CONTRACT-named). Do NOT use
+#   pool_lease_field (3 extra reads + forks). Read ONCE, extract with ONE jq via mapfile.
+# GOTCHA — missing AND corrupt both → rc 2: pool_lease_read returns 1 for both; a corrupt
+#   lease can't identify the owner/chrome_pgid to kill safely, so skip (doctor M7.T4
+#   reconciles). pool_lease_read logs the ONE "corrupt lease" warning on the corrupt path.
+# GOTCHA — missing/garbled owner FIELDS → stale (rc 0): a valid-JSON lease with no owner
+#   object yields pid="null" → pool_owner_alive's own `[[ =~ ^[0-9]+$ ]]` rejects it →
+#   returns 1 → is_stale returns 0. SAFE (unverifiable → reaped, never trusted); needs
+#   NO special-case branch.
+# GOTCHA — mapfile -t is mandatory: strips trailing newlines so pid compares cleanly.
+# GOTCHA — jq reads the in-memory herestring (not the file): no TOCTOU, and jq cannot
+#   fail on parse (pool_lease_read already guaranteed valid JSON via _pool_json_valid).
+# NEVER calls pool_die / NEVER writes / NEVER kills / NEVER logs directly (read-only
+#   VERDICT; the caller acts). The only possible log line comes from pool_lease_read.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR, via pool_lease_read).
+pool_lane_is_stale() {
+    local lane="${1:-}"
+    local json pid starttime comm
+    local -a _owner
+
+    # (a) Read the lease. Validate lane (path-traversal defense; a non-numeric lane
+    # simply "has no lease" → rc 2). `if !` is errexit-exempt — a bare capture would
+    # ABORT under set -e when pool_lease_read returns 1 (missing OR corrupt). The
+    # 2>/dev/null suppresses jq's corrupt-parse stderr (the warning is logged, not on
+    # stderr, so diagnostics are preserved).
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 2
+    if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+        return 2
+    fi
+
+    # (b) Extract owner.{pid,starttime,comm} from the in-memory JSON in ONE jq fork.
+    # Comma emits exactly 3 lines (one per expression; a missing .owner → three
+    # "null" lines). mapfile -t strips trailing newlines → 3 clean elements. The
+    # `:-` defaults defend an (impossible) short read. jq cannot fail here (valid JSON
+    # guaranteed; herestring is in-memory — no file TOCTOU).
+    mapfile -t _owner < <(jq -r '.owner.pid, .owner.starttime, .owner.comm' <<<"$json")
+    pid="${_owner[0]:-}"
+    starttime="${_owner[1]:-}"
+    comm="${_owner[2]:-}"
+
+    # (c)/(d) Delegate identity+liveness to pool_owner_alive and INVERT its rc.
+    # pool_owner_alive: 0=alive → return 1 (live);  1=dead/recycled/non-numeric-pid
+    # → return 0 (stale). The `if` is errexit-exempt (pool_owner_alive returns 1 on
+    # the stale path — a bare call would abort; the if keeps it safe).
+    if pool_owner_alive "$pid" "$starttime" "${comm:-pi}"; then
+        return 1     # live — owner is the same process that took the lease
+    fi
+    return 0          # stale — owner dead/recycled/unverifiable → caller reaps
+}

@@ -175,7 +175,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Lease Management System",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement the JSON lease data model: atomic read/write, lane enumeration, find-my-lease (by owner), find-free-lane (lowest N), and staleness detection. This is the mutual-exclusion primitive that ensures 1 agent = 1 lane.",
           "tasks": [
             {
@@ -221,7 +221,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Lease query operations",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Enumerate lanes, find the current owner's lease, find the lowest free lane number, and determine staleness.",
               "subtasks": [
                 {
@@ -259,7 +259,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S3",
                   "title": "is_lane_stale(lane) — staleness detection for reaper",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S2",
@@ -288,14 +288,14 @@
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Master copy & profile hygiene",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Copy-on-write the master profile to an ephemeral lane dir and clean stale Chrome singleton locks.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "btrfs reflink copy + Singleton lock cleanup",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S3"
