@@ -795,3 +795,137 @@ pool_lease_update() {
     # Atomic re-publish.
     _pool_atomic_write "$lease_file" "$updated"
 }
+
+# -----------------------------------------------------------------------------
+# Lease management — JSON read & validation (P1.M3.T1.S2)
+# -----------------------------------------------------------------------------
+
+# pool_lease_read LANE
+#
+# Read $POOL_LANES_DIR/<LANE>.json and echo the RAW JSON on success (return 0).
+# If the file does not exist → return 1 (a lane with no lease is simply unleased —
+# a NORMAL state, NOT an error). If the file exists but is invalid JSON → log a
+# warning via _pool_log and return 1 (defensive coding against a crash-mid-write;
+# rare under S1's atomic writes). NEVER calls pool_die — read functions are
+# non-fatal (they run inside enumeration/reaper loops).
+#
+# CONSUMERS: M3.T2.S1 find_my_lease / M5.T3.S1 reap_stale / M5.T3.S2 reuse_orphan
+# (full-lease reads); M7.T1.S1 status / M7.T4.S1 doctor.
+#
+# GOTCHA — the file is newline-less (S1's _pool_atomic_write uses printf '%s');
+# `cat` reproduces the exact bytes. Consumers pipe to jq (handles no-newline) or
+# capture via $() (strips trailing newline). Do NOT re-add a newline.
+# GOTCHA — CALLERS under set -e must guard the call:
+#   `rc=0; out="$(pool_lease_read "$lane")" || rc=$?`  or  `if out="$(…)"; then`.
+#   A bare `out="$(pool_lease_read 99)"` ABORTS the caller when this returns 1.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR). The dir need not exist — a
+# missing dir surfaces as file-not-found → return 1 (correct: "no lease").
+pool_lease_read() {
+    local lane="${1:-}"
+    local file
+
+    # Validate lane (path-traversal defense + catches caller bugs). Read functions
+    # RETURN 1 on a bad lane (never pool_die) — a bogus lane simply "has no lease".
+    # `[[ ]] || return 1` is errexit-exempt.
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+
+    file="$POOL_LANES_DIR/$lane.json"
+
+    # Missing file → normal "unleased" state → return 1 (silent).
+    [[ -f "$file" ]] || return 1
+
+    # Corrupt JSON → log ONE warning (CONTRACT) + return 1 (silent stdout).
+    # _pool_json_valid is the M1.T2.S1 predicate (jq empty); never fatal.
+    if ! _pool_json_valid "$file"; then
+        _pool_log "pool_lease_read: corrupt lease (invalid JSON) for lane $lane: $file"
+        return 1
+    fi
+
+    # Echo the raw bytes. `|| return 1` handles a TOCTOU deletion (rare). After the
+    # validity check cat normally succeeds.
+    cat "$file" || return 1
+    return 0
+}
+
+# pool_lease_field LANE FIELD
+#
+# Read one field from $POOL_LANES_DIR/<LANE>.json and echo its raw value (return 0).
+# FIELD is a jq-style DOTTED PATH — top-level (port, connected, last_seen_at,
+# chrome_pid, …) OR nested (owner.pid, owner.starttime, owner.comm, owner.cwd).
+# "Helper for quick access" (CONTRACT). Silent on missing file / corrupt JSON /
+# invalid lane / empty field (return 1, no output). A field PATH that does not
+# exist in the object echoes `null` and returns 0 (standard jq getpath behavior).
+#
+# CONSUMERS: M3.T2.S1 find_my_lease (owner.pid, owner.starttime — NESTED);
+# M3.T2.S3 is_lane_stale (last_seen_at, chrome_pid); M5.T3.S2 reuse_orphan
+# (owner.pid, chrome_pid, port, connected, ephemeral_dir); M7.T1.S1 status
+# (lane, port, session, chrome_pid, acquired_at, connected).
+#
+# INJECTION SAFETY (research §3b): the filter is the fixed literal
+# `getpath($f|split("."))`; FIELD enters jq as DATA (--arg = a JSON string used as
+# a dict key), NEVER spliced into the program. Supports nested paths in one shot.
+# NEVER `jq -r ".${field}"`.
+# GOTCHA — NO `jq -e` (research §3a): -e exits 1 on `false` as well as `null`,
+# which would break reads of the boolean `connected`. Plain `jq -r` guarantees a
+# present field ALWAYS echoes + returns 0 (even when the value is false).
+# GOTCHA — missing field → echoes "null" (exit 0). Callers query schema-defined
+# fields (PRD §2.8), so this is harmless. It is the faithful "jq -r .field" behavior.
+# GOTCHA — silent on corrupt (no log); callers wanting diagnostics use
+# pool_lease_read (which logs). This keeps field a lean "quick access" helper.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR).
+pool_lease_field() {
+    local lane="${1:-}"
+    local field="${2:-}"
+    local file
+
+    # Validate lane (path-traversal defense) + field is non-empty.
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+    [[ -n "$field" ]] || return 1
+
+    file="$POOL_LANES_DIR/$lane.json"
+
+    # Missing file → return 1 (silent). Corrupt JSON → return 1 (silent).
+    [[ -f "$file" ]] || return 1
+    _pool_json_valid "$file" || return 1
+
+    # Injection-safe nested read. `|| return 1` handles a TOCTOU race (file deleted
+    # or corrupted between the check and the read). After _pool_json_valid, jq
+    # normally succeeds; a missing path yields null (exit 0).
+    jq -r --arg f "$field" 'getpath($f|split("."))' "$file" || return 1
+    return 0
+}
+
+# pool_lease_exists LANE
+#
+# Predicate: does lane LANE have a VALID lease file? Return 0 if
+# $POOL_LANES_DIR/<LANE>.json exists AND is valid JSON (parseable by jq); return 1
+# otherwise (missing / corrupt / non-numeric lane). Pure predicate — NEVER logs,
+# NEVER writes, NEVER calls pool_die (mirrors _pool_json_valid and pool_owner_alive).
+#
+# "valid" = SYNTACTICALLY valid JSON (composed via _pool_json_valid). A full
+# schema-completeness check (all 12 PRD §2.8 fields + types) is OUT OF SCOPE — the
+# literal CONTRACT is "exists and is valid" = exists + parseable, and downstream
+# consumers read specific fields defensively (a missing field → null via
+# pool_lease_field).
+#
+# CONSUMERS: M3.T2.S2 find_free_lane (return 1 == "lane N is free"; lowest N≥1
+# with no lease); M3.T2.S1 find_my_lease (skip lanes with no lease); M7.T4.S1
+# doctor (reconcile leases vs live Chromes vs dirs).
+#
+# GOTCHA — non-numeric lane → return 1 (path-traversal safe; a bogus lane "has no
+# lease"). Read functions never die.
+# PRECONDITION: pool_config_init (for POOL_LANES_DIR).
+pool_lease_exists() {
+    local lane="${1:-}"
+    local file
+
+    # Validate lane (path-traversal defense). Predicate → return 1 on bad lane.
+    [[ "$lane" =~ ^[0-9]+$ ]] || return 1
+
+    file="$POOL_LANES_DIR/$lane.json"
+
+    # Exists + valid JSON → 0; else 1. Composes the M1.T2.S1 predicate (never fatal).
+    [[ -f "$file" ]] || return 1
+    _pool_json_valid "$file" || return 1
+    return 0
+}
