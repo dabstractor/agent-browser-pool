@@ -1,7 +1,14 @@
-# runtime / install artifacts (not version-controlled)
+# --- pool runtime artifacts (defense-in-depth) ---
+# All pool runtime state lives under $AGENT_BROWSER_POOL_STATE
+# (default: ~/.local/state/agent-browser-pool) — OUTSIDE this repo. The patterns below
+# only matter if a dev overrides the state dir to a path inside the repo for local
+# debugging. In normal operation the pool never writes into this working tree.
+# Artifacts covered:
+#   *.log          → pool.log, chrome-<lane>.log, alerts.log
+#   acquire.lock   → flock critical-section file (pool_state_init)
+#   .state/        → repo-relative state-dir override catch-all (covers lanes/<N>.json leases)
 *.log
-
-# local dev symlinks / state
+acquire.lock
 .state/
 
 # agent harness runtime artifacts (transcripts, meta, outputs)
@@ -24,3 +31,7 @@ build/
 node_modules/
 venv/
 __pycache__/
+
+# --- intentionally tracked (do NOT ignore; never add an entry for these) ---
+# Source:   README.md PRD.md AGENTS.md install.sh bin/ lib/ test/
+# History:  plan/  (project history tree — tracked; AGENTS.md §5)
