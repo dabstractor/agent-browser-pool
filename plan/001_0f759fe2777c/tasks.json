@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "MVP — Transparent Browser Pool",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Build the complete agent-browser-pool system: a transparent PATH-shadowing wrapper that gives every AI agent (pi process) its own dedicated, locked, ephemeral Chrome profile from a btrfs CoW copy of a master template. Includes the shared lease library (lib/pool.sh), the wrapper shim (bin/agent-browser), the admin tool (bin/agent-browser-pool), install.sh, and the test harness. ~250 LOC bash total. No fork, no daemon, no Rust.",
       "milestones": [
         {
@@ -943,21 +943,21 @@
           "type": "Milestone",
           "id": "P1.M10",
           "title": "Sync changeset-level documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final documentation sweep: update README.md with final features/install/usage, ensure all env vars and admin commands are documented, and verify docs match the implemented system.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M10.T1",
               "title": "Sync README.md and cross-cutting documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update README.md to reflect the final implemented system: features, installation, usage, configuration, and admin commands. Verify accuracy against the codebase.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M10.T1.S1",
                   "title": "Update README.md — features, install, usage, configuration reference",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T3.S2",
@@ -987,7 +987,7 @@
                   "type": "Subtask",
                   "id": "P1.M10.T1.S2",
                   "title": "Verify .gitignore covers all runtime artifacts",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M10.T1.S1"
