@@ -215,9 +215,9 @@ emitted to Chrome, `rm`, or a log file. The table below matches
 | `AGENT_CHROME_PORT_BASE` | `53420` | lowest pool TCP port |
 | `AGENT_CHROME_PORT_RANGE` | `1000` | number of ports in the pool → range `[53420, 54420)` |
 | `AGENT_BROWSER_POOL_WAIT` | `600` (10 min) | acquire block timeout (seconds) before force-reap + alert |
-| `AGENT_CHROME_HEADLESS` | unset = **windowed** | set to `1`/`true`/`yes` to launch Chrome with `--headless=new` |
-| `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | set to permit a real (slow) 4.8 GB copy per acquire |
-| `AGENT_BROWSER_POOL_DISABLE` | unset = **pooling active** | `1` = per-process passthrough (safety valve — see below) |
+| `AGENT_CHROME_HEADLESS` | unset = **windowed** | set to `1`/`true`/`yes`/`on` to launch Chrome with `--headless=new` |
+| `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | set to `1`/`true`/`yes`/`on` to permit a real (slow) 4.8 GB copy per acquire |
+| `AGENT_BROWSER_POOL_DISABLE` | unset = **pooling active** | `1`/`true`/`yes`/`on` = per-process passthrough (safety valve — see below) |
 
 Three vars shape behavior most:
 

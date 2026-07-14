@@ -76,12 +76,17 @@ _pool_config_require_uint() {
 }
 
 # _pool_config_bool VALUE
-#   Normalize a tri-state env value to "1" (on) or "0" (off). A var counts as ON only
-#   when its value is exactly "1"; every other value (including "true", "yes", "0",
-#   and unset) is OFF. Keeps boolean semantics strict and predictable.
+#   Normalize a tri-state env value to "1" (on) or "0" (off). ON when the value is
+#   one of 1 / true / yes / on (case-insensitive); every other value (including "0",
+#   "false", "no", "off", arbitrary strings, and unset) is OFF. Keeps boolean
+#   semantics predictable and matches the README + `agent-browser-pool help` contract.
 _pool_config_bool() {
-    local val="${1:-}"
-    if [[ "$val" == "1" ]]; then printf '1\n'; else printf '0\n'; fi
+    local v="${1:-}"
+    v="${v,,}"                      # bash 4.0+ to-lower (no subshell, set -u safe)
+    case "$v" in
+        1|true|yes|on) printf '%s\n' 1 ;;
+        *)             printf '%s\n' 0 ;;
+    esac
 }
 
 # pool_config_init — resolve every configuration override to validated absolute globals.
@@ -167,7 +172,7 @@ pool_config_init() {
     POOL_PORT_RANGE="$port_range"; declare -g POOL_PORT_RANGE
     POOL_WAIT="$wait"; declare -g POOL_WAIT
 
-    # 5. Booleans — exactly "1" → on, anything else → off.
+    # 5. Booleans — 1/true/yes/on (case-insensitive) → on, else off.
     local headless disable allow_slow_copy
     headless="$(_pool_config_bool "${AGENT_CHROME_HEADLESS:-}")"
     disable="$(_pool_config_bool "${AGENT_BROWSER_POOL_DISABLE:-}")"
@@ -4415,9 +4420,9 @@ pool_admin_help() {
     printf '  AGENT_CHROME_PORT_BASE          lowest pool TCP port (default: 53420)\n'
     printf '  AGENT_CHROME_PORT_RANGE         number of ports in the pool (default: 1000)\n'
     printf '  AGENT_BROWSER_POOL_WAIT         acquire block timeout, seconds (default: 600)\n'
-    printf '  AGENT_CHROME_HEADLESS           launch Chrome headless if set (1/true/yes)\n'
-    printf '  AGENT_CHROME_ALLOW_SLOW_COPY    permit non-btrfs (slow) copies if set\n'
-    printf '  AGENT_BROWSER_POOL_DISABLE      disable pooling (passthrough) if set\n'
+    printf '  AGENT_CHROME_HEADLESS           launch Chrome headless if set (1/true/yes/on)\n'
+    printf '  AGENT_CHROME_ALLOW_SLOW_COPY    permit non-btrfs (slow) copies if set (1/true/yes/on)\n'
+    printf '  AGENT_BROWSER_POOL_DISABLE      disable pooling (passthrough) if set (1/true/yes/on)\n'
     printf '\n'
     printf "Run 'agent-browser-pool doctor' to verify your setup.\n"
     return 0

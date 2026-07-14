@@ -315,6 +315,48 @@ selftest_wrapper_and_admin_are_executable() {
     [[ -x "$ABPOOL_ADMIN"   ]] || { _fail "admin not executable: $ABPOOL_ADMIN";   return 1; }
 }
 
+# --- _pool_config_bool truth-table (P1.M1.T1.S1) -------------------------------
+# Pure-function bodies: exercise the normalizer directly (+ one end-to-end through
+# pool_config_init). No Chrome, no sim-owner, no persistent lease writes. Picked up
+# by the single-setup _run_selftest_suite above (same runner as the other selftest_*).
+
+# _pool_config_bool: truthy inputs (1/true/yes/on, case-insensitive) -> "1".
+selftest_config_bool_truthy() {
+    local v r
+    for v in 1 true TRUE True yes YES Yes on ON On; do
+        r="$(_pool_config_bool "$v")"
+        assert_eq "1" "$r" "truthy [$v] -> 1" || return 1
+    done
+}
+
+# _pool_config_bool: falsy inputs (0/false/no/off/empty/random) -> "0".
+selftest_config_bool_falsy() {
+    local v r
+    for v in 0 false no off random; do
+        r="$(_pool_config_bool "$v")"
+        assert_eq "0" "$r" "falsy [$v] -> 0" || return 1
+    done
+    # empty/unset (no arg) — the set -u-safe ${1:-} path
+    r="$(_pool_config_bool "")"
+    assert_eq "0" "$r" "falsy [empty] -> 0" || return 1
+    r="$(_pool_config_bool)"
+    assert_eq "0" "$r" "falsy [no-arg] -> 0" || return 1
+}
+
+# End-to-end: AGENT_BROWSER_POOL_DISABLE=<truthy> flows through pool_config_init to
+# POOL_DISABLE=1. This is the cutover safety-valve contract (PRD §2.17) that motivated
+# the fix. Runs pool_config_init in an ISOLATED subshell so it cannot clobber the
+# selftest suite's own POOL_* globals (set by the single setup() call).
+selftest_config_bool_via_pool_config_init() {
+    local d
+    d="$(AGENT_BROWSER_POOL_DISABLE=true bash -c 'source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_DISABLE"' _ "$ABPOOL_REPO")"
+    assert_eq "1" "$d" "AGENT_BROWSER_POOL_DISABLE=true -> POOL_DISABLE=1" || return 1
+    d="$(AGENT_BROWSER_POOL_DISABLE=yes bash -c 'source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_DISABLE"' _ "$ABPOOL_REPO")"
+    assert_eq "1" "$d" "AGENT_BROWSER_POOL_DISABLE=yes -> POOL_DISABLE=1" || return 1
+    d="$(AGENT_BROWSER_POOL_DISABLE=0 bash -c 'source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_DISABLE"' _ "$ABPOOL_REPO")"
+    assert_eq "0" "$d" "AGENT_BROWSER_POOL_DISABLE=0 -> POOL_DISABLE=0" || return 1
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The
