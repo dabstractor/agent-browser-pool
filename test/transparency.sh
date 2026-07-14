@@ -296,8 +296,9 @@ test_second_open_reuses_lane() {
 #   LAYER 1 (deterministic unit of the pure normalizer — NO Chrome): pool_normalize_connect
 #     strips the FIRST non-flag positional after connect. Verify 98765 is gone from POOL_NORM_ARGS.
 #   LAYER 2 (routing integ): with a live lane N, a wrapper `connect <random>` must NOT move us
-#     off N. (Bare connect errors in the real binary — GOTCHA 8 — so ignore its rc; assert
-#     ROUTING via find_mine == N.)
+#     off N. After Issue #1 the wrapper SHORT-CIRCUITS the resulting bare connect to a success
+#     no-op (rc 0) instead of erroring; we still IGNORE its rc and assert ROUTING via
+#     find_mine == N (the contract is about routing, not the connect rc).
 # =============================================================================
 test_connect_random_ignored() {
     # LAYER 1 — pure normalizer unit check (no Chrome, no real env).
@@ -314,7 +315,8 @@ test_connect_random_ignored() {
     _transparency_spawn_owner >/dev/null
     local N before after
     before="$(_transparency_acquire_boot)" || return 1     # acquire+boot lane N (lib direct)
-    # Bare connect errors in the real binary (rc != 0) — IGNORE its rc; assert ROUTING.
+    # Bare connect: post-Issue #1 the wrapper short-circuits to a success no-op (rc 0).
+    # We IGNORE its rc either way (the contract is ROUTING, not the connect rc).
     timeout --signal=KILL 15 "$ABPOOL_WRAPPER" connect 98765 >/dev/null 2>&1 || true
     after="$(pool_lease_find_mine 2>/dev/null || true)"
     assert_eq "$before" "$after" "connect <random> kept us on lane $before (arg ignored)" || return 1

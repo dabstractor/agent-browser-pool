@@ -316,8 +316,49 @@ selftest_wrapper_and_admin_are_executable() {
 }
 
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
+# ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
+# setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The
+# framework's run_test/abpool_run_suite call setup() ONCE PER TEST; this self-test has 7
+# bodies → 7 setup() calls, and in a shared sandbox the 3rd setup() HANGS (a documented
+# P1.M9.T1.S1 accumulation hazard). Per AGENTS.md §4 a suite MUST call a process-spawning
+# setup() AT MOST ONCE. So the self-test BYPASSES abpool_run_suite and uses a single-setup
+# runner (mirrors test/release_reaper.sh's _abpool_run_release_reaper_suite):
+#   - ONE setup() (temp root + config + trap + ONE sim-owner).
+#   - Each body runs via `if "$fn"` in the MAIN shell (NOT a subshell). A failed assert's
+#     `return 1` is the function's rc → recorded as FAIL → the suite CONTINUES. No subshell
+#     ⇒ the EXIT trap does NOT fire mid-suite ⇒ the temp root is NOT removed between bodies.
+#   - Inter-body backstop: clear any lease a body wrote (rm the lanes dir contents) + confirm
+#     the shared sim-owner is still alive (selftest_sim_owner_is_alive_pi reads it). The
+#     bodies are pure-logic (no Chrome, no per-body owners), so no release-all / owner-swap is
+#     needed — only the lease-write residue is swept between bodies.
+#   - ONE teardown() at the end.
+_run_selftest_suite() {
+    local fn
+    ABPOOL_PASS=0; ABPOOL_FAIL=0; ABPOOL_FAILED=()
+    setup                                  # ★ the ONE AND ONLY setup() call
+    for fn in $(compgen -A function | grep '^selftest_' | sort); do
+        printf '== %s\n' "$fn"
+        if "$fn"; then
+            ABPOOL_PASS=$((ABPOOL_PASS+1)); printf '   PASS\n'
+        else
+            ABPOOL_FAIL=$((ABPOOL_FAIL+1)); ABPOOL_FAILED+=("$fn"); printf '   FAIL\n' >&2
+        fi
+        # Inter-body backstop: clear any lease file a body wrote (selftest_lane_exists_after_write
+        # creates 3.json). A stray lease would pollute selftest_empty_pool_lane_is_gone. Pure
+        # rm of the lanes dir CONTENTS (not the dir — pool_state_init re-mkdirs it).
+        rm -f -- "${POOL_LANES_DIR:?}/"*.json 2>/dev/null || true
+    done
+    teardown
+    printf '\n%d passed, %d failed\n' "$ABPOOL_PASS" "$ABPOOL_FAIL"
+    if (( ABPOOL_FAIL > 0 )); then
+        printf 'FAILED: %s\n' "${ABPOOL_FAILED[*]}" >&2
+        return 1
+    fi
+    return 0
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    if ! abpool_run_suite selftest_; then
+    if ! _run_selftest_suite; then
         exit 1
     fi
 fi

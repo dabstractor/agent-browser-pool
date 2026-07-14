@@ -1023,6 +1023,13 @@ pool_lease_find_mine() {
 
 # pool_lease_find_mine_any
 #
+# ★★★ DEAD CODE — CURRENTLY UNUSED (Issue #5) ★★★ This diagnostic variant has ZERO
+# non-comment call sites. Its docstring below lists reap / doctor / release as intended
+# consumers, but none actually call it: pool_reap_stale uses pool_lane_is_stale;
+# pool_admin_doctor uses pool_lease_read; pool_admin_release uses pool_lanes_list. It is
+# RETAINED as a documented building block for a future self-reap / reconcile path that
+# has not been wired. Do NOT assume it is live.
+#
 # Diagnostic variant of find_mine: return the first lane whose owner.pid ==
 # POOL_OWNER_PID REGARDLESS of liveness (no pool_owner_alive call). Surfaces a STALE
 # lease that nonetheless names this PID — for the reaper (M5.T3), doctor (M7.T4),
@@ -2132,6 +2139,17 @@ _pool_launch_and_verify() {
     # pool_wait_cdp rc 1 ⇒ Chrome pgroup ALREADY KILLED (research §1.3).
 
     # --- Attempt 2 (retry once — PRD §2.14) ---
+    # PRESERVE attempt 1's diagnostic log (Issue #6): pool_chrome_launch opens
+    # $POOL_STATE_DIR/chrome-<lane>.log with `>` (truncate). On retry that would DESTROY
+    # the first Chrome's stderr — exactly the output most useful for diagnosing why the
+    # first boot failed. Rename attempt-1's log aside first so the second launch's truncate
+    # only clears the (now-empty) live log, and the first attempt's output survives for
+    # post-mortem. Best-effort (`|| true`): a missing/empty attempt-1 log is not fatal.
+    if [[ -f "$POOL_STATE_DIR/chrome-$lane.log" ]]; then
+        mv -f -- "$POOL_STATE_DIR/chrome-$lane.log" \
+                "$POOL_STATE_DIR/chrome-$lane.attempt1.log" 2>/dev/null || true
+        _pool_log "_pool_launch_and_verify: preserved attempt-1 log: $POOL_STATE_DIR/chrome-$lane.attempt1.log"
+    fi
     pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   # relaunch (overwrites globals)
     _pool_boot_write_chrome_ids "$lane"                    # 2nd chrome-ids → lease
     if pool_wait_cdp "$port"; then
@@ -2596,6 +2614,13 @@ pool_reap_stale() {
 
 # -----------------------------------------------------------------------------
 # pool_reuse_orphan
+#
+# ★★★ DEAD CODE — CURRENTLY UNUSED (Issue #4) ★★★ This PUBLIC function has ZERO
+# non-comment call sites. The reuse-orphan feature is shipped via the INLINE loop inside
+# _pool_acquire_critical_section (@ ~line 1977-1996), which is correct + shipped. This
+# standalone function is RESERVED for a future acquire refactor / exhaustion retry /
+# admin doctor reconcile (see DESIGN below) that does not yet exist. Do NOT assume it is
+# live; do NOT delete it without confirming those future callers are abandoned.
 #
 # PRD §2.4 step 3b / IQ4 "reuse-if-responsive" — the PUBLIC building-block entry
 # point that ADOPTS the first STALE lane whose Chrome is still RESPONSIVE. Scans
@@ -3195,9 +3220,11 @@ pool_normalize_close() {
 #
 # GOTCHA — bare `connect` (no positional) is a RUNTIME ERROR in the real binary (exit 1,
 #   "<port|url> required"). After this strip the result is bare `connect`. PRD §2.4 step 4
-#   (pool_ensure_connected) ALREADY binds the lane's daemon — so M6.T3.S1 must NOT naively
-#   exec a bare connect (the agent would see the error → breaks §2.15 transparency). This
-#   task strips the arg per contract; how the bare result is exec'd is M6.T3.S1.
+#   (pool_ensure_connected) ALREADY binds the lane's daemon — so pool_wrapper_main (M6.T3.S1)
+#   must NOT naively exec a bare connect (the agent would see the error → breaks §2.15
+#   transparency). RESOLVED (Issue #1): pool_wrapper_main detects the bare connect (via
+#   _pool_clean_args_is_bare_connect) and short-circuits to a success no-op. This function
+#   strips the arg per contract; the bare-result handling is pool_wrapper_main step k.
 # GOTCHA — OUTPUT is the GLOBAL ARRAY POOL_NORM_ARGS, NOT stdout. stdout stays EMPTY.
 # GOTCHA — return 0 ALWAYS. Does NOT touch POOL_CLOSE_ALL_SEEN.
 # GOTCHA — --session is PRESERVED (only its value is skipped during the positional scan).
@@ -3439,8 +3466,9 @@ pool_force_session() {
 #   acquire with the same exhausted state would loop).
 # GOTCHA — pool_ensure_connected rc 1 ⇒ lane NOT dropped ⇒ pool_die (surface the failure;
 #   reaper cleans up on the agent's NEXT acquire). Do NOT retry in-place.
-# GOTCHA — the connect-normalize may leave a bare `connect` in POOL_NORM_ARGS; do NOT
-#   special-case it — pool_ensure_connected (step h) already bound the daemon, so exec'ing
+# GOTCHA — the connect-normalize may leave a bare `connect` in POOL_NORM_ARGS; after
+#   session-stripping the wrapper SHORT-CIRCUITS it (step k) to a success no-op — pool_ensure_connected
+#   (step h) already bound the daemon, so exec'ing
 #   `agent-browser --session abpool-<N> connect` is a harmless no-op connect.
 # GOTCHA — close --all interception: pool_normalize_close sets POOL_CLOSE_ALL_SEEN=1 iff it
 #   stripped ≥1 --all from a close cmd. Log it for observability (PRD §2.15).
@@ -3450,7 +3478,7 @@ pool_force_session() {
 # EXPORTS (via pool_force_session): AGENT_BROWSER_SESSION=abpool-<N> (inherited by the step-k exec).
 pool_wrapper_main() {
     # Declare ALL locals up front (SC2155: never `local x="$(…)"` — declare then assign).
-    local class N port
+    local class N port _has_json _a
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
     # config freezes POOL_DISABLE, POOL_REAL_BIN, POOL_WAIT, POOL_LANES_DIR, POOL_LOCK_FILE.
@@ -3537,7 +3565,95 @@ pool_wrapper_main() {
     # --- k. EXEC the real binary (step 5, terminal) -----------------------------
     # Process replacement (PID stays; exported AGENT_BROWSER_SESSION inherited). UNREACHABLE code
     # after this line. The agent's command now runs against its locked, booted, connected lane.
+    #
+    # GOTCHA — BARE-CONNECT SHORT-CIRCUIT (Issue #1 / PRD §2.15 transparency):
+    #   pool_normalize_connect (step i) strips the agent's `<port|url>` positional because the
+    #   pool owns the real connection (pool_ensure_connected, step h, already bound the lane's
+    #   daemon). That leaves a BARE `connect` (plus any flags like --json) in POOL_CLEAN_ARGS.
+    #   A bare `connect` is a RUNTIME ERROR in the real binary ("<port|url> required", exit 1)
+    #   — the agent typed a skill-taught `connect <port>` and would see a spurious failure even
+    #   though the lane IS connected. PRD §2.15: the agent must never see a no-idea failure.
+    #   So when the cleaned argv is a bare connect (command `connect`, no positional remaining),
+    #   short-circuit to a SUCCESSFUL no-op (the lane's daemon is already bound): confirm on
+    #   stderr, exit 0. We do NOT exec the erroring bare connect.
+    if _pool_clean_args_is_bare_connect "${POOL_CLEAN_ARGS[@]}"; then
+        _pool_log "pool_wrapper_main: bare connect → no-op (lane $N already bound by ensure_connected)"
+        # Transparency for --json callers (agent-browser's --json convention is
+        # {"success":true,...} on stdout): if the agent passed --json, emit a success
+        # object so a JSON-parsing caller isn't surprised by empty stdout. Otherwise print a
+        # human-friendly confirmation to stderr (stdout stays clean for interactive use).
+        _has_json=0
+        for _a in "${POOL_CLEAN_ARGS[@]}"; do
+            [[ "$_a" == "--json" ]] && _has_json=1
+        done
+        if (( _has_json )); then
+            printf '{"success":true,"data":{"lane":%s,"session":"%s","connected":true}}\n' \
+                "$N" "${AGENT_BROWSER_SESSION:-abpool-$N}"
+        else
+            printf 'agent-browser-pool: connect → already routed to lane %s (session %s)\n' \
+                "$N" "${AGENT_BROWSER_SESSION:-abpool-$N}" >&2
+        fi
+        exit 0
+    fi
+
     exec "$POOL_REAL_BIN" "${POOL_CLEAN_ARGS[@]}"
+}
+
+# _pool_clean_args_is_bare_connect ARGS...
+#
+# Does the cleaned argv represent a BARE `connect` — i.e. the command (first positional)
+# is `connect` AND there is NO further positional arg (only leading flags / --json are OK)?
+# Returns 0 (true) iff so; returns 1 (false) otherwise.
+#
+# Why this exists: pool_normalize_connect strips the agent's `<port|url>` positional (the
+# pool owns the connection). That leaves a bare `connect`, which the real binary rejects
+# ("<port|url> required", exit 1). This predicate lets pool_wrapper_main short-circuit that
+# erroring exec into a successful no-op (PRD §2.15 transparency; Issue #1).
+#
+# LOGIC (mirrors pool_normalize_connect / pool_dispatch_classify's flag-vs-command scan):
+#   a. Walk $@; the first NON-flag token (skipping --session/--session=/--*/-*) is the COMMAND.
+#   b. If the command is NOT `connect` → return 1.
+#   c. Continue scanning PAST the command. If ANY further non-flag positional is found → return 1
+#      (a positional survived stripping → not bare, e.g. `connect 98765` somehow passed through).
+#   d. No further positional → return 0 (bare connect, possibly with trailing flags).
+#
+# GOTCHA — a bare `connect` with NO args at all (empty $@) returns 1 (no command found → not
+#   a connect). A purely-empty POOL_CLEAN_ARGS also returns 1 (the real exec handles it).
+# GOTCHA — return 0/1 ONLY (never pool_die); reads only "$@".
+# PRECONDITION: none.
+_pool_clean_args_is_bare_connect() {
+    local -a orig=("$@")
+    local i=0 tok cmd=""
+
+    # --- a. find the COMMAND (first non-flag token) ---
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)      i=$((i+2)) ;;
+            --session=*)    i=$((i+1)) ;;
+            --*)            i=$((i+1)) ;;
+            -*)             i=$((i+1)) ;;
+            *)              cmd="$tok"; i=$((i+1)); break ;;
+        esac
+    done
+
+    # --- b. not connect (or no command at all) → not bare connect ---
+    [[ "$cmd" == connect ]] || return 1
+
+    # --- c. scan PAST the command for any further positional ---
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)      i=$((i+2)) ;;
+            --session=*)    i=$((i+1)) ;;
+            --*)            i=$((i+1)) ;;
+            -*)             i=$((i+1)) ;;
+            *)              return 1 ;;   # a positional survived → not bare
+        esac
+    done
+
+    # --- d. command was connect, no further positional → bare connect ---
+    return 0
 }
 
 # =============================================================================
@@ -4029,7 +4145,13 @@ pool_admin_doctor() {
     # Required PATH deps. `command -v` is POSIX-standard + the codebase idiom
     # (_pool_alert lib/pool.sh:2824); preferred over `which` (ShellCheck SC2230).
     # rc 1 (absent) MUST be inside `if` (a bare call ABORTS under set -e).
-    for dep in flock setsid pgrep pkill cp curl jq; do
+    # Deps beyond the core set (Issue #7):
+    #   findmnt — used by pool_check_btrfs + this doctor's own btrfs probe (missing → empty
+    #            fstype, surfaces indirectly as a btrfs FAIL; naming it is more honest).
+    #   ss      — used by pool_find_free_port (ss -tlnH) for port allocation. Absence
+    #            degrades SILENTLY to a curl-only probe (the || true empty-snapshot path);
+    #            no FAIL, no WARN → name it so the operator can see the degradation.
+    for dep in flock setsid pgrep pkill cp curl jq findmnt ss; do
         if command -v "$dep" >/dev/null 2>&1; then
             printf '  %-22s OK\n' "$dep"
             ok=$((ok+1))

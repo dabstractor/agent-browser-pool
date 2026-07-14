@@ -110,6 +110,71 @@ mkdir -p -- "$HOME/scripts" "$HOME/.local/bin"
 ln -sfnv -- "$REPO_DIR/bin/agent-browser"      "$HOME/scripts/agent-browser"
 ln -sfnv -- "$REPO_DIR/bin/agent-browser-pool" "$HOME/.local/bin/agent-browser-pool"
 
+# --- PATH-ordering verification (Issue #2 / PRD §2.17) -------------------------
+# The entire shadow mechanism depends on ~/scripts appearing AHEAD of ~/.local/bin on
+# $PATH. If ~/.local/bin comes first (or ~/scripts is absent), the symlink above is
+# created silently but `agent-browser` still resolves to the REAL binary — pooling does
+# NOTHING with no error. Verify the ordering actually holds and resolve the wrapper.
+wrapper_link="$HOME/scripts/agent-browser"
+real_bin_dir="$HOME/.local/bin"
+
+# (a) Ordering check on the CURRENT $PATH (positional comparison).
+scripts_first=0
+IFS=':' read -r -a _path_parts <<<"$PATH"
+for _p in "${_path_parts[@]}"; do
+    if [[ "$_p" == "$wrapper_link" || "$_p" == "$HOME/scripts" ]]; then
+        scripts_first=1
+        break
+    fi
+    if [[ "$_p" == "$real_bin_dir" ]]; then
+        break   # ~/.local/bin seen first → ordering wrong
+    fi
+done
+
+# (b) Resolution check: where does `agent-browser` actually resolve right now?
+resolved=""
+if _resolved="$(command -v agent-browser 2>/dev/null || true)"; then
+    resolved="$_resolved"
+fi
+# Follow symlinks to compare against the wrapper's real target.
+resolved_real=""
+[[ -n "$resolved" ]] && resolved_real="$(readlink -f "$resolved" 2>/dev/null || true)"
+wrapper_real="$(readlink -f "$wrapper_link" 2>/dev/null || true)"
+
+# The shadow is ACTIVE iff `agent-browser` resolves to our wrapper (by link OR real path).
+shadow_active=0
+if [[ -n "$resolved" ]]; then
+    if [[ "$resolved" == "$wrapper_link" || "$resolved_real" == "$wrapper_real" ]]; then
+        shadow_active=1
+    fi
+fi
+
+if [[ "$scripts_first" != "1" || "$shadow_active" != "1" ]]; then
+    warn ""
+    warn "$BAR"
+    warn "  WARNING: the agent-browser wrapper is NOT first on PATH — pooling is INACTIVE."
+    warn "$BAR"
+    warn ""
+    warn "  The symlink was created, but 'agent-browser' does NOT resolve to it."
+    warn "  Required: $HOME/scripts must appear BEFORE $real_bin_dir on PATH."
+    warn ""
+    if [[ -n "$resolved" ]]; then
+        warn "  Current resolution: agent-browser -> $resolved"
+        warn "  Wrapper symlink:    $wrapper_link"
+    else
+        warn "  Current resolution: agent-browser NOT FOUND on PATH at all."
+    fi
+    warn ""
+    warn "  Fix your shell rc (e.g. ~/.bashrc) so $HOME/scripts precedes $real_bin_dir:"
+    warn "      export PATH=\"$HOME/scripts:$real_bin_dir:\$PATH\""
+    warn "  then start a NEW shell and re-run:"
+    warn "      command -v agent-browser   # must print $wrapper_link"
+    warn ""
+    warn "  Until then EVERY 'agent-browser' call bypasses the pool silently."
+    warn "$BAR"
+    warn ""
+fi
+
 # --- pre-create the pool state dir (lanes/ + acquire.lock) — reuses the lib's canonical paths ---
 # pool_state_init: mkdir -p POOL_LANES_DIR + touch POOL_LOCK_FILE. Idempotent.
 pool_state_init
