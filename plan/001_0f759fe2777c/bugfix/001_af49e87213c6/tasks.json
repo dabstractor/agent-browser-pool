@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Configuration & Dispatch Fixes (Issues 1, 4, 5)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Small, independent fixes in the config/dispatch layer. Issue 1: make _pool_config_bool accept truthy values (1/true/yes/on). Issue 5: update pool_admin_help text (same root cause as Issue 1). Issue 4: treat bare agent-browser (no command) as meta/passthrough instead of driving (which boots Chrome).",
           "tasks": [
             {
@@ -42,14 +42,14 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "Treat empty command as meta/passthrough in dispatch_classify (Issue 4)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "pool_dispatch_classify (lib/pool.sh:3085-3110) returns 'driving' when no non-flag command token is present. This causes pool_wrapper_main to acquire a lane and boot Chrome for a bare agent-browser invocation (no subcommand), which upstream treats as a help/usage request. Fix: return 'meta' instead of 'driving' when cmd is empty, mirroring the --help short-circuit.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T2.S1",
                   "title": "Update pool_dispatch_classify to return meta for no command token",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_0f759fe2777c/bugfix/001_af49e87213c6/architecture/key_findings.md (Issue 4) and scout-config-dispatch.md. pool_dispatch_classify at lib/pool.sh:3085-3110 returns 'driving' when cmd is empty (line ~3092: 'if [[ -z \"$cmd\" ]]; then printf driving'). The existing test in validate.sh expects 'driving' for no-args (22 dispatch cases). pool_wrapper_main step c (line 3500-3503) execs passthrough when class == 'meta'.\n2. INPUT: $@ (the agent's argv) passed to pool_dispatch_classify. The function scans left→right, skipping flags (--session, --json, -h, etc.), and sets cmd to the first non-flag token.\n3. LOGIC: In pool_dispatch_classify, change the empty-cmd branch (the 'if [[ -z \"$cmd\" ]]' block at line ~3092) from 'printf driving' to 'printf meta'. This mirrors the --help/-h/--version short-circuit at the top of the case statement. A subcommand-less invocation is not a driving action — upstream agent-browser with no args prints help and exits 0. Update the existing test in validate.sh (or test/validate.sh self-tests) that expects 'driving' for no-args to expect 'meta'. Also update the test for '--json' (flag-only) to expect 'meta'. This is a pure-function test — no Chrome needed.\n4. OUTPUT: pool_dispatch_classify returns 'meta' for bare invocations (no command token, only flags or empty $@). pool_wrapper_main will passthrough these to the real binary unchanged instead of booting Chrome.\n5. DOCS: none — no user-facing/config/API surface change (bare-command passthrough is the correct behavior matching upstream; the README's META list is not contradicted). The Mode B final task (P1.M4.T1) will sweep README 'How it works' if needed.",
@@ -81,7 +81,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Detect EADDRINUSE in pool_chrome_launch and return 1 instead of pool_die",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_0f759fe2777c/bugfix/001_af49e87213c6/architecture/key_findings.md (Issue 2) and scout-boot-connect.md. pool_chrome_launch at lib/pool.sh:1478-1540 calls pool_die (FATAL) on instant-exit (empty pgid, lines 1530-1534). Chrome's stderr is captured to $POOL_STATE_DIR/chrome-<lane>.log. On EADDRINUSE, Chrome's log typically contains 'Address already in use', 'Cannot start http server for devtools', or 'Couldn't bind to port'. The stale comment at lib/pool.sh:1330 and 1377-1379 claims 'retries on EADDRINUSE' which is false.\n2. INPUT: port, user_data_dir, lane (args to pool_chrome_launch). Chrome log at $POOL_STATE_DIR/chrome-<lane>.log (created by the setsid redirect at line 1521). POOL_CHROME_PID (set at line 1520).\n3. LOGIC: In pool_chrome_launch, in the 'if [[ -z \"$pgid\" ]]' block (lines 1530-1534), BEFORE the existing pool_die, grep the Chrome log for EADDRINUSE-like patterns. Use: grep -qiE 'address already in use|bind.*failed|EADDRINUSE|cannot start http server|couldn.t bind' \"$log_file\" 2>/dev/null. If the grep matches, log a warning via _pool_log ('pool_chrome_launch: Chrome exited immediately (port $port may be in use)'), kill the bare PID (existing kill line), and return 1 (NON-FATAL, retryable) instead of pool_die. If the grep does NOT match, keep the existing pool_die (genuine misconfiguration — broken binary, bad flags). Do NOT change the success path (pgid captured, return 0). Update the function docstring (around line 1480-1510) to document the new return-1-on-EADDRINUSE behavior. Write a test: create a fake Chrome log with EADDRINUSE text, source lib/pool.sh, call pool_chrome_launch with a fake binary that exits instantly, and assert return 1 (not pool_die). Use timeout + isolated temp HOME per AGENTS.md. Mock: use a fake Chrome binary (a script that exits 1 after writing EADDRINUSE to the log).\n4. OUTPUT: pool_chrome_launch returns 0 (success), 1 (EADDRINUSE detected, retryable — NEW), or pool_die (fatal instant-exit for non-EADDRINUSE causes). The caller (_pool_launch_and_verify, S2) can now catch return 1 and re-pick a port.\n5. DOCS: [Mode A] Update pool_chrome_launch docstring (lib/pool.sh ~1480-1510) to document the new return-1-on-EADDRINUSE behavior and the grep pattern used.",

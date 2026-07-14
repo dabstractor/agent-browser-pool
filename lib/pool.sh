@@ -3034,7 +3034,7 @@ pool_wait_for_lane() {
 #      handle the error"). Because (c) and (d) BOTH yield 'driving', the DRIVING set is NOT
 #      enumerated in code — detecting META + defaulting the rest is identical and stays
 #      correct as agent-browser adds driving commands (mouse, react, …).
-#   e. No command found (only flags / empty $@) → 'driving' (default, step d).
+#   e. No command found (only flags / empty $@) → 'meta' (passthrough — a help/usage request, like --help; Issue 4).
 #
 # CONSUMERS: M6.T3.S1 wrapper lifecycle step 0; unit tests (M9).
 #
@@ -3091,9 +3091,11 @@ pool_dispatch_classify() {
         esac
     done
 
-    # No command token found (only flags / empty $@) → default 'driving' (contract step d).
+    # No command token found (only flags / empty $@) → 'meta' (passthrough). A
+    # subcommand-less invocation is a help/usage request (upstream prints help + exits 0),
+    # not a driving action — mirrors the --help/-h/--version short-circuit above (Issue 4).
     if [[ -z "$cmd" ]]; then
-        printf 'driving\n'
+        printf 'meta\n'
         return 0
     fi
 

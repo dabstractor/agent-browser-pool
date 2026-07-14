@@ -357,6 +357,47 @@ selftest_config_bool_via_pool_config_init() {
     assert_eq "0" "$d" "AGENT_BROWSER_POOL_DISABLE=0 -> POOL_DISABLE=0" || return 1
 }
 
+# --- pool_dispatch_classify full table (P1.M1.T2.S1 / Issue 4) ------------------
+# Pure-function bodies: exercise pool_dispatch_classify directly. No Chrome, no sim-owner,
+# no persistent lease writes. Picked up by the single-setup _run_selftest_suite above
+# (same runner as the other selftest_*). pool_dispatch_classify reads NO globals and writes
+# NO files, so the body needs no setup state — it just calls the function directly.
+
+# pool_dispatch_classify: full classification table (Issue 4 — no-command → meta).
+# Covers META (help/version short-circuit + two-word/single-word META commands), the
+# Issue-4 no-command/flags-only cases (now meta), and DRIVING (real commands +
+# unrecognized default + flags-before-command).
+selftest_dispatch_classify_cases() {
+    local r
+    # --- META: help/version short-circuit (unchanged, regression guard) ---
+    for a in "--help" "-h" "--version"; do
+        r="$(pool_dispatch_classify "$a")"
+        assert_eq "meta" "$r" "meta [$a] -> meta" || return 1
+    done
+    # --- META: two-word + single-word META commands (unchanged, regression guard) ---
+    r="$(pool_dispatch_classify session list)"; assert_eq "meta" "$r" "session list -> meta" || return 1
+    for a in skills dashboard plugin mcp; do
+        r="$(pool_dispatch_classify "$a")"; assert_eq "meta" "$r" "meta [$a] -> meta" || return 1
+    done
+    # --- META (Issue 4 fix): no command token / flags-only / empty $@ ---
+    r="$(pool_dispatch_classify)";                   assert_eq "meta" "$r" "no-args -> meta" || return 1
+    r="$(pool_dispatch_classify --json)";            assert_eq "meta" "$r" "--json (no cmd) -> meta" || return 1
+    r="$(pool_dispatch_classify --session foo)";     assert_eq "meta" "$r" "--session foo (no cmd) -> meta" || return 1
+    r="$(pool_dispatch_classify --session=foo)";     assert_eq "meta" "$r" "--session=foo (no cmd) -> meta" || return 1
+    r="$(pool_dispatch_classify --headed --json)";   assert_eq "meta" "$r" "--headed --json (no cmd) -> meta" || return 1
+    r="$(pool_dispatch_classify -i)";                assert_eq "meta" "$r" "-i (no cmd) -> meta" || return 1
+    r="$(pool_dispatch_classify "")";                assert_eq "meta" "$r" "empty-string arg -> meta" || return 1
+    # --- DRIVING: actual commands (unchanged, regression guard) ---
+    for a in open click connect close session back get find; do
+        r="$(pool_dispatch_classify "$a")"; assert_eq "driving" "$r" "driving [$a] -> driving" || return 1
+    done
+    # --- DRIVING: unrecognized command defaults to driving (contract step d, unchanged) ---
+    r="$(pool_dispatch_classify unknowncmd)"; assert_eq "driving" "$r" "unknowncmd -> driving (default)" || return 1
+    # --- DRIVING: flags before a command are skipped, command is found ---
+    r="$(pool_dispatch_classify --session foo open)"; assert_eq "driving" "$r" "--session foo open -> driving" || return 1
+    r="$(pool_dispatch_classify --json click)";       assert_eq "driving" "$r" "--json click -> driving" || return 1
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The
