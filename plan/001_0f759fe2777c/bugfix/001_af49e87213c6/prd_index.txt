@@ -1,0 +1,13 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Boolean env vars only honor the literal "1" — contradicts README and the code's own --help
+  h3.1 Issue 2: Concurrent port allocation has an unmitigated race; the documented "retries on EADDRINUSE" mitigation is inaccurate
+  h3.2 Issue 3: close then next driving command may skip a needed daemon rebind (transparency risk)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.3 Issue 4: Bare agent-browser (no command / only flags) boots a full Chrome for a no-op/help invocation
+  h3.4 Issue 5: pool_admin_help describes DISABLE / ALLOW_SLOW_COPY as "if set" (misleading given Issue 1)
+ h2.4 Testing Summary
+---
+code:5 para:40 list:7 quote:3
