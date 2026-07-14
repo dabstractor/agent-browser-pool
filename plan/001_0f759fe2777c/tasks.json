@@ -867,14 +867,14 @@
               "type": "Task",
               "id": "P1.M9.T2",
               "title": "Concurrency & mutual-exclusion tests",
-              "status": "Planned",
+              "status": "Complete",
               "description": "N parallel 'agents' (distinct owner PIDs via override) must each get a distinct lane. Assert no two share a lane and all release cleanly.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M9.T2.S1",
                   "title": "Concurrency — N agents get N distinct lanes, no collision",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M9.T1.S1"
