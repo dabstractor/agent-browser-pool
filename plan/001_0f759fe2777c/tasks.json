@@ -836,7 +836,7 @@
           "type": "Milestone",
           "id": "P1.M9",
           "title": "Testing & Validation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Build the test harness that exercises owner resolution, concurrency, mutual exclusion, release/cleanup, and the transparency checklist. Tests use owner PID override hooks and headless Chrome for unattended runs.",
           "tasks": [
             {
@@ -891,14 +891,14 @@
               "type": "Task",
               "id": "P1.M9.T3",
               "title": "Release & cleanup validation tests",
-              "status": "Planned",
+              "status": "Complete",
               "description": "Verify that release (explicit and via reaper) kills Chrome, deletes ephemeral dir, and drops lease. Verify stale detection (simulated dead owner).",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M9.T3.S1",
                   "title": "Release + stale reaper + crash simulation tests",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M9.T1.S1"
@@ -917,14 +917,14 @@
               "type": "Task",
               "id": "P1.M9.T4",
               "title": "Transparency checklist validation tests",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Validate the PRD §2.15 transparency checklist: skills passthrough, connect routing, --session override, close --all safety, etc.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M9.T4.S1",
                   "title": "Transparency checklist — verify invisible pooling contract",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M9.T1.S1"
