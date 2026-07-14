@@ -836,7 +836,7 @@
           "type": "Milestone",
           "id": "P1.M9",
           "title": "Testing & Validation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Build the test harness that exercises owner resolution, concurrency, mutual exclusion, release/cleanup, and the transparency checklist. Tests use owner PID override hooks and headless Chrome for unattended runs.",
           "tasks": [
             {
@@ -917,14 +917,14 @@
               "type": "Task",
               "id": "P1.M9.T4",
               "title": "Transparency checklist validation tests",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Validate the PRD §2.15 transparency checklist: skills passthrough, connect routing, --session override, close --all safety, etc.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M9.T4.S1",
                   "title": "Transparency checklist — verify invisible pooling contract",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M9.T1.S1"
@@ -957,7 +957,7 @@
                   "type": "Subtask",
                   "id": "P1.M10.T1.S1",
                   "title": "Update README.md — features, install, usage, configuration reference",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M6.T3.S2",
