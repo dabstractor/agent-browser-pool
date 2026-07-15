@@ -98,7 +98,7 @@ _pool_config_bool() {
 # Configuration reference (env var → POOL_* global):
 #   ENV VAR                        DEFAULT                                         GLOBAL                CATEGORY
 #   AGENT_BROWSER_POOL_STATE       $HOME/.local/state/agent-browser-pool           POOL_STATE_DIR        path (may not exist)
-#   AGENT_CHROME_MASTER            $HOME/.agent-chrome-profiles/master-profile     POOL_MASTER_DIR       path (may not exist)
+#   AGENT_CHROME_MASTER            $XDG_CONFIG_HOME/google-chrome (real profile)   POOL_MASTER_DIR       path (may not exist; default = your live Chrome)
 #   AGENT_CHROME_EPHEMERAL_ROOT    $HOME/.agent-chrome-profiles/active             POOL_EPHEMERAL_ROOT   path (may not exist)
 #   AGENT_BROWSER_REAL             $HOME/.local/bin/agent-browser                  POOL_REAL_BIN         path (may not exist)
 #   AGENT_CHROME_BIN               google-chrome-stable                            POOL_CHROME_BIN       name-or-path
@@ -138,11 +138,15 @@ pool_config_init() {
     POOL_HOME_DIR="$home_resolved"; declare -g POOL_HOME_DIR
 
     # 2. Path globals (defaults anchored on POOL_HOME_DIR; realpath -m via the helper).
-    local state_dir master_dir ephemeral_root real_bin
+    local state_dir master_dir ephemeral_root real_bin xdg_cfg
     state_dir="$(_pool_config_canon_path \
         "${AGENT_BROWSER_POOL_STATE:-$POOL_HOME_DIR/.local/state/agent-browser-pool}")"
+    # CoW SOURCE: defaults to the user's REAL Chrome user-data-dir (auto-detected), so
+    # agents start from the human's current auth without a separate template. The source
+    # may be live/in-use (PRD §2.7). Override AGENT_CHROME_MASTER for a dedicated template.
+    xdg_cfg="${XDG_CONFIG_HOME:-$POOL_HOME_DIR/.config}"
     master_dir="$(_pool_config_canon_path \
-        "${AGENT_CHROME_MASTER:-$POOL_HOME_DIR/.agent-chrome-profiles/master-profile}")"
+        "${AGENT_CHROME_MASTER:-$xdg_cfg/google-chrome}")"
     ephemeral_root="$(_pool_config_canon_path \
         "${AGENT_CHROME_EPHEMERAL_ROOT:-$POOL_HOME_DIR/.agent-chrome-profiles/active}")"
     real_bin="$(_pool_config_canon_path \
@@ -275,11 +279,13 @@ pool_check_master() {
         return 0
     fi
 
-    pool_die "pool_check_master: master template missing or empty:" \
+    pool_die "pool_check_master: source profile missing or empty:" \
              "$POOL_MASTER_DIR" \
-             "Create it ONCE by copying a configured Chrome profile, e.g.:" \
+             "This is the CoW SOURCE agents copy from (default: your real Chrome" \
+             "user-data-dir). Use Chrome so the default exists, or set" \
+             "AGENT_CHROME_MASTER to an existing Chrome user-data-dir, e.g.:" \
              "  cp -a --reflink=always <your-chrome-profile> \"$POOL_MASTER_DIR\"" \
-             "(see PRD §1.2 — the master is created once, never launched/mutated.)"
+             "(see PRD §2.7 — the source is read-only to the pool; never launched/written/deleted.)"
 }
 
 # _pool_atomic_write FILEPATH [CONTENT]
@@ -1315,11 +1321,24 @@ pool_copy_master() {
         fi
     fi
 
-    # (d) remove stale Chrome single-instance locks from the template (would confuse a
-    # launched Chrome). SingletonSocket may be an AF_UNIX socket — rm -f handles all
-    # three. -f tolerates a clean master where some are absent. `|| pool_die` for safety.
-    rm -f -- "$target_dir/SingletonLock" "$target_dir/SingletonCookie" "$target_dir/SingletonSocket" \
-        || pool_die "pool_copy_master: cannot remove Singleton locks in: $target_dir"
+    # (d) strip inherited Chrome single-instance artifacts. A copied `SingletonLock`
+    # is a symlink → hostname-<pid>; if the source is a LIVE profile that pid is alive,
+    # and the launched Chrome would think another instance already owns this dir and
+    # forward-and-exit instead of launching. GLOB `Singleton*` (not a fixed 3-name list)
+    # so any future singleton file Chrome adds is covered too. `|| true`: rm is
+    # best-effort; the assertion below is authoritative. (SingletonSocket may be an
+    # AF_UNIX socket — rm -f handles symlinks + sockets uniformly; -f tolerates a clean
+    # copy where none exist; nullglob off + no match → literal `Singleton*` which rm -f
+    # ignores harmlessly.)
+    rm -f -- "$target_dir"/Singleton* || true
+    # Assertion: fail loudly if ANY Singleton* artifact survived (permission failure or
+    # an un-removable new singleton file). compgen -G exits 0 iff ≥1 match; the fully
+    # quoted pattern lets compgen do the matching (handles spaces in target_dir).
+    if compgen -G "$target_dir/Singleton*" >/dev/null 2>&1; then
+        pool_die "pool_copy_master: Singleton artifacts survived the strip in:" \
+                 "$target_dir" \
+                 "(check permissions, or remove them manually before launching)."
+    fi
 
     return 0
 }
@@ -4578,7 +4597,7 @@ pool_admin_help() {
     printf '\n'
     printf 'Configuration (environment variables; all optional):\n'
     printf '  AGENT_BROWSER_POOL_STATE        state dir (lease store + logs)\n'
-    printf '  AGENT_CHROME_MASTER             master profile template (copied per lane)\n'
+    printf '  AGENT_CHROME_MASTER             CoW source profile (default: your real Chrome profile)\n'
     printf '  AGENT_CHROME_EPHEMERAL_ROOT     ephemeral lane dir root\n'
     printf '  AGENT_BROWSER_REAL              the real agent-browser binary (shadowed CLI)\n'
     printf '  AGENT_CHROME_BIN                Chrome binary (default: google-chrome-stable)\n'
