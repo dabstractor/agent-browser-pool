@@ -485,6 +485,74 @@ MOCK
     fi
 }
 
+# --- _pool_launch_and_verify port re-pick on launch failure (P1.M2.T1.S2 / Issue 2, path a) ---
+# Mock-based test: pool_chrome_launch returns 1 (EADDRINUSE — S1) on the original port and
+# 0 on the re-picked port; pool_wait_cdp returns 0 on the new port. Verifies _pool_launch_and_verify
+# catches the rc-1, re-picks a different port via pool_find_free_port, updates the lease, retries,
+# and returns 0 with the lease holding the NEW port. No real Chrome (AGENTS.md §1).
+# Runs in a bash -c SUBSHELL so the mock functions (which shadow the lib fns) are scoped — they
+# do NOT leak into the main shell and pollute the other selftests (single-setup runner, AGENTS.md §4).
+selftest_launch_and_verify_repick_on_launch_fail() {
+    local dir lane orig new rc lease_port
+    dir="$ABPOOL_TEST_ROOT/ephemeral-rp1"; mkdir -p -- "$dir"
+    lane=7; orig=53420; new=53421
+    # Provisional lease for lane 7 with port=orig (simulates pool_boot_lane step b).
+    pool_lease_write "$lane" "$dir" "$orig" "abpool-$lane" \
+        12345 "pi" 99999 "$ABPOOL_TEST_ROOT" 0 0 false
+    # Run _pool_launch_and_verify in a subshell with mocked launch/wait/find_free_port.
+    rc=0
+    timeout 15 bash -c '
+        set -euo pipefail
+        repo="$1"; orig="$2"; new="$3"; dir="$4"; lane="$5"
+        source "$repo/lib/pool.sh"
+        pool_config_init
+        # --- mocks (port-conditional; scoped to this subshell) ---
+        pool_chrome_launch() {
+            if [[ "$1" == "$orig" ]]; then return 1; fi   # EADDRINUSE on the original port
+            POOL_CHROME_PID=99999; declare -g POOL_CHROME_PID
+            POOL_CHROME_PGID=99999; declare -g POOL_CHROME_PGID
+            return 0
+        }
+        pool_wait_cdp() { [[ "$1" != "$orig" ]]; }        # orig times out; new is ready
+        pool_find_free_port() { printf "%s\n" "$new"; }   # the re-pick port
+        _pool_launch_and_verify "$orig" "$dir" "$lane"
+    ' _ "$ABPOOL_REPO" "$orig" "$new" "$dir" "$lane" || rc=$?
+    assert_eq "0" "$rc" "path-a: _pool_launch_and_verify returns 0 after launch-fail re-pick" || return 1
+    lease_port="$(pool_lease_field "$lane" port)"
+    assert_eq "$new" "$lease_port" "path-a: lease port updated to the re-picked port" || return 1
+}
+
+# --- _pool_launch_and_verify port re-pick on CDP timeout (P1.M2.T1.S2 / Issue 2, path b) ---
+# Mock-based test: pool_chrome_launch succeeds (rc 0) on BOTH attempts for the original port,
+# but pool_wait_cdp times out (rc 1) on both; on the re-picked port, both succeed. Verifies the
+# "both same-port CDP-timeout attempts failed" trigger path reaches the re-pick. No real Chrome.
+selftest_launch_and_verify_repick_on_cdp_timeout() {
+    local dir lane orig new rc lease_port
+    dir="$ABPOOL_TEST_ROOT/ephemeral-rp2"; mkdir -p -- "$dir"
+    lane=8; orig=53430; new=53431
+    pool_lease_write "$lane" "$dir" "$orig" "abpool-$lane" \
+        12345 "pi" 99999 "$ABPOOL_TEST_ROOT" 0 0 false
+    rc=0
+    timeout 15 bash -c '
+        set -euo pipefail
+        repo="$1"; orig="$2"; new="$3"; dir="$4"; lane="$5"
+        source "$repo/lib/pool.sh"
+        pool_config_init
+        # --- mocks ---
+        pool_chrome_launch() {   # always succeeds (sets globals)
+            POOL_CHROME_PID=88888; declare -g POOL_CHROME_PID
+            POOL_CHROME_PGID=88888; declare -g POOL_CHROME_PGID
+            return 0
+        }
+        pool_wait_cdp() { [[ "$1" != "$orig" ]]; }        # orig times out (both attempts); new ready
+        pool_find_free_port() { printf "%s\n" "$new"; }
+        _pool_launch_and_verify "$orig" "$dir" "$lane"
+    ' _ "$ABPOOL_REPO" "$orig" "$new" "$dir" "$lane" || rc=$?
+    assert_eq "0" "$rc" "path-b: _pool_launch_and_verify returns 0 after CDP-timeout re-pick" || return 1
+    lease_port="$(pool_lease_field "$lane" port)"
+    assert_eq "$new" "$lease_port" "path-b: lease port updated to the re-picked port" || return 1
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The

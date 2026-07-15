@@ -1331,8 +1331,9 @@ pool_copy_master() {
 # free TCP port in [BASE, BASE+RANGE); probe via curl /json/version") + §2.3 (the
 # 3-stage free test). Consumed by the acquire POST-LOCK boot (M5.T1.S2: copy → port →
 # launch → connect → update lease), OUTSIDE the flock critical section (key_findings
-# FINDING 2 — concurrent boots; selection is BEST-EFFORT: the launch in M4.T2.S2 is the
-# authoritative bind and retries on EADDRINUSE).
+# FINDING 2 — concurrent boots; selection is BEST-EFFORT: the launch is the authoritative
+# bind; on a launch/CDP failure, _pool_launch_and_verify re-picks a different port via
+# pool_find_free_port and retries once (Issue 2 / S1+S2)).
 
 # pool_find_free_port
 #
@@ -1380,8 +1381,9 @@ pool_copy_master() {
 #   O(1) fork-free "set" for the claimed-port membership test inside a ≤1000-iteration
 #   loop. bash 4+ (already required by mapfile/declare -g). (research §3).
 # GOTCHA — TOCTOU tolerated: runs OUTSIDE the flock (FINDING 2); two acquires can both
-#   pick the same port — the launch (M4.T2.S2) is authoritative + retries on EADDRINUSE.
-#   (research §5).
+#   pick the same port — the launch is authoritative; on a launch/CDP failure,
+#   _pool_launch_and_verify re-picks a different port via pool_find_free_port and retries
+#   once (Issue 2 / S1+S2). (research §5).
 # Reads ONLY POOL_PORT_BASE + POOL_PORT_RANGE (frozen by pool_config_init) + the lease
 # JSON (via pool_lanes_list/pool_lease_field). Writes nothing. No new globals/env-vars.
 # PRECONDITION: pool_config_init (for POOL_PORT_BASE/RANGE + POOL_LANES_DIR via helpers).
@@ -2128,63 +2130,107 @@ _pool_boot_write_chrome_ids() {
 
 # _pool_launch_and_verify PORT EPHEMERAL_DIR LANE
 #
-# The launch + CDP-wait + RETRY-ONCE sub-flow. Returns 0 if Chrome's CDP endpoint answers;
-# returns 1 if it times out TWICE (the Chrome pgroup is already killed by pool_wait_cdp on
-# each timeout — research §1.3). PRD §2.14 "Chrome slow to boot → retry launch once; then
-# fail, drop lane". Composed by pool_boot_lane (step c+d) and (by contract) M5.T1.S3
-# ensure_connected for a mid-task-crash relaunch on the same dir+port (profile kept).
+# The launch + CDP-wait + RETRY-ONCE sub-flow with PORT RE-PICK (Issue 2 / S2). Returns 0
+# if Chrome's CDP endpoint answers — possibly after re-picking a DIFFERENT port on a launch
+# or CDP failure; returns 1 if all retries (2 same-port + 1 re-picked-port) are exhausted.
+# PRD §2.14 "Chrome slow to boot → retry launch once; then fail, drop lane", generalized by
+# Issue 2 to re-pick a port then retry once. Composed by pool_boot_lane (step c+d); pool_boot_lane
+# re-reads the lease port after a successful call so a re-picked port flows to the daemon connect.
 #
 # LOGIC:
-#   1. pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   (sets globals; pool_die on
-#      instant-exit is FATAL — propagates, NOT retried; research §3).
-#   2. _pool_boot_write_chrome_ids "$lane"   (write globals → lease; robustness §2).
-#   3. pool_wait_cdp "$port": rc 0 → return 0.
-#   4. rc 1 (Chrome pgroup already killed) → RETRY: pool_chrome_launch + write_chrome_ids
-#      + pool_wait_cdp. rc 0 → return 0; rc 1 → return 1 (Chrome already killed).
+#   1. Attempt 1 (same port): `if pool_chrome_launch "$port" …; then` — rc 1 (EADDRINUSE,
+#      detected by S1) → fall through to the re-pick (step 5). rc 0 → write_chrome_ids +
+#      pool_wait_cdp "$port": rc 0 → return 0; rc 1 (Chrome pgroup already killed) → attempt 2.
+#   2. Attempt 2 (same-port retry — PRD §2.14): `if pool_chrome_launch "$port" …; then` —
+#      rc 1 → fall through to the re-pick. rc 0 → write_chrome_ids + pool_wait_cdp "$port":
+#      rc 0 → return 0; rc 1 → fall through to the re-pick (both same-port attempts failed).
+#   3. (Re-pick trigger paths: attempt-1 launch rc 1, attempt-2 launch rc 1, OR both CDP
+#      timeouts — all fall through to step 5.)
+#   4. (The Issue-#6 log-preserve: attempt-1's chrome-<lane>.log is renamed to .attempt1.log
+#      before attempt 2's launch truncates it — only when attempt 1 ran.)
+#   5. PORT RE-PICK (ONE retry, no loop — Issue 2 / S2): `if ! new_port="$(pool_find_free_port)"`;
+#      rc 1 (exhausted) → return 1. Else pool_lease_update "$lane" port "$new_port"; then
+#      `if ! pool_chrome_launch "$new_port" …; then return 1; fi`; write_chrome_ids;
+#      pool_wait_cdp "$new_port": rc 0 → return 0; rc 1 → return 1.
 #
-# GOTCHA — the retry overwrites POOL_CHROME_PID/PGID (and the lease chrome-ids) with the
-#   2nd Chrome's identity, so a subsequent cleanup reads the correct (already-dead) pid.
+# GOTCHA — pool_chrome_launch rc 1 (EADDRINUSE — S1) is NON-FATAL and triggers the re-pick;
+#   only pool_die (genuine misconfig: broken binary / bad flags / non-EADDRINUSE instant-exit)
+#   propagates as fatal. Both launch calls are guarded with `if …; then` so a return-1 does
+#   NOT abort under set -e (it falls through to the re-pick).
+# GOTCHA — the re-pick updates the LEASE port (pool_lease_update). pool_boot_lane MUST re-read
+#   it (pool_lease_field) after this returns 0, or the daemon connect uses the stale $port.
+# GOTCHA — ONE re-pick only (no loop): the re-pick block is reached at most once per call.
+# GOTCHA — the retry/re-pick overwrites POOL_CHROME_PID/PGID (and the lease chrome-ids) with
+#   the latest Chrome's identity, so a subsequent cleanup reads the correct pid.
 # GOTCHA — pool_wait_cdp ALREADY kills the pgroup on timeout; do NOT add a redundant kill.
-# GOTCHA — instant-exit pool_die (pool_chrome_launch) propagates (fatal) — not catchable
-#   without losing the declare -g globals in a subshell (research §3).
-# NON-FATAL on the CDP-timeout path (return 1). No new globals exported.
-# PRECONDITION: pool_config_init + pool_state_init.
+# NON-FATAL on the failure paths (return 1). No new globals exported (new_port is local).
+# PRECONDITION: pool_config_init + pool_state_init + a PROVISIONAL lease for LANE (port>0,
+#   written by pool_boot_lane step b — pool_find_free_port + pool_lease_update rely on it).
 _pool_launch_and_verify() {
     local port="${1:-}"
     local ephemeral_dir="${2:-}"
     local lane="${3:-}"
+    local new_port
 
     # Validate args (defensive; the caller already validated, but be safe).
     [[ "$port" =~ ^[0-9]+$ ]] || return 1
     [[ -n "$ephemeral_dir" && "$ephemeral_dir" == /* ]] || return 1
     [[ "$lane" =~ ^[0-9]+$ ]] || return 1
 
-    # --- Attempt 1 ---
-    pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   # 0 or fatal pool_die
-    _pool_boot_write_chrome_ids "$lane"                    # globals → lease (§2)
-    if pool_wait_cdp "$port"; then
-        return 0
+    # --- Attempt 1 (same port) ---
+    # Guard pool_chrome_launch (Issue 2 / S1): rc 1 = EADDRINUSE detected on instant-exit
+    # (retryable) → fall through to the port re-pick below. rc 0 → write chrome-ids + wait
+    # for CDP. (A pool_die from pool_chrome_launch — genuine misconfig — still propagates.)
+    if pool_chrome_launch "$port" "$ephemeral_dir" "$lane"; then
+        _pool_boot_write_chrome_ids "$lane"                    # globals → lease (§2)
+        if pool_wait_cdp "$port"; then
+            return 0
+        fi
+        # pool_wait_cdp rc 1 ⇒ Chrome pgroup ALREADY KILLED (research §1.3). Retry once on
+        # the SAME port (PRD §2.14) before re-picking a different port.
+        # PRESERVE attempt 1's diagnostic log (Issue #6): pool_chrome_launch opens
+        # $POOL_STATE_DIR/chrome-<lane>.log with `>` (truncate). On retry that would DESTROY
+        # the first Chrome's stderr — exactly the output most useful for diagnosing why the
+        # first boot failed. Rename attempt-1's log aside first so the second launch's
+        # truncate only clears the (now-empty) live log, and the first attempt's output
+        # survives for post-mortem. Best-effort (`|| true`): a missing/empty log is not fatal.
+        if [[ -f "$POOL_STATE_DIR/chrome-$lane.log" ]]; then
+            mv -f -- "$POOL_STATE_DIR/chrome-$lane.log" \
+                    "$POOL_STATE_DIR/chrome-$lane.attempt1.log" 2>/dev/null || true
+            _pool_log "_pool_launch_and_verify: preserved attempt-1 log: $POOL_STATE_DIR/chrome-$lane.attempt1.log"
+        fi
+        # --- Attempt 2 (same-port retry — PRD §2.14) ---
+        if pool_chrome_launch "$port" "$ephemeral_dir" "$lane"; then
+            _pool_boot_write_chrome_ids "$lane"                # 2nd chrome-ids → lease
+            if pool_wait_cdp "$port"; then
+                return 0
+            fi
+        fi
     fi
-    # pool_wait_cdp rc 1 ⇒ Chrome pgroup ALREADY KILLED (research §1.3).
 
-    # --- Attempt 2 (retry once — PRD §2.14) ---
-    # PRESERVE attempt 1's diagnostic log (Issue #6): pool_chrome_launch opens
-    # $POOL_STATE_DIR/chrome-<lane>.log with `>` (truncate). On retry that would DESTROY
-    # the first Chrome's stderr — exactly the output most useful for diagnosing why the
-    # first boot failed. Rename attempt-1's log aside first so the second launch's truncate
-    # only clears the (now-empty) live log, and the first attempt's output survives for
-    # post-mortem. Best-effort (`|| true`): a missing/empty attempt-1 log is not fatal.
-    if [[ -f "$POOL_STATE_DIR/chrome-$lane.log" ]]; then
-        mv -f -- "$POOL_STATE_DIR/chrome-$lane.log" \
-                "$POOL_STATE_DIR/chrome-$lane.attempt1.log" 2>/dev/null || true
-        _pool_log "_pool_launch_and_verify: preserved attempt-1 log: $POOL_STATE_DIR/chrome-$lane.attempt1.log"
+    # --- Port re-pick (ONE retry with a DIFFERENT port; Issue 2 / S2) ---
+    # Reached when (a) pool_chrome_launch returned 1 (EADDRINUSE — S1) on attempt 1 or 2, OR
+    # (b) both same-port CDP-timeout attempts failed. pool_find_free_port excludes ports
+    # already claimed by leases (incl. our current $port, written by pool_boot_lane step b),
+    # so the new port is guaranteed different from the colliding one. ONE re-pick only —
+    # do NOT loop. On exhaustion or retry failure, return 1 (caller drops the lane).
+    if ! new_port="$(pool_find_free_port)"; then
+        _pool_log "_pool_launch_and_verify: no free port to re-pick for lane $lane; giving up"
+        return 1
     fi
-    pool_chrome_launch "$port" "$ephemeral_dir" "$lane"   # relaunch (overwrites globals)
-    _pool_boot_write_chrome_ids "$lane"                    # 2nd chrome-ids → lease
-    if pool_wait_cdp "$port"; then
+    # Update the lease so pool_boot_lane's daemon connect (step e) uses the real bound port,
+    # and so a concurrent pool_find_free_port sees this port claimed too.
+    pool_lease_update "$lane" port "$new_port"
+    _pool_log "_pool_launch_and_verify: re-picked port $new_port for lane $lane (was $port)"
+    # Retry launch + wait on the new port. pool_chrome_launch rc 1 here = EADDRINUSE again
+    # → do NOT loop (one re-pick only) → return 1.
+    if ! pool_chrome_launch "$new_port" "$ephemeral_dir" "$lane"; then
+        return 1
+    fi
+    _pool_boot_write_chrome_ids "$lane"
+    if pool_wait_cdp "$new_port"; then
         return 0
     fi
-    # Second timeout ⇒ Chrome already killed. Caller cleans up the lane.
     return 1
 }
 
@@ -2256,12 +2302,21 @@ pool_boot_lane() {
     pool_lease_update "$lane" port "$port"
 
     # --- c+d. LAUNCH + WAIT (retry once on CDP timeout) (PRD §2.4 step 3g/3h / §2.14). ---
-    #     _pool_launch_and_verify returns 0 (CDP ready) or 1 (timed out twice; Chrome killed).
-    #     On failure, clean up + return 1.
+    #     _pool_launch_and_verify returns 0 (CDP ready — possibly after a port re-pick — Issue 2/S2)
+    #     or 1 (all retries exhausted; Chrome killed). On failure, clean up + return 1.
     if ! _pool_launch_and_verify "$port" "$ephemeral_dir" "$lane"; then
         _pool_log "pool_boot_lane: CDP not ready after retry for lane $lane port $port; dropping lane"
         _pool_release_lane_internals "$lane"
         return 1
+    fi
+    # _pool_launch_and_verify may have re-picked a different port on a launch/CDP failure (Issue 2 / S2)
+    # and updated the lease; re-read the authoritative port so the daemon connect (step e) + the
+    # provisioned log (step f) use the REAL bound port, not the stale local $port. Guarded: a
+    # failed re-read (truly exceptional — corrupt lease mid-boot) keeps the original $port.
+    local reread_port
+    reread_port="$(pool_lease_field "$lane" port 2>/dev/null)" || true
+    if [[ "$reread_port" =~ ^[0-9]+$ && "$reread_port" -gt 0 ]]; then
+        port="$reread_port"
     fi
 
     # --- e. CONNECT: bind the daemon session to the Chrome (PRD §2.4 step 3i). ---
