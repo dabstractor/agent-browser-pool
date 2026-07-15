@@ -1442,7 +1442,9 @@ pool_find_free_port() {
 # Launch Chrome (via setsid, so pgid==pid) on PORT with USER_DATA_DIR, writing combined
 # stdout/stderr to $POOL_STATE_DIR/chrome-<LANE>.log. Exports globals POOL_CHROME_PID and
 # POOL_CHROME_PGID (== POOL_CHROME_PID — the setsid contract; release does kill -- -<pgid>).
-# Returns 0 on success; pool_die on bad args / instant Chrome death / missing log dir.
+# Returns 0 on success; 1 on instant Chrome death WITH an EADDRINUSE-like error in
+# the log (port collision -- retryable, caller re-picks a port); pool_die on bad args
+# / instant Chrome death WITHOUT EADDRINUSE (genuine misconfiguration) / missing log dir.
 #
 # LOGIC (CONTRACT 3a):
 #   - flag list: --remote-debugging-port=<port> --user-data-dir=<ABSOLUTE udd>
@@ -1456,9 +1458,11 @@ pool_find_free_port() {
 #   - POOL_CHROME_PGID=$(ps -o pgid= -p $PID | tr -d ' ')  (GUARDED — see GOTCHA)
 #   - export both as globals (declare -g).
 #
-# CONSUMER: M5.T1.S2 acquire post-lock boot. CONTRACT: rc 0 → Chrome is launched + the two
-#   globals are set (pgid==pid); any failure exits the process via pool_die. The caller then
-#   calls pool_wait_cdp <port>, then reads POOL_CHROME_PID/POOL_CHROME_PGID into the lease.
+# CONSUMER: M5.T1.S2 acquire post-lock boot. CONTRACT: rc 0 → Chrome launched + the two
+#   globals are set (pgid==pid); rc 1 → EADDRINUSE detected on instant-exit (retryable --
+#   caller re-picks a port via pool_find_free_port); pool_die → fatal (propagates). The
+#   caller MUST guard under set -e: `if ! pool_chrome_launch ...; then <re-pick port>; fi`.
+#   The caller then calls pool_wait_cdp <port>, then reads the globals into the lease.
 #
 # GOTCHA — setsid $!/pgid contract (HOST-VERIFIED, research §1): `setsid CMD &; SP=$!`
 #   gives pgid==pid==sid for CMD because util-linux setsid (default, NO --fork) exec's the
@@ -1467,7 +1471,12 @@ pool_find_free_port() {
 # GOTCHA — the pgid capture ABORTS under set -e on instant death (HOST-VERIFIED, research
 #   §5): `ps -o pgid= -p $PID` returns rc 1 + empty if Chrome already exited (bad port /
 #   missing binary). A BARE $(…) would ABORT the pool. Capture with `|| true`, then a
-#   `[[ -z ]]` check → pool_die with the log path. Highest-impact gotcha in this task.
+#   `[[ -z ]]` check. On instant death, grep the log for EADDRINUSE-like patterns
+#   (Issue 2): match → return 1 (retryable, caller re-picks port); no match → pool_die
+#   (genuine misconfiguration). NOTE: the COMMON EADDRINUSE case is Chrome STAYING UP
+#   without CDP → caught by pool_wait_cdp's 30s timeout → S2 re-picks; THIS grep is the
+#   defensive fast path for the instant-exit variant. Pattern:
+#   grep -qiE 'address already in use|bind.*failed|EADDRINUSE|cannot start http server|couldn.t bind'.
 # GOTCHA — the log redirect needs an existing dir: `> "$log" 2>&1 &` fails to open if the
 #   dir is missing → the job exits instantly → trips the §5 guard. Defensively mkdir -p
 #   $POOL_STATE_DIR first (pool_state_init already does this, but be robust).
@@ -1531,9 +1540,24 @@ pool_chrome_launch() {
     # clean pool_die with the log path so the operator can read Chrome's stderr.
     pgid="$(ps -o pgid= -p "$POOL_CHROME_PID" 2>/dev/null | tr -d ' ')" || true
     if [[ -z "$pgid" ]]; then
-        # Chrome died before we could read its pgroup. Best-effort reap of the bare pid,
-        # then die with the log path (Chrome's stderr is in there).
+        # Chrome died before we could read its pgroup. Best-effort reap of the bare pid
+        # (runs before BOTH exit paths below).
         kill "$POOL_CHROME_PID" 2>/dev/null || true
+        # EADDRINUSE detection (Issue 2): if Chrome's log shows a port-bind failure,
+        # return 1 (NON-FATAL, retryable) so _pool_launch_and_verify (S2) can re-pick a
+        # port. This handles the instant-exit-with-EADDRINUSE edge case. NOTE: the
+        # COMMON EADDRINUSE case (Chrome stays up, no CDP -> pool_wait_cdp 30s timeout)
+        # is recovered by S2's port re-pick on the CDP-timeout path; THIS grep is the
+        # defensive fast path for the instant-exit variant. The pattern matches Chrome's
+        # "Cannot start http server for devtools" (devtools_http_handler.cc) + the
+        # strerror "Address already in use" / "Bind failed" variants. (The `EADDRINUSE`
+        # alternative is dead -- Chrome uses ERR_ADDRESS_IN_USE -- but harmless; kept per
+        # the item contract.) `if grep` is errexit-exempt (rc 1 = no match = clean branch).
+        if grep -qiE 'address already in use|bind.*failed|EADDRINUSE|cannot start http server|couldn.t bind' "$log_file" 2>/dev/null; then
+            _pool_log "pool_chrome_launch: Chrome exited immediately (port $port may be in use); see log: $log_file"
+            return 1
+        fi
+        # Genuine misconfiguration (broken binary / bad flags / corrupt profile) -- FATAL.
         pool_die "pool_chrome_launch: Chrome (pid $POOL_CHROME_PID) exited immediately;" \
                  "see log: $log_file"
     fi

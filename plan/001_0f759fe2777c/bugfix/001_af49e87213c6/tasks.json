@@ -81,7 +81,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Detect EADDRINUSE in pool_chrome_launch and return 1 instead of pool_die",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/001_0f759fe2777c/bugfix/001_af49e87213c6/architecture/key_findings.md (Issue 2) and scout-boot-connect.md. pool_chrome_launch at lib/pool.sh:1478-1540 calls pool_die (FATAL) on instant-exit (empty pgid, lines 1530-1534). Chrome's stderr is captured to $POOL_STATE_DIR/chrome-<lane>.log. On EADDRINUSE, Chrome's log typically contains 'Address already in use', 'Cannot start http server for devtools', or 'Couldn't bind to port'. The stale comment at lib/pool.sh:1330 and 1377-1379 claims 'retries on EADDRINUSE' which is false.\n2. INPUT: port, user_data_dir, lane (args to pool_chrome_launch). Chrome log at $POOL_STATE_DIR/chrome-<lane>.log (created by the setsid redirect at line 1521). POOL_CHROME_PID (set at line 1520).\n3. LOGIC: In pool_chrome_launch, in the 'if [[ -z \"$pgid\" ]]' block (lines 1530-1534), BEFORE the existing pool_die, grep the Chrome log for EADDRINUSE-like patterns. Use: grep -qiE 'address already in use|bind.*failed|EADDRINUSE|cannot start http server|couldn.t bind' \"$log_file\" 2>/dev/null. If the grep matches, log a warning via _pool_log ('pool_chrome_launch: Chrome exited immediately (port $port may be in use)'), kill the bare PID (existing kill line), and return 1 (NON-FATAL, retryable) instead of pool_die. If the grep does NOT match, keep the existing pool_die (genuine misconfiguration — broken binary, bad flags). Do NOT change the success path (pgid captured, return 0). Update the function docstring (around line 1480-1510) to document the new return-1-on-EADDRINUSE behavior. Write a test: create a fake Chrome log with EADDRINUSE text, source lib/pool.sh, call pool_chrome_launch with a fake binary that exits instantly, and assert return 1 (not pool_die). Use timeout + isolated temp HOME per AGENTS.md. Mock: use a fake Chrome binary (a script that exits 1 after writing EADDRINUSE to the log).\n4. OUTPUT: pool_chrome_launch returns 0 (success), 1 (EADDRINUSE detected, retryable — NEW), or pool_die (fatal instant-exit for non-EADDRINUSE causes). The caller (_pool_launch_and_verify, S2) can now catch return 1 and re-pick a port.\n5. DOCS: [Mode A] Update pool_chrome_launch docstring (lib/pool.sh ~1480-1510) to document the new return-1-on-EADDRINUSE behavior and the grep pattern used.",
@@ -95,7 +95,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S2",
                   "title": "Add port re-pick retry in _pool_launch_and_verify + fix stale comment",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M2.T1.S1"

@@ -398,6 +398,93 @@ selftest_dispatch_classify_cases() {
     r="$(pool_dispatch_classify --json click)";       assert_eq "driving" "$r" "--json click -> driving" || return 1
 }
 
+# --- pool_chrome_launch EADDRINUSE detection (P1.M2.T1.S1 / Issue 2) -------------
+# Mock-based test: a fake "chrome" binary writes an EADDRINUSE line to stderr then
+# exits 1 instantly. Verifies pool_chrome_launch detects the bind failure in the log
+# and returns 1 (retryable) instead of pool_die (fatal). No real Chrome (AGENTS.md §1).
+# Picked up by the single-setup _run_selftest_suite (same runner as the other selftest_*).
+#
+# NOTE 1 (subshell): pool_chrome_launch may pool_die (exit 1) on the negative case. The
+#   body runs it in a SUBSHELL (bash -c '...' || rc=$?) so a pool_die is caught as a
+#   non-zero rc, not killing the harness. This is the ONE difference from the
+#   pure-function selftests.
+# NOTE 2 (set -m, HOST-VERIFIED): the instant-exit block (the `if [[ -z "$pgid" ]]`
+#   branch) fires only when `ps -o pgid= -p $PID` returns rc 1 + empty -- i.e. the
+#   backgrounded Chrome is ALREADY REAPED (gone from /proc). A backgrounded child that
+#   exits becomes a ZOMBIE its parent shell has not yet wait(2)-ed; a zombie still has a
+#   /proc entry and `ps` returns its pgid (non-empty) -> the SUCCESS path would fire,
+#   bypassing the block under test. Enabling monitor mode (`set -m`) makes the shell
+#   auto-reap backgrounded children that exit, so the zombie is reaped before `ps` runs
+#   -> empty pgid -> the instant-exit block fires deterministically. `set -m` does NOT
+#   change the grep/return-1 logic under test (identical regardless of WHY pgid is
+#   empty); it only deterministically reaches the code path. Verified 5/5 runs.
+selftest_chrome_launch_eaddrinuse() {
+    local fakechrome logdir log_file rc
+    # Isolated subdir under the test root (do NOT pollute the shared $POOL_STATE_DIR).
+    logdir="$ABPOOL_TEST_ROOT/eaddrinuse-selftest"
+    mkdir -p -- "$logdir"
+    fakechrome="$logdir/fake-chrome"
+    # The fake chrome: write the primary Chromium EADDRINUSE string to stderr (captured
+    # to the log by the setsid redirect), then exit 1 instantly (triggers empty-pgid).
+    cat >"$fakechrome" <<'MOCK'
+#!/usr/bin/env bash
+echo "[ERROR:devtools_http_handler.cc(123)] Cannot start http server for devtools." >&2
+exit 1
+MOCK
+    chmod +x -- "$fakechrome"
+
+    # Point POOL_CHROME_BIN at the fake + POOL_STATE_DIR at the isolated logdir so the
+    # chrome-<lane>.log lands where we can inspect it. Run pool_chrome_launch in a SUBSHELL
+    # so a (buggy) pool_die is caught as a non-zero rc rather than killing the harness.
+    # `set -m` makes the instant-exit block fire deterministically (see NOTE 2 above).
+    log_file="$logdir/chrome-7.log"
+    rc=0
+    AGENT_CHROME_BIN="$fakechrome" \
+    AGENT_BROWSER_POOL_STATE="$logdir" \
+    timeout 10 bash -c '
+        set -m -euo pipefail
+        source "$1/lib/pool.sh"
+        pool_config_init
+        pool_chrome_launch 53420 /tmp/__abp_dummy_udd__ 7
+    ' _ "$ABPOOL_REPO" || rc=$?
+
+    # ASSERT: rc 1 (EADDRINUSE detected -> return 1, NOT pool_die's exit 1 which would
+    # also be rc 1; the distinguishing evidence is the log contained the EADDRINUSE text
+    # the grep matched, AND no "exited immediately" pool_die message -- but the cleanest
+    # machine-checkable assertion is rc==1 + the log file exists + the grep matches it).
+    assert_eq "1" "$rc" "pool_chrome_launch returns 1 on EADDRINUSE instant-exit (not 0)" || return 1
+    [[ -f "$log_file" ]] || { _fail "chrome log not created at $log_file"; return 1; }
+    grep -qiE 'cannot start http server|address already in use' "$log_file" \
+        || { _fail "log missing EADDRINUSE text (grep pattern would not have matched)"; return 1; }
+
+    # --- Negative case: a fake chrome that exits 1 WITHOUT EADDRINUSE -> pool_die (rc!=0) ---
+    # Proves the grep is selective: a non-EADDRINUSE instant-exit still fails (the grep
+    # did NOT match -> pool_die fired). We assert rc!=0 (failure) AND the log does NOT
+    # match the EADDRINUSE pattern.
+    local fakebad="$logdir/fake-bad-chrome"
+    cat >"$fakebad" <<'MOCK'
+#!/usr/bin/env bash
+echo "ERROR:gpu_init.cc] GPU process isn't usable. Goodbye." >&2
+exit 1
+MOCK
+    chmod +x -- "$fakebad"
+    local log2="$logdir/chrome-8.log" rc2=0
+    AGENT_CHROME_BIN="$fakebad" \
+    AGENT_BROWSER_POOL_STATE="$logdir" \
+    timeout 10 bash -c '
+        set -m -euo pipefail
+        source "$1/lib/pool.sh"
+        pool_config_init
+        pool_chrome_launch 53421 /tmp/__abp_dummy_udd2__ 8
+    ' _ "$ABPOOL_REPO" || rc2=$?
+    # Non-EADDRINUSE instant-exit -> pool_die -> rc!=0 (must NOT be rc 0).
+    [[ "$rc2" -ne 0 ]] || { _fail "non-EADDRINUSE instant-exit returned 0 (should fail)"; return 1; }
+    # And the log must NOT contain EADDRINUSE text (proving the grep correctly did NOT match).
+    if [[ -f "$log2" ]] && grep -qiE 'cannot start http server|address already in use' "$log2"; then
+        _fail "negative-case log unexpectedly matched EADDRINUSE"; return 1
+    fi
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The
