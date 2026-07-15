@@ -18,7 +18,7 @@
               "type": "Task",
               "id": "P2.M1.T1",
               "title": "Remove POOL_DISABLE mechanism and update no-pi-ancestor behavior",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Remove all references to AGENT_BROWSER_POOL_DISABLE / POOL_DISABLE from pool_config_init and pool_wrapper_main. Change pool_wrapper_main's no-pi-ancestor handling from passthrough (exec real binary) to pool_die fail-fast.",
               "subtasks": [
                 {
@@ -39,7 +39,7 @@
                   "type": "Subtask",
                   "id": "P2.M1.T1.S2",
                   "title": "Remove POOL_DISABLE passthrough + change no-pi-ancestor from passthrough to fail-fast in pool_wrapper_main",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1"
@@ -58,14 +58,14 @@
               "type": "Task",
               "id": "P2.M1.T2",
               "title": "Add preflight check for agent-browser binary on driving calls",
-              "status": "Planned",
+              "status": "Researching",
               "description": "PRD §2.16 requires 'a preflight in the pool entry on every driving call that fails fast with an actionable message rather than booting a lane it can't drive.' Add a _pool_preflight_real_bin() function and call it in pool_wrapper_main before lane logic.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T2.S1",
                   "title": "Add _pool_preflight_real_bin() function and call it in pool_wrapper_main",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S2"

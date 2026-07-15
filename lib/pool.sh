@@ -3575,12 +3575,10 @@ pool_force_session() {
 #   rc 0/1, rc 1 ⇒ lane KEPT: pool_ensure_connected (NEVER drops the lane; reaper's job later)
 #   pool_die FATAL (propagates): inside pool_boot_lane / pool_ensure_connected (chrome instant-exit)
 #
-# GOTCHA — TERMINAL: all four exits are exec (b/c/d/k) or pool_die. NO return on success.
-# GOTCHA — passthrough exec (b/c/d) passes the ORIGINAL "$@" UNCHANGED (PRD §2.4 step 0:
+# GOTCHA — TERMINAL: exits are exec (c/k) or pool_die (d + error branches). NO return on success.
+# GOTCHA — passthrough exec (c) passes the ORIGINAL "$@" UNCHANGED (PRD §2.4 step 0:
 #   "exec real binary unchanged"; §2.15: "skills get core → passthrough (unaffected)"). ONLY
 #   step k (driving) uses the cleaned "${POOL_CLEAN_ARGS[@]}".
-# GOTCHA — POOL_DISABLE is read AFTER pool_config_init (which freezes it @176). Step b reads
-#   the FROZEN global, not the raw env var.
 # GOTCHA — pool_boot_lane rc 1 ⇒ lane DROPPED ⇒ pool_die (no in-place retry; re-entering
 #   acquire with the same exhausted state would loop).
 # GOTCHA — pool_ensure_connected rc 1 ⇒ lane NOT dropped ⇒ pool_die (surface the failure;
@@ -3592,7 +3590,7 @@ pool_force_session() {
 # GOTCHA — close --all interception: pool_normalize_close sets POOL_CLOSE_ALL_SEEN=1 iff it
 #   stripped ≥1 --all from a close cmd. Log it for observability (PRD §2.15).
 # PRECONDITION: none (pool_config_init + pool_state_init are step a — the first thing run).
-# CONSUMES: POOL_DISABLE, POOL_REAL_BIN, POOL_OWNER_PID, POOL_WAIT, POOL_NORM_ARGS,
+# CONSUMES: POOL_REAL_BIN, POOL_OWNER_PID, POOL_WAIT, POOL_NORM_ARGS,
 #   POOL_CLOSE_ALL_SEEN, POOL_CLEAN_ARGS (all set by the helpers above).
 # EXPORTS (via pool_force_session): AGENT_BROWSER_SESSION=abpool-<N> (inherited by the step-k exec).
 pool_wrapper_main() {
@@ -3600,17 +3598,10 @@ pool_wrapper_main() {
     local class N port _has_json _a
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
-    # config freezes POOL_DISABLE, POOL_REAL_BIN, POOL_WAIT, POOL_LANES_DIR, POOL_LOCK_FILE.
+    # config freezes POOL_REAL_BIN, POOL_WAIT, POOL_LANES_DIR, POOL_LOCK_FILE.
     # state idempotently mkdirs lanes/ + touches acquire.lock.
     pool_config_init
     pool_state_init
-
-    # --- b. safety valve (PRD §2.17): POOL_DISABLE==1 → passthrough, no pooling ---
-    # Read the FROZEN global (config_init just set it). ORIGINAL "$@" unchanged.
-    if [[ "${POOL_DISABLE:-0}" == "1" ]]; then
-        _pool_log "pool_wrapper_main: POOL_DISABLE=1 → passthrough"
-        exec "$POOL_REAL_BIN" "$@"
-    fi
 
     # --- c. dispatch (step 0): meta → exec passthrough UNCHANGED -----------------
     # pool_dispatch_classify is rc 0 ALWAYS (no guard); prints exactly one token meta|driving.
@@ -3621,12 +3612,12 @@ pool_wrapper_main() {
         exec "$POOL_REAL_BIN" "$@"           # UNCHANGED — skills/--help/session list/etc.
     fi
 
-    # --- d. owner resolution (step 1): no pi ancestor → passthrough --------------
-    # pool_owner_resolve is rc 0 ALWAYS; sets POOL_OWNER_PID (==0 ⇒ human in terminal).
+    # --- d. owner resolution (step 1): no pi ancestor → fail-fast ----------------
+    # pool_owner_resolve is rc 0 ALWAYS; sets POOL_OWNER_PID (==0 ⇒ caller has no pi ancestor).
     pool_owner_resolve
     if [[ "${POOL_OWNER_PID:-0}" == "0" ]]; then
-        _pool_log "pool_wrapper_main: no pi ancestor → passthrough (human terminal)"
-        exec "$POOL_REAL_BIN" "$@"           # UNCHANGED — raw upstream tool for humans
+        pool_die "agent-browser-pool: driving commands require a pi ancestor (owning pi process)." \
+                 "For raw browser use without pooling, call 'agent-browser' directly."
     fi
 
     # --- e→g. find-or-acquire my lane (steps 2→3) --------------------------------
