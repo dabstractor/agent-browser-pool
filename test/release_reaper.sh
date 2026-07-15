@@ -13,11 +13,12 @@
 #       the SAME lane (find_mine → N; ensure_connected reconnects).
 #
 # HOW IT WORKS: drives the LANDED lib functions DIRECTLY (pool_owner_resolve →
-# pool_acquire_locked → pool_boot_lane) — NOT the wrapper (which `exec`s into the real
-# agent-browser for driving commands and may not exit → a wrapper-driven test would hang).
-# The admin `release`/`reap` are invoked as SUBPROCESSES (`"$ABPOOL_ADMIN" …`, pool_die-safe).
-# `close` is invoked as the SAME command the wrapper exec's (`"$POOL_REAL_BIN" --session
-# abpool-N close`) — run directly (avoids the terminal exec for this non-driving command).
+# pool_acquire_locked → pool_boot_lane) — NOT via the pool entry point (agent-browser-pool),
+# which for driving commands `exec`s into the real agent-browser ($POOL_REAL_BIN) and may not
+# exit → a pool-driven test would hang). The admin `release`/`reap` are invoked as SUBPROCESSES
+# (`"$ABPOOL_ADMIN" …`, pool_die-safe). `close` is invoked as the SAME command pool_wrapper_main
+# exec's (`"$POOL_REAL_BIN" --session abpool-N close`) — run directly (avoids pool_wrapper_main's
+# terminal exec for this non-driving command).
 #
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT) ★★★ setup() is called EXACTLY ONCE for the whole
 # file (NEVER per-test). The framework's run_test/abpool_run_suite call setup() before EACH
@@ -328,9 +329,9 @@ test_close_is_disconnect_only() {
     [[ "$port" =~ ^[0-9]+$ && "$port" != "0" ]] \
         || { _fail "lane $N not booted (port='$port')"; return 1; }
 
-    # (2) THE CONTRACT: run `close` (disconnect-only). The wrapper exec's
+    # (2) THE CONTRACT: run `close` (disconnect-only). pool_wrapper_main exec's
     #     `"$POOL_REAL_BIN" --session abpool-N close`; we invoke the SAME command DIRECTLY (avoids
-    #     the wrapper's terminal exec for this non-driving command). rc is 0 on agent-browser
+    #     pool_wrapper_main's terminal exec for this non-driving command). rc is 0 on agent-browser
     #     0.28.0 (always). close detaches the daemon session; leaves Chrome + dir + lease ALIVE.
     "$POOL_REAL_BIN" --session "abpool-$N" close >/dev/null 2>&1 || true
     sleep 0.4   # let the daemon settle
@@ -356,7 +357,7 @@ test_close_is_disconnect_only() {
 }
 
 # =============================================================================
-# TEST (e) — `close` (via the WRAPPER) marks the lease connected=false, and the NEXT
+# TEST (e) — `close` (via pool_wrapper_main) marks the lease connected=false, and the NEXT
 # pool_ensure_connected RE-BINDS the daemon (connected false→true) instead of trusting the
 # lingering pool_daemon_connected probe (P1.M3.T1.S1+S2 / Issue #3 / PRD §2.4 step 4 /
 # §2.5 / §2.15).
@@ -387,8 +388,8 @@ test_close_then_rebind() {
     assert_eq "true" "$(pool_lease_field "$N" connected)" \
         "precondition: booted lane $N connected=true" || return 1
 
-    # (2) THE CONTRACT (S1): run `close` THROUGH the wrapper (pool_wrapper_main) so S1's
-    #     close→connected=false block fires end-to-end. The wrapper ends in exec → run it
+    # (2) THE CONTRACT (S1): run `close` THROUGH pool_wrapper_main so S1's
+    #     close→connected=false block fires end-to-end. pool_wrapper_main ends in exec → run it
     #     in a SUBSHELL (exec replaces the subshell process; the real close detaches the
     #     daemon and exits; the parent shell continues). Bounded by exec's determinism
     #     (AGENTS.md §2; close is ms-fast). Owner env is inherited → find_mine reuses N.
@@ -397,12 +398,12 @@ test_close_then_rebind() {
 
     # (3) Assert S1 fired: the lease now has connected=false (the post-close signal S2 reads).
     assert_eq "false" "$(pool_lease_field "$N" connected)" \
-        "S1: close (via wrapper) marked lane $N connected=false" || return 1
+        "S1: close (via pool_wrapper_main) marked lane $N connected=false" || return 1
 
     # (4+5) THE CONTRACT (S2): pool_ensure_connected reads connected=false → SKIPS the
     #       lingering pool_daemon_connected early-exit → curl (Chrome still alive) →
     #       pool_daemon_connect RE-BINDS → connected=true → rc 0. (This is the self-heal
-    #       the wrapper's step h runs on the agent's NEXT driving command.)
+    #       pool_wrapper_main's step h runs on the agent's NEXT driving command.)
     pool_ensure_connected "$N" \
         || { _fail "S2: pool_ensure_connected failed to rebind lane $N after close"; return 1; }
     assert_eq "true" "$(pool_lease_field "$N" connected)" \

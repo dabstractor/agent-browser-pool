@@ -9,8 +9,8 @@
 # pool + lock file. Boots REAL headless Chrome per lane (requires the real master profile +
 # btrfs + google-chrome-stable — ALL host-verified present).
 #
-# HOW IT WORKS (the concurrency seam): the wrapper (bin/agent-browser → pool_wrapper_main)
-# TERMINATES via `exec "$POOL_REAL_BIN" …` — a wrapper-driven `open` test would hang on
+# HOW IT WORKS (the concurrency seam): the pool entry point (bin/agent-browser-pool →
+# pool_wrapper_main) TERMINATES via `exec "$POOL_REAL_BIN" …` — a pool-driven `open` test would hang on
 # `wait` (the real agent-browser may not exit for `open`). Driving the lib's acquire+boot
 # functions DIRECTLY in each subshell exercises the EXACT same flock + boot code path WITHOUT
 # the terminal exec, so `wait` joins cleanly. This is the correct test boundary for a
@@ -155,7 +155,7 @@ _concurrency_setup_master() {
 # RESULT_FILE for the parent's distinctness assertions. MUST exit non-zero on any failure
 # (the parent's per-PID `wait` captures it).
 #
-# WHY DIRECT LIB CALLS (not the wrapper): see the header comment — the wrapper exec's into
+# WHY DIRECT LIB CALLS (not via the pool entry point): see the header comment — pool_wrapper_main exec's into
 # the real agent-browser and may not exit; direct acquire+boot avoids the hang.
 # WHY pool_owner_resolve FIRST: it reads the override env vars into the POOL_OWNER_* globals
 # (the lease identity). The subshell INHERITED the parent's POOL_OWNER_* (from setup) → we
