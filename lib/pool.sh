@@ -106,7 +106,6 @@ _pool_config_bool() {
 #   AGENT_CHROME_PORT_RANGE        1000                                            POOL_PORT_RANGE       uint (>0)
 #   AGENT_BROWSER_POOL_WAIT        600                                             POOL_WAIT             uint
 #   AGENT_CHROME_HEADLESS          (unset = windowed)                              POOL_HEADLESS         bool (1=headless)
-#   AGENT_BROWSER_POOL_DISABLE     (unset = pooling active)                        POOL_DISABLE          bool (1=passthrough)
 #   AGENT_CHROME_ALLOW_SLOW_COPY   (unset = refuse non-btrfs)                      POOL_ALLOW_SLOW_COPY  bool (1=allow real copy)
 #
 # Derived (no env var):
@@ -178,12 +177,10 @@ pool_config_init() {
     POOL_WAIT="$wait"; declare -g POOL_WAIT
 
     # 5. Booleans — 1/true/yes/on (case-insensitive) → on, else off.
-    local headless disable allow_slow_copy
+    local headless allow_slow_copy
     headless="$(_pool_config_bool "${AGENT_CHROME_HEADLESS:-}")"
-    disable="$(_pool_config_bool "${AGENT_BROWSER_POOL_DISABLE:-}")"
     allow_slow_copy="$(_pool_config_bool "${AGENT_CHROME_ALLOW_SLOW_COPY:-}")"
     POOL_HEADLESS="$headless"; declare -g POOL_HEADLESS
-    POOL_DISABLE="$disable"; declare -g POOL_DISABLE
     POOL_ALLOW_SLOW_COPY="$allow_slow_copy"; declare -g POOL_ALLOW_SLOW_COPY
 
     # 6. Derived paths (after POOL_STATE_DIR is final).
