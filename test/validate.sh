@@ -23,7 +23,6 @@ set -euo pipefail
 # --- repo + bin resolution (mirror bin/* symlink-safe bootstrap) ----------------
 VALIDATE_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 ABPOOL_REPO="$(cd "$VALIDATE_DIR/.." && pwd)"
-ABPOOL_WRAPPER="$ABPOOL_REPO/bin/agent-browser"
 ABPOOL_ADMIN="$ABPOOL_REPO/bin/agent-browser-pool"
 # Source the shared lib (also activates set -euo pipefail — pool.sh line 18).
 # shellcheck source=../lib/pool.sh
@@ -308,17 +307,17 @@ selftest_sim_owner_is_alive_pi() {
         || { _fail "pool_owner_alive rejected the simulated live owner"; return 1; }
 }
 
-selftest_wrapper_and_admin_are_executable() {
-    # Pre-flight the two binaries downstream tests invoke by ABSOLUTE PATH (PRD §2.17).
-    # (Also consumes ABPOOL_WRAPPER/ABPOOL_ADMIN so they aren't shellcheck-SC2034-unused.)
-    [[ -x "$ABPOOL_WRAPPER" ]] || { _fail "wrapper not executable: $ABPOOL_WRAPPER"; return 1; }
-    [[ -x "$ABPOOL_ADMIN"   ]] || { _fail "admin not executable: $ABPOOL_ADMIN";   return 1; }
+selftest_admin_is_executable() {
+    # Pre-flight the sole entry point (bin/agent-browser-pool) downstream tests invoke by
+    # ABSOLUTE PATH — the explicit-invocation model (PRD §2.17: no PATH shadowing, one entry
+    # point). Also consumes ABPOOL_ADMIN so it isn't shellcheck-SC2034-unused.
+    [[ -x "$ABPOOL_ADMIN" ]] || { _fail "admin not executable: $ABPOOL_ADMIN"; return 1; }
 }
 
 # --- _pool_config_bool truth-table (P1.M1.T1.S1) -------------------------------
-# Pure-function bodies: exercise the normalizer directly (+ one end-to-end through
-# pool_config_init). No Chrome, no sim-owner, no persistent lease writes. Picked up
-# by the single-setup _run_selftest_suite above (same runner as the other selftest_*).
+# Pure-function bodies: exercise the normalizer directly. No Chrome, no sim-owner,
+# no persistent lease writes. Picked up by the single-setup _run_selftest_suite above
+# (same runner as the other selftest_*).
 
 # _pool_config_bool: truthy inputs (1/true/yes/on, case-insensitive) -> "1".
 selftest_config_bool_truthy() {
@@ -341,20 +340,6 @@ selftest_config_bool_falsy() {
     assert_eq "0" "$r" "falsy [empty] -> 0" || return 1
     r="$(_pool_config_bool)"
     assert_eq "0" "$r" "falsy [no-arg] -> 0" || return 1
-}
-
-# End-to-end: AGENT_BROWSER_POOL_DISABLE=<truthy> flows through pool_config_init to
-# POOL_DISABLE=1. This is the cutover safety-valve contract (PRD §2.17) that motivated
-# the fix. Runs pool_config_init in an ISOLATED subshell so it cannot clobber the
-# selftest suite's own POOL_* globals (set by the single setup() call).
-selftest_config_bool_via_pool_config_init() {
-    local d
-    d="$(AGENT_BROWSER_POOL_DISABLE=true bash -c 'source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_DISABLE"' _ "$ABPOOL_REPO")"
-    assert_eq "1" "$d" "AGENT_BROWSER_POOL_DISABLE=true -> POOL_DISABLE=1" || return 1
-    d="$(AGENT_BROWSER_POOL_DISABLE=yes bash -c 'source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_DISABLE"' _ "$ABPOOL_REPO")"
-    assert_eq "1" "$d" "AGENT_BROWSER_POOL_DISABLE=yes -> POOL_DISABLE=1" || return 1
-    d="$(AGENT_BROWSER_POOL_DISABLE=0 bash -c 'source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_DISABLE"' _ "$ABPOOL_REPO")"
-    assert_eq "0" "$d" "AGENT_BROWSER_POOL_DISABLE=0 -> POOL_DISABLE=0" || return 1
 }
 
 # --- pool_dispatch_classify full table (P1.M1.T2.S1 / Issue 4) ------------------
