@@ -109,7 +109,7 @@
           "type": "Milestone",
           "id": "P2.M2",
           "title": "Entry Point & Binary Pivot",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Make bin/agent-browser-pool the SOLE entry point by adding driving-command dispatch to its case statement. Remove the old bin/agent-browser PATH-shadowing shim entirely.",
           "tasks": [
             {
@@ -142,14 +142,14 @@
               "type": "Task",
               "id": "P2.M2.T2",
               "title": "Remove the old PATH-shadowing shim (bin/agent-browser)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Delete bin/agent-browser — the old PATH-shadowing wrapper shim. In the new model, ~/.local/bin/agent-browser is the REAL Vercel CLI (unshadowed), and there is no repo-level wrapper shim.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M2.T2.S1",
                   "title": "Delete bin/agent-browser and update bin/.gitkeep",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M2.T1.S1"
@@ -169,21 +169,21 @@
           "type": "Milestone",
           "id": "P2.M3",
           "title": "Install Script Rewrite",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Completely rewrite install.sh for the no-shadow model: three benign things — symlink agent-browser-pool, pre-create state dir, run doctor. No PATH shadowing, no ~/scripts, no cutover warning, no AGENT_BROWSER_POOL_DISABLE.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M3.T1",
               "title": "Rewrite install.sh for no-shadow model",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Replace the 221-line PATH-shadowing cutover installer with a ~60-line benign installer per PRD §2.17.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M3.T1.S1",
                   "title": "Complete rewrite of install.sh — no PATH shadowing, no cutover",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M2.T2.S1"
