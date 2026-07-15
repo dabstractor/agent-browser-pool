@@ -8,7 +8,35 @@ exactly one `POOL_DISABLE` ref at `pool_admin_help:4597`, step d is fail-fast, s
 header comments updated). This item is **purely additive** — it adds one new function + one
 new call + one consequential comment line. It touches a region DISJOINT from every other
 in-flight item (no overlap with P2.M1.T3.S1's `pool_admin_help`, P2.M2.T1.S1's `bin/*`, etc.).
+*(Status: the "live working tree reflects S2's output" claim above was true at the start of
+research; a concurrent implementation agent then ALSO applied THIS item during research — see
+the ⚠ STATUS NOTE just below. The applied change matches this spec byte-for-byte.)*
 **Full research notes**: `plan/002_97982899bef6/P2M1T2S1/research/notes.md`
+
+---
+
+> ## ⚠ STATUS NOTE — concurrent implementation already applied to the working tree
+>
+> This research ran **in parallel** with P2.M1.T1.S2's implementation (per the
+> `parallel_execution_context`). During research the working tree was concurrently modified
+> (`git status` → `M lib/pool.sh`) and **this item's change is ALREADY APPLIED**. The applied
+> implementation was verified to match this PRP **byte-for-byte**:
+>
+> - `_pool_preflight_real_bin()` defined at `lib/pool.sh:3551` with the exact Mode-A docstring
+>   + `[[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]` check + the verbatim 3-arg `pool_die`.
+> - Called unguarded as the tail of `pool_wrapper_main` step a at `lib/pool.sh:3629`.
+> - RC-TAXONOMY no-guard list updated at `lib/pool.sh:3592`.
+> - `bash -n lib/pool.sh` → exit 0; `shellcheck -s bash lib/pool.sh` → exit 0, zero output.
+>
+> **How to read this PRP now.** It remains the AUTHORITATIVE SPECIFICATION of the post-S2 →
+> post-S1 delta (the definition of done). The `oldText`/`newText` "Implementation Tasks" describe
+> the post-S2 **input** state and the intended result — they will **not** match the *current*
+> tree, because the edit is already applied. An implementer / verifier should therefore treat the
+> Tasks as a **VERIFICATION CHECKLIST** ("the tree must contain `newText`") rather than edits to
+> re-apply. The Level 1-3 validation commands test the running code and remain fully valid as-is.
+>
+> This concurrent application does not change the spec; it confirms it. Research agents do not
+> modify source (`lib/pool.sh` is untouched by this PRP author).
 
 ---
 
@@ -240,9 +268,11 @@ lib/pool.sh            # + _pool_preflight_real_bin() before pool_wrapper_main;
 #   check already exists (PRD §2.16 (a)). Leave it as-is. The PRD future-note ("doctor should
 #   assert --version ≥ 0.28") is NOT this item.
 
-# CRITICAL (line-number drift): the live tree is POST-S2 (S2 already shifted the wrapper up by
-#   ~3 vs its pre-S1 position). ALL edits below anchor on EXACT TEXT, not line numbers. If you
-#   cite a number, treat it as approximate (current post-S2 numbering).
+# CRITICAL (line-number drift / concurrent application): at the START of research the live tree
+#   was POST-S2; a concurrent implementation agent then applied THIS item, so the tree is now
+#   POST-S1 (function at lib/pool.sh:3551, call at 3629, post-application). ALL spec anchors
+#   below are EXACT TEXT (the post-S2 INPUT state), NOT line numbers — line numbers are
+#   approximate and shift as S2/this-item are applied; always match on text.
 
 # CRITICAL (do NOT boot Chrome / do NOT run the suite against the shared sandbox — AGENTS.md §1):
 #   validate with `bash -n`, `shellcheck`, and the isolated `timeout`-bounded micro-checks only.
@@ -266,10 +296,15 @@ edit. The "model" is the rc contract: `_pool_preflight_real_bin` returns 0 on su
 
 ### Implementation Tasks (ordered by dependencies)
 
-> All three edits are in `lib/pool.sh`, in DISJOINT regions. They MAY be applied in a SINGLE
-> `edit` call with three `edits[]` entries (the tool matches each `oldText` against the
-> original file independently). Order in the array does not matter. Each `oldText` is unique
-> in the file.
+> ⚠ Per the ⚠ STATUS NOTE near the top: the working tree ALREADY contains these three changes
+> (applied by a concurrent implementation agent during research, verified byte-for-byte against
+> this spec). Read the `oldText`/`newText` below as the SPECIFICATION of the post-S2 → post-S1
+> delta and as a VERIFICATION checklist ("the tree must contain `newText`"). If instead starting
+> from a CLEAN post-S2 checkout, the three edits MAY be applied in a SINGLE `edit` call with
+> three `edits[]` entries (the tool matches each `oldText` against the original file
+> independently; order does not matter; each `oldText` is unique in a post-S2 tree).
+>
+> The three regions are DISJOINT.
 
 ```yaml
 Task 1: EDIT lib/pool.sh — DEFINE _pool_preflight_real_bin (insert before the wrapper section)

@@ -1544,6 +1544,7 @@ pool_chrome_launch() {
         --disable-renderer-backgrounding
         --disable-features=CalculateNativeWinOcclusion
         --disable-back-forward-cache
+        --disable-popup-blocking
     )
     [[ "$POOL_HEADLESS" == "1" ]] && flags+=(--headless=new)
 
