@@ -1,0 +1,39 @@
+# agent-browser-pool (Agent Skill)
+
+An [Agent Skill](https://github.com/earendil-works/pi-coding-agent) that teaches AI agents
+how to use the [`agent-browser-pool`](../..) transparent Chrome-profile wrapper correctly:
+how their dedicated lane is acquired and connected, how it's reused across calls, and how
+to tear it down.
+
+## What it covers
+
+- **Acquire + connect:** the lane is created automatically on the first driving
+  `agent-browser` command under `pi`; agents don't pass ports or `--session` (the pool owns
+  them).
+- **Teardown:** `close` is disconnect-only; the real release happens automatically when the
+  owning `pi` process exits. Agents should avoid `agent-browser-pool release`/`reap`
+  (operator tools; `release <N>` is not owner-scoped).
+- **Pitfalls:** passthrough (no `pi` ancestor / `AGENT_BROWSER_POOL_DISABLE`), pool
+  exhaustion hangs, ephemeral profiles, and why to never launch Chrome directly.
+
+## Files
+
+- `SKILL.md` — procedural guide loaded by the agent.
+- `references/configuration.md` — env-var table, command dispatch, lifecycle, troubleshooting
+  matrix (read on demand).
+
+## Installation
+
+This skill is project-scoped (lives at `.agents/skills/agent-browser-pool/`), so any
+Agent Skills-compatible client working in this repo discovers it automatically. To make it
+available **globally** (every project), symlink it into your user skills dir:
+
+```bash
+ln -s "$(pwd)/.agents/skills/agent-browser-pool" ~/.agents/skills/agent-browser-pool
+```
+
+In Pi specifically, you can also load just this skill for a quick check:
+
+```bash
+pi --no-skills --skill .agents/skills/agent-browser-pool
+```
