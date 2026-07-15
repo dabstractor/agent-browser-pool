@@ -114,8 +114,9 @@ _pool_config_bool() {
 #   POOL_LANES_DIR   = $POOL_STATE_DIR/lanes
 #   POOL_LOCK_FILE   = $POOL_STATE_DIR/acquire.lock
 #
-# Boolean rule: a var counts as ON only when its value is exactly "1". Any other value
-# (including "true", "yes", "0") is OFF. This keeps semantics strict and predictable.
+# Boolean rule (via _pool_config_bool): a var counts as ON when its value is
+# `1/true/yes/on` (case-insensitive). Any other value (including "0", "false", and
+# empty) is OFF. pool_config_init normalizes all truthy forms to "1".
 #
 # Errors (any of these → pool_die, exit 1):
 #   - $HOME unset/empty or unresolvable
@@ -1296,7 +1297,7 @@ pool_copy_master() {
         rm -rf -- "$target_dir" 2>/dev/null || true
 
         # (c) slow-copy escape hatch (POOL_ALLOW_SLOW_COPY normalized to "1"/"0" by
-        # pool_config_init's _pool_config_bool — exactly "1" → on).
+        # pool_config_init's _pool_config_bool — `1/true/yes/on` → on).
         if [[ "$POOL_ALLOW_SLOW_COPY" == "1" ]]; then
             if ! cp -a -- "$POOL_MASTER_DIR" "$target_dir"; then
                 pool_die "pool_copy_master: slow copy (cp -a) also failed:" \

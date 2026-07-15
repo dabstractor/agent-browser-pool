@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Implementation",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix the 5 issues (3 Major, 2 Minor) found during end-to-end validation of agent-browser-pool. Issues 1 and 5 share a root cause (boolean env var normalization) and are resolved together. Issue 2 (port race) and Issue 3 (close→rebind) are more complex boot/connect path fixes. Issue 4 (bare command classification) is a trivial dispatch fix. All fixes follow TDD (implied) and AGENTS.md sandbox-safety rules.",
       "milestones": [
         {
@@ -67,14 +67,14 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Concurrent Port Allocation Race Fix (Issue 2)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "pool_find_free_port runs outside the acquire flock (deliberately, per PRD §2.19). Two concurrent acquires can both select the same free port before either writes it to the lease. The stated mitigation ('retries on EADDRINUSE') is inaccurate: pool_chrome_launch does pool_die (fatal) on instant-exit, and _pool_launch_and_verify retries with the SAME port (cannot recover from collision). Fix: (1) detect EADDRINUSE in Chrome's log and return 1 instead of pool_die, (2) add port re-pick retry logic in _pool_launch_and_verify, (3) fix the stale comment, (4) update the concurrency test.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Make boot path resilient to port collision",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Modify pool_chrome_launch to detect EADDRINUSE in Chrome's log on instant-exit and return 1 (retryable) instead of pool_die (fatal). Modify _pool_launch_and_verify to re-pick a different port on failure and retry. Fix the stale 'retries on EADDRINUSE' comment. Update the concurrency test to exercise collision recovery without the 0.3s stagger.",
               "subtasks": [
                 {
@@ -112,7 +112,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S3",
                   "title": "Update concurrency test to exercise collision recovery",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M2.T1.S2"
