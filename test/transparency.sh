@@ -2,26 +2,31 @@
 #
 # test/transparency.sh — transparency checklist (PRD §2.15 "the no-idea contract")
 #
-# Proves that an agent issuing the EXACT commands the upstream agent-browser skill teaches
-# (`skills get core`, `open`, `connect <port>`, `--session <X>`, `close --all`, …) is
-# silently routed to its own locked ephemeral lane and CAN NEITHER DETECT NOR ESCAPE the
-# pool. One test_* body per §2.15 clause:
-#   (a) agent-browser skills get core    → passthrough (META, unaffected)
-#   (b) --help / --version               → passthrough (META, unaffected)
-#   (c) open <url> zero-prep             → lands MY lane (acquired+booted+connected+leased)
-#   (d) 2nd open same owner              → reuses the SAME lane N (find_mine, not re-acquire)
-#   (e) connect <random>                 → routed to MY lane (the <port|url> arg is STRIPPED)
-#   (f) --session <X> open <url>         → forced to abpool-<N> (X is STRIPPED + env forced)
-#   (g) close --all                      → only MY lane's daemon session closed; PEER unaffected
-#   (h) next agent (distinct PID)        → a DIFFERENT lane (no collision)
+# Proves that an agent issuing the EXACT commands the agent-browser-pool skill teaches
+# (`skills get core`, `open`, `connect <port>`, `--session <X>`, `close --all`, …) is routed
+# to its own locked ephemeral lane via the SOLE entry point bin/agent-browser-pool (explicit
+# invocation — NO PATH shadowing) and CAN NEITHER DETECT NOR ESCAPE the pool. One test_* body
+# per §2.15 clause (+ invocation-surface + fail-fast contracts):
+#   (a)  agent-browser-pool skills get core → passthrough (META → exec real binary; byte-equal)
+#   (b1) agent-browser-pool --help          → POOL help (bin dispatch → pool_admin_help; NOT real help)
+#   (b2) agent-browser-pool --version       → passthrough (META → exec real binary; byte-equal)
+#   (c)  open <url> zero-prep               → lands MY lane (acquired+booted+connected+leased)
+#   (d)  2nd open same owner                → reuses the SAME lane N (find_mine, not re-acquire)
+#   (e)  connect <random>                   → routed to MY lane (the <port|url> arg is STRIPPED)
+#   (f)  --session <X> open <url>           → forced to abpool-<N> (X is STRIPPED + env forced)
+#   (g)  close --all                        → only MY lane's daemon session closed; PEER unaffected
+#   (h)  next agent (distinct PID)          → a DIFFERENT lane (no collision)
+#   (i)  driving cmd, no pi ancestor        → FAIL-FAST pool_die (exit 1 + 'pi ancestor'; §2.4 step 1)
 #
-# ★★★ THE 'open MAY HANG' GOTCHA (§gotcha 1) ★★★ The wrapper's success path TERMINATES via
-# `exec "$POOL_REAL_BIN" …` (lib/pool.sh:3546). A wrapper-driven `open` may NOT exit (the
-# real agent-browser can stay foregrounded). So item (c)/(d)/(f) NEVER `wait` an open bare;
-# they background it under a HARD `timeout --signal=KILL`, then POLL `pool_lease_find_mine`
-# for the lane (the lane is acquired+booted+connected+lease-WRITTEN BEFORE the terminal exec
-# ⇒ observable while the driving open runs), then kill+wait the bg job. Chrome survives the
-# wrapper kill (setsid → own session); the runner's inter-body `release all` reaps it.
+# ★★★ THE 'open MAY HANG' GOTCHA (§gotcha 1) ★★★ A driving command's success path TERMINATES
+# via `exec "$POOL_REAL_BIN" …` (the pool's driving-command dispatcher,
+# step k, lib/pool.sh). A driving `open` may
+# NOT exit (the real agent-browser can stay foregrounded). So item (c)/(d)/(f) NEVER `wait`
+# an open bare; they background it under a HARD `timeout --signal=KILL`, then POLL
+# `pool_lease_find_mine` for the lane (the lane is acquired+booted+connected+lease-WRITTEN
+# BEFORE the terminal exec ⇒ observable while the driving open runs), then kill+wait the bg
+# job. Chrome survives the driving-command kill (setsid → own session); the runner's
+# inter-body `release all` reaps it.
 #
 # ★★★ THE SINGLE-SETUP CONSTRAINT (AGENTS.md §4) ★★★ The framework's setup() is
 # process-spawning; the 3rd call HANGS this sandbox. So this file BYPASSES
@@ -79,7 +84,7 @@ _transparency_setup_real_env() {
     fi
 
     # CRITICAL: the real agent-browser daemon binary. Without it, pool_daemon_connect (boot
-    # step e), pool_release_lane's daemon close, and every wrapper exec ALL fail.
+    # step e), pool_release_lane's daemon close, and every driving exec ALL fail.
     if [[ -x "$real_bin" ]]; then
         export AGENT_BROWSER_REAL="$real_bin"
     else
@@ -166,22 +171,22 @@ _transparency_spawn_owner() {
 # =============================================================================
 # _transparency_run_open_bg — the poll-then-kill open driver (items c/d/f).
 #
-# WHY: a wrapper-driven `open` may NOT exit (the real agent-browser can stay foregrounded —
+# WHY: a driving `open` may NOT exit (the real agent-browser can stay foregrounded —
 # §gotcha 1). The lane is acquired+booted+connected and the lease WRITTEN before the terminal
-# exec ⇒ observable while open runs. So background the wrapper under a HARD `timeout
+# exec ⇒ observable while open runs. So background the driving command under a HARD `timeout
 # --signal=KILL` (AGENTS.md §2 — every blocking subprocess bounded), >/dev/null 2>&1 (we assert
 # on the LANE, not open's output), then poll pool_lease_find_mine.
 # =============================================================================
 TRANSPARENCY_BG_PID=""
 _transparency_run_open_bg() {
-    # $@ = wrapper args (e.g. "open about:blank" or "--session agent-x open about:blank").
-    # $! = the `timeout` job (it kills its child — the wrapper — on expiry).
-    timeout --signal=KILL 25 "$ABPOOL_WRAPPER" "$@" >/dev/null 2>&1 &
+    # $@ = driving args (e.g. "open about:blank" or "--session agent-x open about:blank").
+    # $! = the `timeout` job (it kills its child — the driving command — on expiry).
+    timeout --signal=KILL 25 "$ABPOOL_ADMIN" "$@" >/dev/null 2>&1 &
     TRANSPARENCY_BG_PID=$!
 }
 
 # _transparency_wait_my_lane — poll pool_lease_find_mine up to ~20s; echo N on success, rc 1 on
-# timeout. The lane must be found via the lib's find_mine (the same seam the wrapper's reuse
+# timeout. The lane must be found via the lib's find_mine (the same seam the pool's reuse
 # step uses) so this proves the lease is genuinely MINE + LIVE. rc-1 safe (pool_lease_find_mine
 # returns 1 when no lane is found — guarded by the `if`).
 _transparency_wait_my_lane() {
@@ -198,7 +203,7 @@ _transparency_wait_my_lane() {
 }
 
 # _transparency_reap_bg — kill + wait the bg timeout job (reap the zombie so /proc clears).
-# Chrome survives the wrapper kill (setsid → own session); the POOL owns it (the runner's
+# Chrome survives the driving-command kill (setsid → own session); the POOL owns it (the runner's
 # inter-body `release all` reaps it). Best-effort (|| true). Resets the pid var.
 _transparency_reap_bg() {
     [[ -n "${TRANSPARENCY_BG_PID:-}" ]] || return 0
@@ -221,39 +226,60 @@ _transparency_reap_all_sim_owners() {
 }
 
 # =============================================================================
-# TEST (a) — `agent-browser skills get core` → passthrough (META, byte-equal to real binary).
-# PRD §2.15: meta commands are unaffected. META short-circuits in pool_dispatch_classify
-# (lib/pool.sh:3036) BEFORE owner resolve — but set a pi ancestor anyway to prove meta wins
-# regardless. Assert EQUALITY (not content — version/skills output varies).
+# TEST (a) — `agent-browser-pool skills get core` → passthrough (META, byte-equal to real binary).
+# PRD §2.15: meta commands are unaffected. `skills` has no case arm in bin/agent-browser-pool →
+# the driving-command dispatcher → the pool's meta classifier
+# classifies cmd=`skills` as meta → exec
+# `$POOL_REAL_BIN skills get core`. META short-circuits BEFORE owner resolve — but set a pi
+# ancestor anyway to prove meta wins regardless. Assert EQUALITY (not content — output varies).
 # =============================================================================
 test_passthrough_skills() {
     _transparency_setup_real_env || return 1
     _transparency_spawn_owner >/dev/null       # a pi ancestor IS present; meta ignores it
     local w r
-    w="$(timeout 15 "$ABPOOL_WRAPPER" skills get core 2>/dev/null || true)"
+    w="$(timeout 15 "$ABPOOL_ADMIN" skills get core 2>/dev/null || true)"
     r="$(timeout 15 "$POOL_REAL_BIN"  skills get core 2>/dev/null || true)"
-    assert_eq "$r" "$w" "skills get core: wrapper output == real binary output (passthrough)" || return 1
+    assert_eq "$r" "$w" "skills get core: pool output == real binary output (meta passthrough)" || return 1
 }
 
 # =============================================================================
-# TEST (b) — `--help` and `--version` → passthrough (META, byte-equal). Same shape as (a),
-# TWO sub-checks (both flags). Assert EQUALITY (not content).
+# TEST (b1) — `agent-browser-pool --help` → POOL help (NOT passthrough).
+# PRD §2.15 / §2.4 step 0: `--help` is a POOL VERB caught by bin/agent-browser-pool's dispatch
+# case (`--help|-h|help) → pool_admin_help`) BEFORE the pool's driving-command dispatcher +
+# meta classifier run.
+# So the output is the POOL's help text — NOT the real agent-browser's help. The byte-equal
+# assertion that held under PATH-shadowing is now WRONG. Assert the output CONTAINS the pool's
+# signature phrase 'agent-browser-pool' (the real agent-browser --help never emits '-pool').
+# (A pi ancestor is irrelevant to a pool verb, but spawn one for parity with the other bodies.)
 # =============================================================================
-test_passthrough_help_version() {
+test_help_shows_pool_help() {
     _transparency_setup_real_env || return 1
     _transparency_spawn_owner >/dev/null
-    local w r flag
-    for flag in --help --version; do
-        w="$(timeout 15 "$ABPOOL_WRAPPER" "$flag" 2>/dev/null || true)"
-        r="$(timeout 15 "$POOL_REAL_BIN"  "$flag" 2>/dev/null || true)"
-        assert_eq "$r" "$w" "$flag: wrapper output == real binary output (passthrough)" || return 1
-    done
+    local out
+    out="$(timeout 15 "$ABPOOL_ADMIN" --help 2>&1 || true)"
+    [[ "$out" == *"agent-browser-pool"* ]] \
+        || { _fail "--help did not show pool help (missing 'agent-browser-pool'); got: $out"; return 1; }
+}
+
+# =============================================================================
+# TEST (b2) — `agent-browser-pool --version` → passthrough (META, byte-equal to real binary).
+# `--version` has NO case arm in bin/agent-browser-pool → falls to the driving-command dispatcher →
+# pool_dispatch_classify classifies `--version` as meta → exec `$POOL_REAL_BIN --version`.
+# So the byte-equal assertion STILL HOLDS (identical to the old model, just via $ABPOOL_ADMIN).
+# =============================================================================
+test_version_passthrough() {
+    _transparency_setup_real_env || return 1
+    _transparency_spawn_owner >/dev/null
+    local w r
+    w="$(timeout 15 "$ABPOOL_ADMIN"  --version 2>/dev/null || true)"
+    r="$(timeout 15 "$POOL_REAL_BIN" --version 2>/dev/null || true)"
+    assert_eq "$r" "$w" "--version: pool output == real binary output (meta passthrough)" || return 1
 }
 
 # =============================================================================
 # TEST (c) — `open <url>` zero-prep → lands MY lane (acquired+booted+connected+leased).
 # PRD §2.15: an agent issuing a zero-prep open is silently routed to its own lane.
-# Backgrounds the wrapper open (may not exit), polls for the lane, asserts it exists + is live,
+# Backgrounds the driving open (may not exit), polls for the lane, asserts it exists + is live,
 # then reaps the bg job (Chrome survives; release all reaps it). Uses about:blank (local, no
 # network, fastest nav, least flake).
 # =============================================================================
@@ -295,8 +321,8 @@ test_second_open_reuses_lane() {
 # (pool_ensure_connected), so the agent's arg is ignored. TWO LAYERS:
 #   LAYER 1 (deterministic unit of the pure normalizer — NO Chrome): pool_normalize_connect
 #     strips the FIRST non-flag positional after connect. Verify 98765 is gone from POOL_NORM_ARGS.
-#   LAYER 2 (routing integ): with a live lane N, a wrapper `connect <random>` must NOT move us
-#     off N. After Issue #1 the wrapper SHORT-CIRCUITS the resulting bare connect to a success
+#   LAYER 2 (routing integ): with a live lane N, a driving `connect <random>` must NOT move us
+#     off N. After Issue #1 the pool SHORT-CIRCUITS the resulting bare connect to a success
 #     no-op (rc 0) instead of erroring; we still IGNORE its rc and assert ROUTING via
 #     find_mine == N (the contract is about routing, not the connect rc).
 # =============================================================================
@@ -315,16 +341,16 @@ test_connect_random_ignored() {
     _transparency_spawn_owner >/dev/null
     local N before after
     before="$(_transparency_acquire_boot)" || return 1     # acquire+boot lane N (lib direct)
-    # Bare connect: post-Issue #1 the wrapper short-circuits to a success no-op (rc 0).
+    # Bare connect: post-Issue #1 the pool short-circuits to a success no-op (rc 0).
     # We IGNORE its rc either way (the contract is ROUTING, not the connect rc).
-    timeout --signal=KILL 15 "$ABPOOL_WRAPPER" connect 98765 >/dev/null 2>&1 || true
+    timeout --signal=KILL 15 "$ABPOOL_ADMIN" connect 98765 >/dev/null 2>&1 || true
     after="$(pool_lease_find_mine 2>/dev/null || true)"
     assert_eq "$before" "$after" "connect <random> kept us on lane $before (arg ignored)" || return 1
 }
 
 # =============================================================================
 # TEST (f) — `--session <X> open <url>` → forced to abpool-<N> (X is STRIPPED + env forced).
-# PRD §2.15: the agent cannot bypass its lane via the upstream --session flag. The wrapper
+# PRD §2.15: the agent cannot bypass its lane via the upstream --session flag. The pool
 # strips every --session (pool_strip_session_args) AND forces AGENT_BROWSER_SESSION=abpool-<N>
 # (pool_force_session). Verify the lease's .session == abpool-<N> and ≠ <X>. The lease .session
 # is written as abpool-<N> during acquire (lib/pool.sh:2004) — so the forced env + lease agree.
@@ -350,9 +376,9 @@ test_session_override_forced() {
 # bare close). TWO LAYERS:
 #   LAYER 1 (unit): pool_normalize_close strips --all + sets POOL_CLOSE_ALL_SEEN=1.
 #   LAYER 2 (multi-owner scope): owner A (me) + owner B (peer) on distinct lanes; run A's
-#     `close --all` through the wrapper (scoped to abpool-NA after strip+force); PEER lane B's
+#     `close --all` through the pool (scoped to abpool-NA after strip+force); PEER lane B's
 #     lease MUST still be present AND peer Chrome (port B) MUST still respond.
-# The wrapper exec's `"$POOL_REAL_BIN" --session abpool-NA close` (after strip+force) → only
+# The pool exec's `"$POOL_REAL_BIN" --session abpool-NA close` (after strip+force) → only
 # A's daemon session. NB's daemon is a SEPARATE session ⇒ survives.
 # =============================================================================
 test_close_all_scoped_no_peer_harm() {
@@ -387,11 +413,11 @@ test_close_all_scoped_no_peer_harm() {
     assert_lane_exists "$NB"
     portB="$(pool_lease_field "$NB" port 2>/dev/null)" || portB=""
 
-    # Switch back to owner A, run its close --all through the wrapper (scoped to abpool-NA).
+    # Switch back to owner A, run its close --all through the pool (scoped to abpool-NA).
     export AGENT_BROWSER_POOL_OWNER_PID="$A"; export AGENT_BROWSER_POOL_OWNER_STARTTIME="$st_A"
     pool_owner_resolve
 
-    timeout --signal=KILL 15 "$ABPOOL_WRAPPER" close --all >/dev/null 2>&1 || true
+    timeout --signal=KILL 15 "$ABPOOL_ADMIN" close --all >/dev/null 2>&1 || true
 
     # PEER lane B MUST still be alive: lease present AND Chrome responds (curl, NOT kill -0).
     assert_lane_exists "$NB" \
@@ -440,6 +466,46 @@ test_next_agent_distinct_lane() {
 }
 
 # =============================================================================
+# TEST (i) — driving command with NO pi ancestor → FAIL-FAST pool_die (§2.4 step 1).
+# PRD §2.4 step 1 / shipped P2.M1.T1.S2: "No pi ancestor → DRIVING fails fast" — the pool's
+# driving-command dispatcher step d calls pool_die (exit 1, stderr contains 'pi ancestor … for raw browser use call
+# 'agent-browser' directly').
+#
+# DETERMINISM: pool_owner_resolve REAL MODE walks ppid from $$. This suite is often launched BY
+# `pi` (the coding harness), so a normally-spawned driving subprocess's ppid chain INCLUDES pi →
+# it would find an owner → NOT fail-fast → flaky. There is no "force no-owner" env var. So DETACH
+# the driving command from this shell's tree via `setsid` (no --wait): setsid forks the child into
+# a NEW session and exits; the child reparents to the subreaper / pid 1 (systemd, comm != 'pi') →
+# ppid walk finds no 'pi' → POOL_OWNER_PID=0 → fail-fast. `env -u` strips any inherited owner
+# override. Because setsid exits before the child, $() capture is racy → redirect the detached
+# child's output to a TEMP FILE and poll (bounded) for 'pi ancestor'. pool_die fires at step d,
+# BEFORE any Chrome/lane work → sub-second. No hang, no orphan (child self-exits via pool_die;
+# setsid pid reaped by `wait`; grandchild reaped by its new parent/subreaper — AGENTS.md §3).
+# =============================================================================
+test_driving_no_pi_ancestor_fails_fast() {
+    _transparency_setup_real_env || return 1   # AGENT_BROWSER_REAL MUST be set so _pool_preflight_real_bin passes BEFORE the owner-resolve die
+    # Deliberately NO _transparency_spawn_owner — this body has NO pi ancestor.
+    local tmp bg deadline msg
+    tmp="$(mktemp)"
+    # Fully detach: setsid (new session → reparent to subreaper, comm != 'pi') + strip owner overrides.
+    env -u AGENT_BROWSER_POOL_OWNER_PID -u AGENT_BROWSER_POOL_OWNER_STARTTIME \
+        setsid "$ABPOOL_ADMIN" open about:blank >"$tmp" 2>&1 &
+    bg=$!
+    wait "$bg" 2>/dev/null || true              # setsid exits immediately after forking the detached child
+    # Poll the temp file for the fail-fast message (bounded — pool_die is sub-second).
+    deadline=$(( $(date +%s) + 10 ))
+    msg=""
+    while (( $(date +%s) < deadline )); do
+        msg="$(cat "$tmp" 2>/dev/null || true)"
+        [[ "$msg" == *"pi ancestor"* ]] && break
+        sleep 0.2
+    done
+    rm -f -- "$tmp"
+    [[ "$msg" == *"pi ancestor"* ]] \
+        || { _fail "driving cmd with no pi ancestor did NOT fail fast; got: ${msg:-<empty>}"; return 1; }
+}
+
+# =============================================================================
 # _abpool_run_transparency_suite — the SINGLE-SETUP runner.
 #
 # ★★★ HARD CONSTRAINT: setup() is called EXACTLY ONCE for the whole file (NEVER per-test). ★★★
@@ -475,7 +541,7 @@ _abpool_run_transparency_suite() {
         fi
         # Inter-body backstop: reap any lingering bg open, release any leftover lanes, kill this
         # body's owner, AND reap any un-tracked sim-owner (multi-owner bodies may early-return and
-        # leak the extra owner). Chrome from a bg'd open survives wrapper kill (setsid) — release
+        # leak the extra owner). Chrome from a bg'd open survives driving-command kill (setsid) — release
         # all reaps it.
         _transparency_reap_bg
         "$ABPOOL_ADMIN" release all >/dev/null 2>&1 || true

@@ -291,7 +291,7 @@
           "type": "Milestone",
           "id": "P2.M5",
           "title": "Test Framework Updates",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Update all test files to use bin/agent-browser-pool as the sole entry point for both admin verbs and driving commands. Remove POOL_DISABLE test coverage. Update transparency tests for the fail-fast no-pi-ancestor behavior.",
           "tasks": [
             {
@@ -323,14 +323,14 @@
               "type": "Task",
               "id": "P2.M5.T2",
               "title": "Update test/transparency.sh for new invocation and fail-fast model",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Major update: change all $ABPOOL_WRAPPER invocations to $ABPOOL_ADMIN, update meta-passthrough tests (--help now shows pool help, not real binary help), and change no-pi-ancestor test from passthrough to fail-fast assertion.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M5.T2.S1",
                   "title": "Rewrite transparency.sh invocations + update passthrough/fail-fast tests",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M5.T1.S1",
@@ -351,14 +351,14 @@
               "type": "Task",
               "id": "P2.M5.T3",
               "title": "Update test/concurrency.sh and test/release_reaper.sh comments",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Both files call lib functions directly (not the wrapper binary) or already use agent-browser-pool for admin verbs. Only comment updates needed to reflect the new model.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M5.T3.S1",
                   "title": "Update comments in concurrency.sh and release_reaper.sh",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M2.T2.S1",
