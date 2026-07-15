@@ -2356,10 +2356,12 @@ pool_boot_lane() {
 # pool_ensure_connected LANE
 #
 # LOGIC (CONTRACT a→d):
-#   a. Read the lease → session, port, ephemeral_dir (+ chrome_pid). Lease missing/corrupt
-#      OR port<=0 (provisional, not booted) → return 1 (defensive — S2's job).
-#   b. pool_daemon_connected "$session" "$port" (SIDE-EFFECT-FREE): rc 0 → touch last_seen_at
-#      → return 0.
+#   a. Read the lease → session, port, ephemeral_dir, connected (+ chrome_pid). Lease
+#      missing/corrupt OR port<=0 (provisional, not booted) → return 1 (defensive).
+#   b. ONLY if the lease connected==true: pool_daemon_connected "$session" "$port"
+#      (SIDE-EFFECT-FREE) → rc 0 → touch last_seen_at → return 0. If connected==false
+#      (S1 flipped it after a close), SKIP this early-exit and fall through to (c): the
+#      lingering session-list entry is a false positive, so rebind via curl+connect.
 #   c. NOT connected. Chrome alive? curl /json/version on the port (NOT kill -0 — research §2):
 #      ALIVE → pool_daemon_connect (re-bind the daemon): rc 0 → connected:true + last_seen_at
 #      → return 0; rc 1 → last_seen_at → return 1.
@@ -2389,7 +2391,7 @@ pool_boot_lane() {
 # PRECONDITION: pool_config_init + pool_state_init + a BOOTED lease for LANE (port>0).
 pool_ensure_connected() {
     local lane="${1:-}"
-    local json session port ephemeral_dir now
+    local json session port ephemeral_dir connected now
     local -a _f
 
     # Validate lane.
@@ -2403,12 +2405,20 @@ pool_ensure_connected() {
         _pool_log "pool_ensure_connected: no/corrupt lease for lane $lane"
         return 1
     fi
-    # Extract the 3 fields we need in ONE jq fork (comma → 3 lines; mapfile -t strips \n).
-    # jq cannot fail here (valid JSON guaranteed by pool_lease_read's _pool_json_valid).
-    mapfile -t _f < <(jq -r '.session, .port, .ephemeral_dir' <<<"$json")
+    # Extract the 4 fields we need in ONE jq fork (comma → N lines; mapfile -t strips \n):
+    # session, port, ephemeral_dir, connected. `connected` is the Issue-#3 signal — S1's close
+    # path flips it false, so a post-close call must NOT trust the lingering pool_daemon_connected
+    # probe (step b). Default true for backward compat with leases predating S1 (or lacking the
+    # field) — preserves the old always-probe behavior. pool_lease_write always writes the field,
+    # so the default is purely defensive. jq -r renders an absent field as the bare word `null`
+    # (NOT empty), so coalesce both empty and the literal `null` to `true` here. jq cannot fail
+    # here (valid JSON guaranteed by pool_lease_read's _pool_json_valid).
+    mapfile -t _f < <(jq -r '.session, .port, .ephemeral_dir, .connected' <<<"$json")
     session="${_f[0]:-}"
     port="${_f[1]:-}"
     ephemeral_dir="${_f[2]:-}"
+    connected="${_f[3]:-true}"
+    [[ "$connected" == "true" || "$connected" == "false" ]] || connected=true
 
     # A not-booted (provisional) lane has port:0 — ensure_connected is for BOOTED lanes.
     # Reconstruct session/ephemeral_dir defensively if the lease fields are empty.
@@ -2420,7 +2430,13 @@ pool_ensure_connected() {
     now="$(_pool_now)"
 
     # --- b. ALREADY connected? (SIDE-EFFECT-FREE — never launches; the get cdp-url REPLACEMENT). ---
-    if pool_daemon_connected "$session" "$port"; then
+    # Issue #3 (S2): only trust the lingering-session probe if the lease says connected==true.
+    # After a close, S1 flips connected=false; the session LINGERS in `session list` + Chrome
+    # stays alive, so pool_daemon_connected would return 0 (false positive) and we'd skip the
+    # rebind the next driving command needs. When connected==false, short-circuit past this
+    # early-exit and fall through to the curl reconnect (step c) → pool_daemon_connect rebinds.
+    # `[[ ]] && probe` is errexit-exempt (left operand of && in an if-condition).
+    if [[ "$connected" == "true" ]] && pool_daemon_connected "$session" "$port"; then
         pool_lease_update "$lane" last_seen_at "$now"   # observability heartbeat
         return 0
     fi

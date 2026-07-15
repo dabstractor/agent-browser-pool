@@ -525,6 +525,69 @@ EOF
     assert_eq "0" "$rc" "close survives corrupt lease (exec ran, pool_die contained) (out: $out)" || return 1
 }
 
+# --- pool_ensure_connected rebinds when connected=false (P1.M3.T1.S2 / Issue #3 READ side) ---
+# The FIX: connected=false (S1 wrote it on close) must make pool_ensure_connected SKIP the
+# pool_daemon_connected early-exit (even though that probe returns 0 — the post-close false
+# positive) and instead call pool_daemon_connect to rebind, flipping connected back to true.
+# Chrome-FREE: stub pool_daemon_connected (→0), curl (→0, so the reconnect branch — not
+# relaunch — fires), pool_daemon_connect (records + →0). Hermetic, timeout-bounded subshell.
+selftest_ensure_connected_rebinds_when_disconnected() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/ensure-rebind"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+# Lease with connected=false (exactly as S1's close path writes it) + a valid port.
+pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 100 "$2" 200 201 false
+# Stubs. pool_daemon_connected returns 0 = the post-close FALSE POSITIVE (lingering session +
+# alive chrome). curl returns 0 = chrome "alive" → the RECONNECT branch (not relaunch). The
+# connect stub records that it was called (the rebind we want to FORCE) + returns 0.
+pool_daemon_connected() { return 0; }
+curl()                  { return 0; }
+_connect_called=0
+pool_daemon_connect()   { _connect_called=1; return 0; }
+# The fix: connected=false MUST skip the early-exit → reach pool_daemon_connect + flip connected.
+pool_ensure_connected 1
+test "$_connect_called" = "1"                                  # rebind CALLED (no early-exit)
+test "$(jq -r .connected "$POOL_LANES_DIR/1.json")" = "true"   # flipped back to true
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "connected=false → ensure_connected rebinds (connect called, connected→true) (out: $out)" || return 1
+}
+
+# --- pool_ensure_connected early-exits (no rebind) when connected=true (happy path) ---
+# Companion: a normal booted lease (connected=true) MUST still take the pool_daemon_connected
+# early-exit and NOT call pool_daemon_connect — i.e. S2 changes nothing for the happy path.
+selftest_ensure_connected_skips_rebind_when_connected() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/ensure-noop"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 100 "$2" 200 201 true
+pool_daemon_connected() { return 0; }   # connected + probe rc 0 → early-exit
+curl()                  { return 0; }
+_connect_called=0
+pool_daemon_connect()   { _connect_called=1; return 0; }
+pool_ensure_connected 1
+test "$_connect_called" = "0"   # NOT called — early-exit fired (old behavior preserved)
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "connected=true → ensure_connected early-exits, no rebind (out: $out)" || return 1
+}
+
 # --- pool_chrome_launch EADDRINUSE detection (P1.M2.T1.S1 / Issue 2) -------------
 # Mock-based test: a fake "chrome" binary writes an EADDRINUSE line to stderr then
 # exits 1 instantly. Verifies pool_chrome_launch detects the bind failure in the log

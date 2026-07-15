@@ -133,14 +133,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Close → Rebind Fix (Issue 3)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "After agent-browser close (disconnect-only), the session lingers in the daemon's session list and Chrome stays alive. pool_daemon_connected sees both probes pass and returns 0, so pool_ensure_connected skips the rebind. The next driving command execs against a disconnected daemon binding. Fix: (1) mark the lease connected=false in pool_wrapper_main before exec'ing close, (2) make pool_ensure_connected check the connected flag and skip the early-exit when connected=false, (3) add a test for close → next driving command rebind.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Mark lease connected=false on close and check in ensure_connected",
-              "status": "Planned",
+              "status": "Researching",
               "description": "In pool_wrapper_main, after arg normalization, if the command is 'close', set pool_lease_update connected false before exec. In pool_ensure_connected, read the connected flag from the lease; if connected=false, skip the pool_daemon_connected early-exit and proceed to the reconnect path. Add a test verifying close → next driving command rebinds successfully.",
               "subtasks": [
                 {
@@ -161,7 +161,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S2",
                   "title": "Check connected flag in pool_ensure_connected to skip early-exit after close",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1"
@@ -177,7 +177,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S3",
                   "title": "Add test for close → next driving command rebind path",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1",
