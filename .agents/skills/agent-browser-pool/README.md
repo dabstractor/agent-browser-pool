@@ -1,20 +1,21 @@
 # agent-browser-pool (Agent Skill)
 
 An [Agent Skill](https://github.com/earendil-works/pi-coding-agent) that teaches AI agents
-how to use the [`agent-browser-pool`](../..) transparent Chrome-profile wrapper correctly:
-how their dedicated lane is acquired and connected, how it's reused across calls, and how
-to tear it down.
+how to use the [`agent-browser-pool`](../..) Chrome-profile pool correctly: how their
+dedicated lane is acquired and connected, how it's reused across calls, and how to tear it
+down.
 
 ## What it covers
 
 - **Acquire + connect:** the lane is created automatically on the first driving
-  `agent-browser` command under `pi`; agents don't pass ports or `--session` (the pool owns
-  them).
+  `agent-browser-pool` command under `pi`; agents don't pass ports or `--session` (the pool
+  owns them).
 - **Teardown:** `close` is disconnect-only; the real release happens automatically when the
   owning `pi` process exits. Agents should avoid `agent-browser-pool release`/`reap`
   (operator tools; `release <N>` is not owner-scoped).
-- **Pitfalls:** passthrough (no `pi` ancestor / `AGENT_BROWSER_POOL_DISABLE`), pool
-  exhaustion hangs, ephemeral profiles, and why to never launch Chrome directly.
+- **Pitfalls:** driving commands fail fast without a `pi` ancestor (use `agent-browser`
+  directly for raw access), pool exhaustion hangs, ephemeral profiles, and why to never
+  launch Chrome directly.
 
 ## Files
 
