@@ -199,21 +199,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Sync Changeset-Level Documentation",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Final cross-cutting documentation sweep. The per-file docs (Mode A) were updated in the implementing subtasks. This task sweeps README.md overview sections ('How it works', 'Safety valve') and any other changeset-level docs that span multiple issues.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Review and update README.md overview sections that span the entire changeset: 'How it works' (bare commands are now META passthrough — Issue 4), 'Safety valve' (AGENT_BROWSER_POOL_DISABLE now accepts truthy values — Issue 1), and any other cross-cutting docs. This is the catch-all that prevents a coherent delta from shipping with a stale README.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Update README.md overview sections for changeset-level changes",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

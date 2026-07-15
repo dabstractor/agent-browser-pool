@@ -30,7 +30,7 @@ tested. See **Installation** below to set it up.
 1. **btrfs** at the pool root (`~/.agent-chrome-profiles`). The pool copy-on-writes
    the master profile per lane; btrfs makes each `cp --reflink=always` instant and
    deduplicated. On a non-btrfs filesystem the wrapper **refuses** the slow 4.8 GB
-   copy unless you set `AGENT_CHROME_ALLOW_SLOW_COPY=1`.
+   copy unless you set `AGENT_CHROME_ALLOW_SLOW_COPY` (to `1`/`true`/`yes`/`on`).
 2. **Master template** at `~/.agent-chrome-profiles/master-profile` — a full Chrome
    profile holding the identity every agent should start from (Google login,
    Bitwarden, the `agent-browser` extension). **Never launch Chrome directly against
@@ -57,7 +57,7 @@ to verify dependencies.
 
 > **Cutover warning (read before installing).** This is **all-or-nothing**: the
 > PATH-shadowing mechanism has no safe partial mode, and the only per-session opt-out
-> is `AGENT_BROWSER_POOL_DISABLE=1`. Once installed, **running agents on the OLD
+> is `AGENT_BROWSER_POOL_DISABLE` (set to `1`/`true`/`yes`/`on`). Once installed, **running agents on the OLD
 > workflow are silently intercepted** — their next `agent-browser` call is routed to
 > a fresh ephemeral lane, abandoning any in-progress work on persistent profiles. Do
 > not install while critical agents are mid-task.
@@ -233,13 +233,13 @@ Three vars shape behavior most:
 
 ## Safety valve
 
-`AGENT_BROWSER_POOL_DISABLE=1` makes **this process** pass through to the real
+`AGENT_BROWSER_POOL_DISABLE` (set to `1`/`true`/`yes`/`on`) makes **this process** pass through to the real
 `agent-browser` with **no pooling** — no lane, no ephemeral profile, no interception.
 It is per-process (exported into one shell), not global. Use it for cutover
 coexistence (stay on the old workflow) or for debugging.
 
 ```bash
-export AGENT_BROWSER_POOL_DISABLE=1
+export AGENT_BROWSER_POOL_DISABLE=1   # 1/true/yes/on all work; per-process (not global)
 agent-browser open https://example.com    # real ~/.local/bin/agent-browser, no lane
 ```
 
@@ -251,9 +251,10 @@ See [PRD.md §2.17](./PRD.md) (cutover & coexistence) and
 The wrapper decides per invocation. It **passes through unchanged** when any of
 these is true — otherwise it runs the lane lifecycle below:
 
-- `AGENT_BROWSER_POOL_DISABLE=1` (safety valve);
+- `AGENT_BROWSER_POOL_DISABLE` is set to a truthy value (`1`/`true`/`yes`/`on`) — the safety valve;
 - the command is a **META** command (`skills`, `--help`, `--version`, `session
-  list`, `dashboard`, `plugin`), which need no lane;
+  list`, `dashboard`, `plugin`) **or a bare invocation with no subcommand**
+  (upstream just prints help), which need no lane;
 - there is **no `pi` ancestor** — a human in a terminal gets the raw upstream tool.
 
 ```
@@ -334,7 +335,7 @@ exits `1` when problems are found. See PRD.md §2.14.
 (legacy) profile.
 
 **Cause:** **passthrough.** Either you are a human in a terminal (no `pi`
-ancestor), or `AGENT_BROWSER_POOL_DISABLE=1` is set in that shell.
+ancestor), or `AGENT_BROWSER_POOL_DISABLE` is set (to a truthy value) in that shell.
 
 **Fix:** for agents, confirm there is a `pi` ancestor in the process tree and that
 the disable env is unset; then `agent-browser-pool status` to see the lane.
