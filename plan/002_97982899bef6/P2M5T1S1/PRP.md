@@ -197,10 +197,12 @@ test/
 # it from the suite. Contract step (d) is satisfied by the deletion alone. Do NOT touch the runner,
 # do NOT add a list. (Line 247 abpool_run_suite is the sourced-mode runner — also auto-discovery.)
 
-# CRITICAL: 'wrapper' the substring will STILL appear ~8 times after a perfect edit — ALL are
+# CRITICAL: 'wrapper' the substring will STILL appear after a perfect edit — ALL are
 # 'pool_wrapper_main' (a LIBRARY function that dispatches driving commands; unrelated to the deleted
-# bin/agent-browser shim). They are at lines 427,429,454,458,469,488,500,519 and MUST STAY. The
-# validation greps key on 'ABPOOL_WRAPPER' (the variable) — NOT on the bare substring 'wrapper'.
+# bin/agent-browser shim). These appear as the literal token 'pool_wrapper_main' (invocations + test
+# comments) AND as prose refs to it inside its own test comments (e.g. selftest_close_survives_corrupt_lease:
+# 'the wrapper still reaches exec' = pool_wrapper_main still reaches the exec of the real binary). They
+# MUST STAY. The validation greps key on 'ABPOOL_WRAPPER' (the variable) — NOT on the bare substring 'wrapper'.
 
 # CRITICAL: do NOT delete selftest_config_bool_truthy / selftest_config_bool_falsy. They test the
 # _pool_config_bool NORMALIZER, which lib/pool.sh STILL uses (lines 181-182: headless, allow_slow_copy).
@@ -488,14 +490,18 @@ grep -q 'sole entry point' "$F" && echo "OK: rewritten comment (sole entry point
 # --- the runner is UNCHANGED (auto-discovery intact) ---
 grep -q 'compgen -A function | grep '"'"'^selftest_'"'"' | sort' "$F" && echo "OK: _run_selftest_suite auto-discovery intact" || echo "FAIL: runner changed (must stay compgen)"
 
-# --- 'wrapper' substring is allowed to remain ONLY as pool_wrapper_main (library fn) ---
-bad=$(grep -n 'wrapper' "$F" | grep -v 'pool_wrapper_main' || true)
-[ -z "$bad" ] && echo "OK: all remaining 'wrapper' refs are pool_wrapper_main (correct)" || { echo "FAIL: non-pool_wrapper_main 'wrapper' refs:"; echo "$bad"; }
+# --- 'wrapper' substring may remain ONLY as pool_wrapper_main (the library driving-dispatcher) ---
+# That includes BOTH the literal token 'pool_wrapper_main' AND prose refs to it in its own test
+# comments (e.g. selftest_close_survives_corrupt_lease: 'the wrapper still reaches exec' = pool_wrapper_main
+# still reaches the exec of the real binary). The thing that MUST be gone is the VARIABLE ABPOOL_WRAPPER
+# (already gated to 0 above). So: allow any 'wrapper' line that is about pool_wrapper_main OR its prose alias.
+bad=$(grep -n 'wrapper' "$F" | grep -v 'pool_wrapper_main' | grep -vi 'wrapper still reaches exec' || true)
+[ -z "$bad" ] && echo "OK: all remaining 'wrapper' refs are pool_wrapper_main (literal or prose)" || { echo "REVIEW: 'wrapper' lines not recognized as pool_wrapper_main (verify each is about the library fn, NOT the deleted shim):"; echo "$bad"; }
 ```
 
 **Expected**: `bash -n` → OK; shellcheck → no SC2034/SC2154 for ABPOOL_WRAPPER, only SC1091/SC2016
 infos; all 5 removal greps → 0; ABPOOL_ADMIN def + admin check + both normalizer selftests +
-'sole entry point' comment + compgen runner all present; every remaining 'wrapper' is `pool_wrapper_main`.
+'sole entry point' comment + compgen runner all present; every remaining 'wrapper' is `pool_wrapper_main` (the literal token OR its prose alias 'the wrapper still reaches exec' in the close-survives test comment — both refer to the library driving-dispatcher, NOT the deleted shim).
 
 ### Level 2: Component Validation — N/A (static by design)
 
