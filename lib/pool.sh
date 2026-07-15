@@ -3648,7 +3648,29 @@ pool_wrapper_main() {
         _pool_log "pool_wrapper_main: intercepted close --all → scoped to lane $N"
     fi
 
+    # --- (close) mark the lease disconnected so the NEXT call rebinds (Issue #3) ----
+    # close detaches the daemon↔Chrome binding, but the session LINGERS in `session list`
+    # and Chrome stays alive → pool_daemon_connected would return 0 and the next
+    # pool_ensure_connected would SKIP the rebind (PRD §2.15 transparency risk). Flipping
+    # the lease connected=false here records the detach durably (across the two separate
+    # agent-browser invocations) so S2's pool_ensure_connected takes the reconnect branch.
+    # MUST run before exec (exec replaces the process — nothing runs after).
+    if _pool_clean_args_is_close "${POOL_CLEAN_ARGS[@]}"; then
+        # Defensive SUBSHELL: pool_lease_update pool_die()'s on a corrupt/missing lease.
+        # `|| true` does NOT catch pool_die (it `exit 1`s, not `return 1`) — a subshell
+        # contains the exit so a (very unlikely — the lease was read at step h) corruption
+        # cannot abort the close (PRD §2.15: close must always run). 2>/dev/null keeps the
+        # agent's output clean; _pool_log records the rare miss.
+        if ! ( pool_lease_update "$N" connected false ) 2>/dev/null; then
+            _pool_log "pool_wrapper_main: close: could not mark lane $N connected=false (non-fatal; proceeding to exec)"
+        fi
+    fi
+
     # --- k. EXEC the real binary (step 5, terminal) -----------------------------
+    # The close path above already marked the lease connected=false BEFORE this terminal
+    # exec, so the agent's NEXT driving command forces pool_ensure_connected to rebind the
+    # daemon (close detaches the binding but the session lingers in `session list`; the
+    # connected=false flag is what tells the next call a rebind is needed).
     # Process replacement (PID stays; exported AGENT_BROWSER_SESSION inherited). UNREACHABLE code
     # after this line. The agent's command now runs against its locked, booted, connected lane.
     #
@@ -3740,6 +3762,51 @@ _pool_clean_args_is_bare_connect() {
 
     # --- d. command was connect, no further positional → bare connect ---
     return 0
+}
+
+# _pool_clean_args_is_close ARGS...
+#
+# Predicate: is the cleaned argv a `close` command? Returns 0 iff the first NON-flag
+# token (skipping --session/--session=/--*/-*, mirroring pool_dispatch_classify) equals
+# `close`; returns 1 otherwise. Twin of _pool_clean_args_is_bare_connect.
+#
+# CONSUMER: pool_wrapper_main (Issue #3 / P1.M3.T1.S1). When the agent's command is
+# `close`, the wrapper marks the lease connected=false (so the NEXT call's
+# pool_ensure_connected, S2, rebinds the daemon instead of trusting the lingering
+# session-list entry). close detaches the binding but the session lingers in `session
+# list` + Chrome stays alive → pool_daemon_connected would otherwise return 0 and skip
+# the rebind (PRD §2.15 transparency risk).
+#
+# LOGIC: walk $@; the first NON-flag token is the COMMAND. Return 0 iff it is `close`.
+# (Unlike _pool_clean_args_is_bare_connect we do NOT scan PAST the command — close
+# detection only cares about the command token itself; `close --all`/`close --json` are
+# still `close`. --all is already stripped by pool_normalize_close at step i anyway.)
+#
+# GOTCHA — POOL_CLEAN_ARGS has had --session stripped at step j (pool_strip_session_args),
+#   so --session won't appear here; the full flag-skip case is kept for defense-in-depth
+#   (correctness if ever called on raw argv) + exact parity with the connect sibling.
+# GOTCHA — return 0/1 ONLY (never pool_die, never echo, never write); reads only "$@".
+# GOTCHA — under set -e, call as `if _pool_clean_args_is_close …; then …` (the predicate
+#   legitimately returns 1 for non-close — a bare call would abort).
+# PRECONDITION: none.
+_pool_clean_args_is_close() {
+    local -a orig=("$@")
+    local i=0 tok cmd=""
+
+    # --- a. find the COMMAND (first non-flag token) ---
+    while (( i < ${#orig[@]} )); do
+        tok="${orig[i]}"
+        case "$tok" in
+            --session)      i=$((i+2)) ;;   # space form: flag + value (stripped by step j; kept for parity)
+            --session=*)    i=$((i+1)) ;;   # equals form (stripped by step j; kept for parity)
+            --*)            i=$((i+1)) ;;   # --json, --all, --cdp, …
+            -*)             i=$((i+1)) ;;   # -i -c -d -p …
+            *)              cmd="$tok"; break ;;   # first non-flag = COMMAND
+        esac
+    done
+
+    # --- b. command is `close` → return 0 (the [[ ]] status is the function status) ---
+    [[ "$cmd" == close ]]
 }
 
 # =============================================================================

@@ -244,8 +244,16 @@ test_n_agents_get_n_distinct_lanes() {
     # (4) Launch N parallel acquire+boot subshells. Each subshell OVERRIDES the owner env
     #     for ITSELF ONLY (subshell-scoped export → parent + siblings unaffected). They
     #     SHARE the temp pool state + lock file (inherited) → contend for the SAME flock.
-    #     A ~0.3s stagger narrows the pool_find_free_port TOCTOU window (port is written to
-    #     the lease BEFORE launch → later find_free_port calls see it claimed).
+    #     NO stagger (Issue 2 / S3): previously a ~0.3s sleep narrowed the pool_find_free_port
+    #     TOCTOU window to AVOID port collisions. The boot path now HANDLES collisions
+    #     transparently — pool_chrome_launch detects an EADDRINUSE instant-exit and returns 1
+    #     (S1), and _pool_launch_and_verify re-picks a different port via pool_find_free_port
+    #     and retries once (S2), updating the lease (pool_boot_lane re-reads it). So the N
+    #     boots launch back-to-back to EXERCISE that recovery under genuine concurrent load;
+    #     the distinct-port + clean-release assertions below (steps 7-9) verify it worked.
+    #     (A rare 3-way collision where the re-picks themselves collide can still drop a lane;
+    #     if that makes the test persistently flaky on a host, re-introduce a MINIMAL stagger
+    #     — see the comment at the launch loop / research §3. Prefer no stagger.)
     for (( i = 0; i < N; i++ )); do
         (
             # Subshell-scoped export: sets the owner env for ONLY this subshell + its
@@ -261,7 +269,10 @@ test_n_agents_get_n_distinct_lanes() {
                 "$results_dir/lane-$i"
         ) &
         bg_pids+=("$!")
-        sleep 0.3   # narrow the port-allocation TOCTOU (research G2)
+        # No stagger (Issue 2 / S3): launch back-to-back so concurrent boots collide on the
+        # pool_find_free_port TOCTOU window, exercising the port re-pick recovery (pool_chrome_launch
+        # EADDRINUSE detect — S1; _pool_launch_and_verify re-pick + retry — S2). The distinct-port
+        # + clean-release assertions below confirm all lanes still succeed. See the step-(4) comment.
     done
 
     # (5) JOIN per-PID. Bare `wait` returns 0 always (masks failures) → loop per PID.

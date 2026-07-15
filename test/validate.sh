@@ -398,6 +398,133 @@ selftest_dispatch_classify_cases() {
     r="$(pool_dispatch_classify --json click)";       assert_eq "driving" "$r" "--json click -> driving" || return 1
 }
 
+# --- _pool_clean_args_is_close truth-table (P1.M3.T1.S1 / Issue #3) ---------------
+# Pure-function body: exercise the close-detection predicate directly. No Chrome, no
+# sim-owner, no persistent lease writes. Picked up by the single-setup _run_selftest_suite
+# (same runner as the other selftest_*). The predicate reads ONLY "$@" and returns 0/1 —
+# so the body needs no setup state; it just calls the function directly (always under
+# `if …; then …; fi` because a legitimate return 1 would abort under `set -e` if bare).
+selftest_clean_args_is_close_cases() {
+    local r
+    # --- TRUE: first non-flag token == close ---
+    if ! _pool_clean_args_is_close close;             then _fail "close -> true";            return 1; fi
+    if ! _pool_clean_args_is_close --json close;      then _fail "--json close -> true";     return 1; fi
+    if ! _pool_clean_args_is_close close --json;      then _fail "close --json -> true";     return 1; fi
+    if ! _pool_clean_args_is_close close --all;       then _fail "close --all -> true";      return 1; fi
+    if ! _pool_clean_args_is_close --session x close; then _fail "--session x close -> true";return 1; fi   # defense-in-depth (parity with the connect twin)
+    if ! _pool_clean_args_is_close -i close;          then _fail "-i close -> true";         return 1; fi
+    # --- FALSE: any other command / no command ---
+    if   _pool_clean_args_is_close open;          then _fail "open -> must be false";          return 1; fi
+    if   _pool_clean_args_is_close click;         then _fail "click -> must be false";         return 1; fi
+    if   _pool_clean_args_is_close connect;       then _fail "connect -> must be false";       return 1; fi
+    if   _pool_clean_args_is_close connect 98765; then _fail "connect <port> -> must be false"; return 1; fi
+    if   _pool_clean_args_is_close session;       then _fail "session -> must be false";       return 1; fi
+    if   _pool_clean_args_is_close unknowncmd;    then _fail "unknowncmd -> must be false";    return 1; fi
+    if   _pool_clean_args_is_close;               then _fail "empty argv -> must be false";    return 1; fi
+    if   _pool_clean_args_is_close --json;        then _fail "flags-only -> must be false";    return 1; fi
+}
+
+# --- pool_wrapper_main marks lease connected=false on close (P1.M3.T1.S1 / Issue #3) ---
+# Mock-based test: a no-op POOL_REAL_BIN + overrides of pool_ensure_connected/
+# pool_lease_find_mine let pool_wrapper_main reach the close path WITHOUT real Chrome/
+# daemon (AGENTS.md §1/§3). Asserts: (1) close flips the lease connected true→false BEFORE
+# the terminal exec; (2) all sibling fields + owner sub-object are preserved; (3) open does
+# NOT flip connected; (4) a corrupt lease does NOT abort the close (the defensive SUBSHELL
+# contains pool_die). Runs in a `timeout`-bounded bash -c SUBSHELL so the mock functions
+# (which shadow the lib fns) are SCOPED — they do NOT leak into the main shell and pollute
+# the other selftests (single-setup runner, AGENTS.md §4). AGENT_BROWSER_REAL points
+# pool_config_init's frozen POOL_REAL_BIN at the no-op so the exec is hermetic.
+selftest_close_marks_lease_disconnected() {
+    local outdir noop script rc out
+    outdir="$ABPOOL_TEST_ROOT/close-rebind"
+    mkdir -p -- "$outdir"
+    noop="$outdir/noop.sh"
+    printf '#!/bin/sh\nexit 0\n' >"$noop"; chmod +x -- "$noop"
+    # Build the body in a file (avoids nested-quote hazards). AGENT_BROWSER_REAL freezes
+    # the no-op as POOL_REAL_BIN so exec is hermetic (no real agent-browser).
+    script="$outdir/body.sh"
+    cat >"$script" <<EOF
+set -euo pipefail
+source "\$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+# Lane 2 lease: connected=true, with distinct sibling/owner values to assert preservation.
+pool_lease_write 2 "\$2/active/2" 53421 abpool-2 55 pi 999 /home/x 7 8 true
+test "\$(jq -r .connected "\$POOL_LANES_DIR/2.json")" = "true"   # precondition
+# Override the Chrome/daemon-dependent steps so pool_wrapper_main reaches the close path.
+pool_ensure_connected() { return 0; }
+pool_lease_find_mine()   { printf '2\n'; return 0; }
+# close → connected MUST become the JSON boolean false, siblings + owner preserved.
+( AGENT_BROWSER_POOL_OWNER_PID=1 pool_wrapper_main close --json )
+jq -e '.lane==2 and .port==53421 and .session=="abpool-2" and .owner.pid==55 and .owner.comm=="pi" and .owner.starttime==999 and .chrome_pid==7 and .chrome_pgid==8 and .connected==false' \\
+    "\$POOL_LANES_DIR/2.json" >/dev/null
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          AGENT_BROWSER_REAL="$noop" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "close flips connected true→false, siblings+owner preserved (out: $out)" || return 1
+}
+
+# --- pool_wrapper_main leaves connected UNCHANGED for non-close (P1.M3.T1.S1 / Issue #3) ---
+# Companion to the close-flips test: a driving non-close command (open) must NOT touch
+# .connected (the predicate returns 1 → the close block is skipped). Same hermetic,
+# timeout-bounded subshell pattern. Guards against the block accidentally over-firing.
+selftest_open_does_not_flip_connected() {
+    local outdir noop script rc out
+    outdir="$ABPOOL_TEST_ROOT/open-unchanged"
+    mkdir -p -- "$outdir"
+    noop="$outdir/noop.sh"
+    printf '#!/bin/sh\nexit 0\n' >"$noop"; chmod +x -- "$noop"
+    script="$outdir/body.sh"
+    cat >"$script" <<EOF
+set -euo pipefail
+source "\$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+pool_lease_write 1 "\$2/active/1" 53420 abpool-1 1 pi 100 "\$2" 0 0 true
+pool_ensure_connected() { return 0; }
+pool_lease_find_mine()   { printf '1\n'; return 0; }
+( AGENT_BROWSER_POOL_OWNER_PID=1 pool_wrapper_main open about:blank )
+test "\$(jq -r .connected "\$POOL_LANES_DIR/1.json")" = "true"   # unchanged
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          AGENT_BROWSER_REAL="$noop" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "open leaves connected=true unchanged (out: $out)" || return 1
+}
+
+# --- close survives a corrupt lease (defensive subshell contains pool_die) ---
+# A corrupt (non-JSON) lease makes pool_lease_update pool_die (exit 1). The close block runs
+# pool_lease_update in a SUBSHELL so the exit is contained; the wrapper still reaches exec
+# (PRD §2.15: close must always run). Hermetic, timeout-bounded subshell. AGENTS.md §3/§4.
+selftest_close_survives_corrupt_lease() {
+    local outdir noop script rc out
+    outdir="$ABPOOL_TEST_ROOT/close-corrupt"
+    mkdir -p -- "$outdir/state/lanes"
+    printf 'NOT JSON' >"$outdir/state/lanes/1.json"   # corrupt lease → pool_lease_update pool_die's
+    noop="$outdir/noop.sh"
+    printf '#!/bin/sh\nexit 0\n' >"$noop"; chmod +x -- "$noop"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+pool_ensure_connected() { return 0; }
+pool_lease_find_mine()   { printf '1
+'; return 0; }
+# corrupt lease (NOT JSON) → pool_lease_update pool_die's → subshell must contain it → exec runs.
+( AGENT_BROWSER_POOL_OWNER_PID=1 pool_wrapper_main close )
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          AGENT_BROWSER_REAL="$noop" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "close survives corrupt lease (exec ran, pool_die contained) (out: $out)" || return 1
+}
+
 # --- pool_chrome_launch EADDRINUSE detection (P1.M2.T1.S1 / Issue 2) -------------
 # Mock-based test: a fake "chrome" binary writes an EADDRINUSE line to stderr then
 # exits 1 instantly. Verifies pool_chrome_launch detects the bind failure in the log
