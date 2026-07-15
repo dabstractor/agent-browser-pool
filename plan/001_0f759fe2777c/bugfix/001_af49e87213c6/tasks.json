@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Implementation",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Fix the 5 issues (3 Major, 2 Minor) found during end-to-end validation of agent-browser-pool. Issues 1 and 5 share a root cause (boolean env var normalization) and are resolved together. Issue 2 (port race) and Issue 3 (close→rebind) are more complex boot/connect path fixes. Issue 4 (bare command classification) is a trivial dispatch fix. All fixes follow TDD (implied) and AGENTS.md sandbox-safety rules.",
       "milestones": [
         {
@@ -133,14 +133,14 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Close → Rebind Fix (Issue 3)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "After agent-browser close (disconnect-only), the session lingers in the daemon's session list and Chrome stays alive. pool_daemon_connected sees both probes pass and returns 0, so pool_ensure_connected skips the rebind. The next driving command execs against a disconnected daemon binding. Fix: (1) mark the lease connected=false in pool_wrapper_main before exec'ing close, (2) make pool_ensure_connected check the connected flag and skip the early-exit when connected=false, (3) add a test for close → next driving command rebind.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Mark lease connected=false on close and check in ensure_connected",
-              "status": "Researching",
+              "status": "Complete",
               "description": "In pool_wrapper_main, after arg normalization, if the command is 'close', set pool_lease_update connected false before exec. In pool_ensure_connected, read the connected flag from the lease; if connected=false, skip the pool_daemon_connected early-exit and proceed to the reconnect path. Add a test verifying close → next driving command rebinds successfully.",
               "subtasks": [
                 {
@@ -177,7 +177,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T1.S3",
                   "title": "Add test for close → next driving command rebind path",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M3.T1.S1",
@@ -199,21 +199,21 @@
           "type": "Milestone",
           "id": "P1.M4",
           "title": "Sync Changeset-Level Documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Final cross-cutting documentation sweep. The per-file docs (Mode A) were updated in the implementing subtasks. This task sweeps README.md overview sections ('How it works', 'Safety valve') and any other changeset-level docs that span multiple issues.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M4.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Review and update README.md overview sections that span the entire changeset: 'How it works' (bare commands are now META passthrough — Issue 4), 'Safety valve' (AGENT_BROWSER_POOL_DISABLE now accepts truthy values — Issue 1), and any other cross-cutting docs. This is the catch-all that prevents a coherent delta from shipping with a stale README.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M4.T1.S1",
                   "title": "Update README.md overview sections for changeset-level changes",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

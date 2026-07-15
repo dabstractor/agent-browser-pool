@@ -356,6 +356,69 @@ test_close_is_disconnect_only() {
 }
 
 # =============================================================================
+# TEST (e) — `close` (via the WRAPPER) marks the lease connected=false, and the NEXT
+# pool_ensure_connected RE-BINDS the daemon (connected false→true) instead of trusting the
+# lingering pool_daemon_connected probe (P1.M3.T1.S1+S2 / Issue #3 / PRD §2.4 step 4 /
+# §2.5 / §2.15).
+#
+# WHY THIS IS DISTINCT FROM test_close_is_disconnect_only (test d): test d invokes close
+# DIRECTLY on $POOL_REAL_BIN → BYPASSES pool_wrapper_main → S1's connected=false block
+# NEVER fires → connected stays true → S2's gate lets the lingering probe win →
+# pool_ensure_connected EARLY-EXITS without re-binding. test d passes before AND after the
+# fix; it never proves a rebind. THIS test runs close THROUGH pool_wrapper_main (so S1
+# fires end-to-end) and asserts the connected false→true transition (the ONLY signal that
+# distinguishes "rebind ran" from "early-exit on a lingering probe").
+# =============================================================================
+test_close_then_rebind() {
+    _release_setup_real_env || return 1
+
+    # (1) Spawn THIS body's owner (CURRENT shell — owner env + POOL_OWNER_* globals must
+    #     propagate to the `( pool_wrapper_main close )` subshell), then acquire + boot
+    #     lane N (one real headless Chrome).
+    local N port session
+    _test_spawn_owner >/dev/null
+    N="$(_release_acquire_boot)" || return 1
+    assert_lane_exists "$N" || return 1
+    port="$(pool_lease_field "$N" port 2>/dev/null)" || port=""
+    session="$(pool_lease_field "$N" session 2>/dev/null)" || session="abpool-$N"
+    [[ "$port" =~ ^[0-9]+$ && "$port" != "0" ]] \
+        || { _fail "lane $N not booted (port='$port')"; return 1; }
+    # Precondition: a freshly-booted lane has connected=true (pool_boot_lane step f).
+    assert_eq "true" "$(pool_lease_field "$N" connected)" \
+        "precondition: booted lane $N connected=true" || return 1
+
+    # (2) THE CONTRACT (S1): run `close` THROUGH the wrapper (pool_wrapper_main) so S1's
+    #     close→connected=false block fires end-to-end. The wrapper ends in exec → run it
+    #     in a SUBSHELL (exec replaces the subshell process; the real close detaches the
+    #     daemon and exits; the parent shell continues). Bounded by exec's determinism
+    #     (AGENTS.md §2; close is ms-fast). Owner env is inherited → find_mine reuses N.
+    ( pool_wrapper_main close ) >/dev/null 2>&1 || true
+    sleep 0.4   # let the daemon settle after the disconnect-only close (parity w/ test d)
+
+    # (3) Assert S1 fired: the lease now has connected=false (the post-close signal S2 reads).
+    assert_eq "false" "$(pool_lease_field "$N" connected)" \
+        "S1: close (via wrapper) marked lane $N connected=false" || return 1
+
+    # (4+5) THE CONTRACT (S2): pool_ensure_connected reads connected=false → SKIPS the
+    #       lingering pool_daemon_connected early-exit → curl (Chrome still alive) →
+    #       pool_daemon_connect RE-BINDS → connected=true → rc 0. (This is the self-heal
+    #       the wrapper's step h runs on the agent's NEXT driving command.)
+    pool_ensure_connected "$N" \
+        || { _fail "S2: pool_ensure_connected failed to rebind lane $N after close"; return 1; }
+    assert_eq "true" "$(pool_lease_field "$N" connected)" \
+        "S2: pool_ensure_connected rebound lane $N (connected false→true)" || return 1
+
+    # (6) Assert the daemon is GENUINELY bound (session in list + Chrome alive) — now
+    #     because pool_daemon_connect re-attached, NOT because of a lingering entry. (The
+    #     connected false→true transition above is the actual proof; this is the live-binding
+    #     sanity check.)
+    pool_daemon_connected "$session" "$port" \
+        || { _fail "daemon not genuinely bound after rebind (pool_daemon_connected rc!=0)"; return 1; }
+
+    # Cleanup is the runner's inter-body backstop (release all + kill owner); nothing extra.
+}
+
+# =============================================================================
 # _abpool_run_release_reaper_suite — the SINGLE-SETUP runner.
 #
 # ★★★ HARD CONSTRAINT: setup() is called EXACTLY ONCE for the whole file (NEVER per-test). ★★★
