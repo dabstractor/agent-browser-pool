@@ -169,21 +169,21 @@
           "type": "Milestone",
           "id": "P2.M3",
           "title": "Install Script Rewrite",
-          "status": "Complete",
+          "status": "Ready",
           "description": "Completely rewrite install.sh for the no-shadow model: three benign things — symlink agent-browser-pool, pre-create state dir, run doctor. No PATH shadowing, no ~/scripts, no cutover warning, no AGENT_BROWSER_POOL_DISABLE.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M3.T1",
               "title": "Rewrite install.sh for no-shadow model",
-              "status": "Complete",
+              "status": "Ready",
               "description": "Replace the 221-line PATH-shadowing cutover installer with a ~60-line benign installer per PRD §2.17.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M3.T1.S1",
                   "title": "Complete rewrite of install.sh — no PATH shadowing, no cutover",
-                  "status": "Complete",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M2.T2.S1"
@@ -210,14 +210,14 @@
               "type": "Task",
               "id": "P2.M4.T1",
               "title": "Rewrite SKILL.md for explicit invocation model",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Complete rewrite of .agents/skills/agent-browser-pool/SKILL.md. All examples change from `agent-browser <verb>` to `agent-browser-pool <verb>`. Remove transparent-wrapper language. Teach the invariant command model.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M4.T1.S1",
                   "title": "Complete rewrite of SKILL.md — agent-browser-pool as sole command",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M2.T1.S1",
@@ -238,14 +238,14 @@
               "type": "Task",
               "id": "P2.M4.T2",
               "title": "Update configuration.md reference",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Remove AGENT_BROWSER_POOL_DISABLE, update AGENT_CHROME_MASTER default, update dispatch table and troubleshooting matrix for the no-shadow model.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M4.T2.S1",
                   "title": "Update configuration.md — remove DISABLE, fix master default, update dispatch",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1",

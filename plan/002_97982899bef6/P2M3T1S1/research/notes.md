@@ -5,7 +5,47 @@
 P2.M2.T2.S1; bin/agent-browser-pool is the sole entry point with `*) pool_wrapper_main "$@"`
 dispatch already in place from P2.M2.T1.S1). lib/pool.sh is the POST-P2.M1 version (DISABLE
 removed, no-pi-ancestor fail-fast, `_pool_preflight_real_bin` present).
-**Scope**: ONE file — `install.sh` — rewritten in place. Nothing else touched.
+**Scope**: ONE file — `install.sh`. Nothing else touched.
+
+---
+
+## 0. ⚠️ DISCOVERY (supersedes the “current = 221-line cutover” premise in §1 below)
+
+`git log -- install.sh` shows the rewrite was **already performed** and is in HEAD:
+
+```
+7926c44 Replace cutover installer with benign setup      ← HEAD (NEW benign install.sh)
+05853c1 Add deliberate cutover installer with YES gate   ← the old 221-line cutover version
+```
+
+The **current** `install.sh` on disk (== HEAD, **105 lines**, `git status` clean) is **already
+the benign, no-shadow installer** — NOT the 221-line cutover version described in §1. Verified
+against the contract: all three benign things present (symlink / `pool_state_init` / doctor
+subprocess); all OLD mechanisms absent (`AGENT_BROWSER_POOL_DISABLE`, `~/scripts`, `Type YES`,
+`command -v agent-browser`, `_path_parts`, `warn()`); both flags present; Mode-A success message
+present; `bash -n` exit 0; never references the deleted shim.
+
+**The ONE open defect**: `shellcheck -s bash install.sh` **exits 1** with `SC1091` (info) on
+`source "$REPO_DIR/lib/pool.sh"` (line 60). The committed file has `# shellcheck source=lib/pool.sh`
+(line 59) but is **MISSING** `# shellcheck disable=SC1091`. → **contract step l fails.**
+
+**Fix (verified on host)**: insert one directive line between `source=` and `source`:
+
+```bash
+# shellcheck source=lib/pool.sh
+# shellcheck disable=SC1091   # source path is dynamic; lib/pool.sh verified present above
+source "$REPO_DIR/lib/pool.sh"
+```
+
+With both directives, `shellcheck -s bash install.sh` exits 0 (verified). The canonical artifact
+in the PRP (87 lines) embeds this fix and additionally aligns wording with PRD §2.17 (“shadowing”);
+it is behavior-identical to the committed version.
+
+**Implication for the PRP**: the “complete rewrite” is essentially DONE. The remaining
+deliverable is (1) the one-line SC1091 fix (Path A, surgical) or a full canonical replace
+(Path B), and (2) conformance verification. §1–§7 below remain accurate as *background* on what
+the OLD cutover installer contained and why each element was removed — but the “current state”
+in §1 describes the pre-`7926c44` file, not HEAD.
 
 ---
 
