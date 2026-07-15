@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P2.M1",
           "title": "Core Library Cleanup (lib/pool.sh)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Remove the POOL_DISABLE mechanism, change the no-pi-ancestor behavior from passthrough to fail-fast, and add a preflight check for the real agent-browser binary. All changes are in the shared library that every downstream component depends on.",
           "tasks": [
             {
@@ -82,14 +82,14 @@
               "type": "Task",
               "id": "P2.M1.T3",
               "title": "Update pool_admin_help text for new model",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Remove AGENT_BROWSER_POOL_DISABLE from help output, add driving command documentation, and update the description to reflect that agent-browser-pool handles both pool verbs and driving commands.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T3.S1",
                   "title": "Update pool_admin_help: remove DISABLE, add driving commands section",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M1.T1.S1"
@@ -116,14 +116,14 @@
               "type": "Task",
               "id": "P2.M2.T1",
               "title": "Update bin/agent-browser-pool dispatch to route driving commands",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Change the '*' branch in bin/agent-browser-pool's case statement from erroring ('Unknown command') to calling pool_wrapper_main, making it handle both pool verbs and driving commands as the sole entry point.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M2.T1.S1",
                   "title": "Change '*' branch from error to pool_wrapper_main dispatch",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M1.T1.S2",
