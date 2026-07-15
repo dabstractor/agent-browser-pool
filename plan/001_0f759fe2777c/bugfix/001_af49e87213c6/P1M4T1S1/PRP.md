@@ -288,8 +288,30 @@ Not applicable — no code, no schema, no globals. This is a prose edit to a mar
 > Each task gives the EXACT `oldText` (unique in README.md — locate by it, not by line number)
 > and the `newText`. Apply with the `edit` tool. All 7 edits are independent and
 > non-overlapping; they may be applied in a single `edit` call with 7 entries OR one call each.
+>
+> **CRITICAL — IDEMPOTENCY (parallel-execution safety):** a concurrent process may have
+> ALREADY applied some/all of these edits (observed: a parallel run landed all 7 verbatim
+> while the PRP was being written). **Task 0 MUST run first** to classify the current state;
+> any edit whose `newText` is ALREADY present is a NO-OP (skip it — do not error). Any edit
+> whose `oldText` is still present is applied normally. This makes the task safe whether the
+> README is pre-edit, fully-edited, or partially-edited.
 
 ```yaml
+Task 0: PRE-CHECK — classify each site's current state (idempotency gate — RUN FIRST)
+  - RUN: for each of the 7 sites, grep for the NEW (post-edit) text. If present → ALREADY
+        DONE (skip that edit). Else grep for the OLD text. If present → APPLY. Else → the
+        site is in an UNEXPECTED state → STOP and report (do NOT guess).
+  - ONE-LINER that lists which OLD-text markers still remain (empty output = all 7 done):
+        grep -nE 'AGENT_CHROME_ALLOW_SLOW_COPY=1"\.|is `AGENT_BROWSER_POOL_DISABLE=1`\.|AGENT_BROWSER_POOL_DISABLE=1` makes|^- `AGENT_BROWSER_POOL_DISABLE=1` \(safety valve\)|plugin`\), which need no lane;|AGENT_BROWSER_POOL_DISABLE=1` is set in that shell' README.md || echo "ALL 7 EDITS ALREADY APPLIED (no-op)"
+  - ONE-LINER that lists which NEW-text markers are present (count up to 7):
+        grep -cE 'ALLOW_SLOW_COPY` \(to `1`/`true`/`yes`/`on`\)|POOL_DISABLE` \(set to `1`/`true`/`yes`/`on`\)|# 1/true/yes/on all work|is set to a truthy value|bare invocation with no subcommand|is set \(to a truthy value\) in that shell' README.md
+  - EXPECT: the two counts sum to 7 (each site is either DONE or PENDING). If the OLD-grep is
+        empty → ALL DONE → skip Tasks 1–7, go straight to Task 8 (verify). If a site matches
+        NEITHER old nor new → unexpected state → STOP + report (someone restructured the prose).
+  - NOTE: if ALL 7 are already applied, the implementer's deliverable is reduced to the Task 8
+        verification (confirm the diff is exactly the 7 hunks + the 3 hands-off sites untouched).
+        That is a CORRECT, complete outcome — the PRP is idempotent by design.
+
 Task 1 (Issue 1) — Prerequisites item 1 (line ~33): AGENT_CHROME_ALLOW_SLOW_COPY
   - oldText: '   copy unless you set `AGENT_CHROME_ALLOW_SLOW_COPY=1`.'
   - newText: '   copy unless you set `AGENT_CHROME_ALLOW_SLOW_COPY` (to `1`/`true`/`yes`/`on`).'
@@ -339,6 +361,7 @@ Task 7 (Issue 1) — Troubleshooting "It didn't do anything" (line ~337): AGENT_
   - oldText: 'ancestor), or `AGENT_BROWSER_POOL_DISABLE=1` is set in that shell.'
   - newText: 'ancestor), or `AGENT_BROWSER_POOL_DISABLE` is set (to a truthy value) in that shell.'
   - WHY: diagnostic text implied only =1; "is set (to a truthy value)" is accurate + concise.
+  - SKIP IF the NEW text (`is set (to a truthy value) in that shell`) is already present (Task 0).
 
 Task 8: VERIFY (run before claiming done — every command must pass; see Validation Loop)
   - RUN: the Level 1 + Level 2 grep assertions.
