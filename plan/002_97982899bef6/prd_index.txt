@@ -1,0 +1,31 @@
+h1.0 PRD & Technical Spec — agent-browser-pool
+ h2.0 1. Product Requirements
+  h3.0 1.1 Background
+  h3.1 1.2 The model (ephemeral profiles copied from a source)
+  h3.2 1.3 Goals
+  h3.3 1.4 Non-goals
+  h3.4 1.5 User stories
+ h2.1 2. Technical Spec
+  h3.5 2.1 Components (two binaries + one lib)
+  h3.6 2.2 Hard rule: resolve every path; never pass ~ to a subprocess
+  h3.7 2.3 Ephemeral dir location  [OPEN — see Open items]
+  h3.8 2.4 Request lifecycle (the pool entry, per invocation)
+  h3.9 2.5 Release semantics
+  h3.10 2.6 Chrome launch (per lane)
+  h3.11 2.7 Copy / source-profile hygiene
+  h3.12 2.8 Lease data model (lanes/<N>.json)
+  h3.13 2.9 Pool exhaustion  [IQ2 = block-with-timeout + alert]
+  h3.14 2.10 Reaper  [IQ3 = lazy, on acquire]
+  h3.15 2.11 Discovery & configuration
+  h3.16 2.12 CLI — agent-browser-pool (pool verbs + driving router)
+  h3.17 2.13 Safety & identity rules (carried from the prior skill, non-negotiable)
+  h3.18 2.14 Failure modes & recovery
+  h3.19 2.15 Invocation checklist (the contract the skill teaches)
+  h3.20 2.16 Dependencies (all verified present on this host)
+  h3.21 2.17 Install (no cutover danger)
+  h3.22 2.18 Testing & validation
+  h3.23 2.19 Implementation notes (gotchas for the implementer)
+ h2.2 3. Repository layout (planned)
+ h2.3 4. Decisions (all resolved)
+---
+code:6 para:13 list:21 table:2
