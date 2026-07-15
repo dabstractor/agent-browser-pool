@@ -3536,6 +3536,27 @@ pool_force_session() {
     return 0
 }
 
+# _pool_preflight_real_bin
+#
+# PRD §2.16 enforcement (b): the real agent-browser binary ($POOL_REAL_BIN, frozen by
+# pool_config_init) is a HARD runtime dependency — every driving call exec's it, and meta
+# commands (skills/--version/…) exec it too. Fail FAST with an actionable message if it is
+# missing or non-executable, instead of booting a lane we can't drive (or exec'ing a bad
+# path). The per-invocation counterpart to `doctor`'s [binary] check (§2.16 (a)).
+#
+# PRECONDITION: pool_config_init has frozen $POOL_REAL_BIN (called as the tail of step a in
+#   pool_wrapper_main, BEFORE dispatch/owner/lane work — so it guards BOTH driving + meta).
+# RETURNS: 0 if the binary exists and is executable; otherwise it NEVER returns (pool_die).
+#   Same rc contract as pool_config_init / pool_state_init → the caller uses NO if-guard.
+_pool_preflight_real_bin() {
+    if [[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]; then
+        return 0
+    fi
+    pool_die "agent-browser-pool: the real agent-browser binary is missing or not executable:" \
+             "$POOL_REAL_BIN" \
+             "Install agent-browser >= 0.28, or set AGENT_BROWSER_REAL to the correct path."
+}
+
 # =============================================================================
 # Wrapper shim — complete lifecycle (P1.M6.T3.S1)
 # =============================================================================
@@ -3568,7 +3589,8 @@ pool_force_session() {
 # RC TAXONOMY (which helpers need an `if`/`||` guard under set -e):
 #   rc 0 ALWAYS (no guard):  pool_dispatch_classify, pool_normalize_close/connect,
 #                            pool_strip_session_args, pool_config_init, pool_state_init,
-#                            pool_owner_resolve (config/state/owner pool_die on FATAL misconfig)
+#                            _pool_preflight_real_bin, pool_owner_resolve
+#                            (config/state/preflight/owner pool_die on FATAL misconfig)
 #   rc 0/1 NON-FATAL (guard): pool_lease_find_mine, pool_acquire_locked, pool_wait_for_lane,
 #                            pool_lease_field, pool_force_session
 #   rc 0/1, rc 1 ⇒ lane GONE: pool_boot_lane      (rc 1 ⇒ _pool_release_lane_internals already ran)
@@ -3602,6 +3624,9 @@ pool_wrapper_main() {
     # state idempotently mkdirs lanes/ + touches acquire.lock.
     pool_config_init
     pool_state_init
+    # preflight (PRD §2.16b): real agent-browser binary must exist + be executable, else
+    # fail fast on EVERY invocation (driving + meta) before any lane/dispatch work.
+    _pool_preflight_real_bin
 
     # --- c. dispatch (step 0): meta → exec passthrough UNCHANGED -----------------
     # pool_dispatch_classify is rc 0 ALWAYS (no guard); prints exactly one token meta|driving.

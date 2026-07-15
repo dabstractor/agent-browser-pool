@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P2.M1",
           "title": "Core Library Cleanup (lib/pool.sh)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Remove the POOL_DISABLE mechanism, change the no-pi-ancestor behavior from passthrough to fail-fast, and add a preflight check for the real agent-browser binary. All changes are in the shared library that every downstream component depends on.",
           "tasks": [
             {
@@ -58,14 +58,14 @@
               "type": "Task",
               "id": "P2.M1.T2",
               "title": "Add preflight check for agent-browser binary on driving calls",
-              "status": "Researching",
+              "status": "Complete",
               "description": "PRD §2.16 requires 'a preflight in the pool entry on every driving call that fails fast with an actionable message rather than booting a lane it can't drive.' Add a _pool_preflight_real_bin() function and call it in pool_wrapper_main before lane logic.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T2.S1",
                   "title": "Add _pool_preflight_real_bin() function and call it in pool_wrapper_main",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S2"
@@ -82,14 +82,14 @@
               "type": "Task",
               "id": "P2.M1.T3",
               "title": "Update pool_admin_help text for new model",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Remove AGENT_BROWSER_POOL_DISABLE from help output, add driving command documentation, and update the description to reflect that agent-browser-pool handles both pool verbs and driving commands.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M1.T3.S1",
                   "title": "Update pool_admin_help: remove DISABLE, add driving commands section",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M1.T1.S1"
