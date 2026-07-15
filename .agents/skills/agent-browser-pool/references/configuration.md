@@ -16,7 +16,7 @@ passed to Chrome, `rm`, or a log. "Truthy" means `1`/`true`/`yes`/`on` (case-ins
 | Variable | Default | Meaning |
 |---|---|---|
 | `AGENT_BROWSER_POOL_STATE` | `~/.local/state/agent-browser-pool` | state dir: `lanes/<N>.json` leases, `acquire.lock`, `alerts.log`, `chrome-<N>.log`, `pool.log` |
-| `AGENT_CHROME_MASTER` | `~/.agent-chrome-profiles/master-profile` | static master template — CoW source. **Never launch, mutate, or delete.** |
+| `AGENT_CHROME_MASTER` | `${XDG_CONFIG_HOME:-~/.config}/google-chrome` | CoW source — your real Chrome user-data-dir. Agents copy current state on each acquire, so new logins propagate. May be live/in-use (PRD §2.7). **Never launch, mutate, or delete.** |
 | `AGENT_CHROME_EPHEMERAL_ROOT` | `~/.agent-chrome-profiles/active` | ephemeral lane dirs live at `<root>/<N>/` (deleted on release) |
 | `AGENT_BROWSER_REAL` | `~/.local/bin/agent-browser` | the REAL `agent-browser` CLI (called by absolute path; stays upgradable) |
 | `AGENT_CHROME_BIN` | `google-chrome-stable` | Chrome binary (bare name → `command -v`; a path → `-f -x`) |
@@ -25,12 +25,13 @@ passed to Chrome, `rm`, or a log. "Truthy" means `1`/`true`/`yes`/`on` (case-ins
 | `AGENT_BROWSER_POOL_WAIT` | `600` (10 min) | acquire block timeout (seconds) before force-reap + alert |
 | `AGENT_CHROME_HEADLESS` | unset = **windowed** | truthy → launch Chrome with `--headless=new` |
 | `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | truthy → permit a real (slow) ~4.8 GB copy per acquire |
-| `AGENT_BROWSER_POOL_DISABLE` | unset = **pooling active** | truthy → per-process passthrough (safety valve; see pitfalls) |
 
 The three that most affect behavior:
 
-- **`AGENT_BROWSER_POOL_DISABLE`** — the safety valve. Set it truthy in ONE shell and that
-  process bypasses pooling entirely (raw upstream tool, no lane). Per-process, not global.
+- **`AGENT_CHROME_MASTER`** — the CoW source, defaulting to your real Chrome user-data-dir
+  (`~/.config/google-chrome`). Agents copy it fresh on each acquire, so new logins/auth you
+  create in Chrome propagate to agents automatically. It may even be live/in-use (PRD §2.7).
+  Point it at a dedicated template if you want a fixed source instead.
 - **`AGENT_CHROME_ALLOW_SLOW_COPY`** — on non-btrfs the wrapper refuses the expensive copy
   by default; set this only if you accept a slow acquire.
 - **`AGENT_CHROME_HEADLESS`** — off by default (trusted profiles must look real; headless is
@@ -45,17 +46,25 @@ The three that most affect behavior:
 The wrapper classifies each invocation **before** touching a lane. Decisions (in order, first
 match wins) from `pool_wrapper_main`:
 
-1. `AGENT_BROWSER_POOL_DISABLE` truthy → **passthrough** (no lane, raw upstream).
-2. **meta** command → **passthrough** (no lane).
-3. No `pi` ancestor in the process tree → **passthrough** (human in a terminal).
-4. Otherwise → acquire/find your lane, then run the command against it.
+1. **meta** command → **passthrough** (no lane — the real binary runs unchanged).
+2. No `pi` ancestor in the process tree → **fail-fast**: `pool_die` with
+   "agent-browser-pool: driving commands require a pi ancestor (owning pi process). For raw
+   browser use without pooling, call 'agent-browser' directly."
+3. Otherwise → acquire/find your lane, then run the command against it.
 
 ### Meta commands (passthrough — never acquire a lane)
 
-- `--help`, `-h`, `--version`
+These reach the real `agent-browser` unchanged, without acquiring a lane:
+
+- `--version`
 - `skills`, `dashboard`, `plugin`, `mcp`
 - `session list`
-- A bare `agent-browser` with **no subcommand** (upstream prints help)
+- A flags-only invocation with no subcommand (e.g. `agent-browser-pool --json`) — upstream prints help/usage
+
+> `--help`, `-h`, and `help` are **pool verbs**, not meta-passthrough: the entry-point
+> dispatcher (`bin/agent-browser-pool`) catches them first and prints the pool's own help
+> (`pool_admin_help`), so they never reach the real binary. A bare `agent-browser-pool`
+> (no arguments) is also a pool verb — it defaults to `status`. See "Admin CLI" below.
 
 ### Driving commands (use your lane)
 
@@ -67,10 +76,10 @@ Everything else, including:
 
 ## How acquire works (the lifecycle)
 
-For a driving command under `pi` with pooling active:
+For a driving command under `pi`:
 
 ```
-agent-browser open <url>
+agent-browser-pool open <url>
  │ 1. resolve owning pi PID (walk ppid → comm == 'pi'); record (pid, starttime) identity
  ├─ already hold a lease for me?  → reuse my lane (skip boot)
  ├─ else acquire (under flock):
@@ -107,9 +116,9 @@ dir survive for reuse within the session.
 
 | Symptom | Likely cause | Fix / response |
 |---|---|---|
-| Wrong browser / no lane acquired | Passthrough: no `pi` ancestor, or `AGENT_BROWSER_POOL_DISABLE` truthy | Run under `pi`; `unset AGENT_BROWSER_POOL_DISABLE` |
+| Wrong browser / no lane acquired | Driving command run outside `pi` (no pi ancestor → fail-fast) | Run your browser work under `pi`; for raw browser use call `agent-browser` directly |
 | `connect <port>` "did nothing" | By design — the pool owns the connection and drops your arg | It worked; your lane is already connected. Use `agent-browser-pool status` to confirm |
-| `agent-browser` call hangs a long time | Pool exhausted (all lanes busy); self-healing reaper running | Wait; it reaps dead owners and force-reclaims after `AGENT_BROWSER_POOL_WAIT` (600s). Don't boot Chrome directly |
+| `agent-browser-pool` call hangs a long time | Pool exhausted (all lanes busy); self-healing reaper running | Wait; it reaps dead owners and force-reclaims after `AGENT_BROWSER_POOL_WAIT` (600s). Don't boot Chrome directly |
 | `close` didn't free my lane / Chrome still running | By design — `close` is disconnect-only; lane survives for reuse | End your session to release; or ask the operator to run `release <N>` |
 | Session logins/cookies didn't persist | Ephemeral profile is deleted on release, never written to master | By design — re-establish each session |
 | `status` shows my lane as `disconnected` | Daemon dropped but Chrome alive | Your next driving command re-binds automatically |

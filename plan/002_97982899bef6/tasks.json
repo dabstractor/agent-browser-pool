@@ -203,7 +203,7 @@
           "type": "Milestone",
           "id": "P2.M4",
           "title": "Skill & Reference Documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Rewrite the agent-facing skill docs (SKILL.md, configuration.md, README.md) to teach `agent-browser-pool <verb>` as the sole command. Remove all PATH-shadowing and AGENT_BROWSER_POOL_DISABLE references.",
           "tasks": [
             {
@@ -238,14 +238,14 @@
               "type": "Task",
               "id": "P2.M4.T2",
               "title": "Update configuration.md reference",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Remove AGENT_BROWSER_POOL_DISABLE, update AGENT_CHROME_MASTER default, update dispatch table and troubleshooting matrix for the no-shadow model.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M4.T2.S1",
                   "title": "Update configuration.md — remove DISABLE, fix master default, update dispatch",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P2.M1.T1.S1",
@@ -265,14 +265,14 @@
               "type": "Task",
               "id": "P2.M4.T3",
               "title": "Update skill README.md",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Update .agents/skills/agent-browser-pool/README.md to remove transparent-wrapper language and DISABLE references.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M4.T3.S1",
                   "title": "Update skill README.md for new model",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M4.T1.S1"
