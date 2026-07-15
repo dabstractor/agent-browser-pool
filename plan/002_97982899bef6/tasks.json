@@ -109,21 +109,21 @@
           "type": "Milestone",
           "id": "P2.M2",
           "title": "Entry Point & Binary Pivot",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Make bin/agent-browser-pool the SOLE entry point by adding driving-command dispatch to its case statement. Remove the old bin/agent-browser PATH-shadowing shim entirely.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M2.T1",
               "title": "Update bin/agent-browser-pool dispatch to route driving commands",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Change the '*' branch in bin/agent-browser-pool's case statement from erroring ('Unknown command') to calling pool_wrapper_main, making it handle both pool verbs and driving commands as the sole entry point.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M2.T1.S1",
                   "title": "Change '*' branch from error to pool_wrapper_main dispatch",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M1.T1.S2",
@@ -142,14 +142,14 @@
               "type": "Task",
               "id": "P2.M2.T2",
               "title": "Remove the old PATH-shadowing shim (bin/agent-browser)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Delete bin/agent-browser — the old PATH-shadowing wrapper shim. In the new model, ~/.local/bin/agent-browser is the REAL Vercel CLI (unshadowed), and there is no repo-level wrapper shim.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M2.T2.S1",
                   "title": "Delete bin/agent-browser and update bin/.gitkeep",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P2.M2.T1.S1"
