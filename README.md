@@ -1,123 +1,110 @@
 # `agent-browser-pool`
 
-A transparent PATH-shadowing wrapper around [Vercel's `agent-browser`](https://github.com/vercel/agent-browser)
-that gives every AI agent its own **dedicated, locked, trusted Chrome profile** for
-the lifetime of its session — with zero awareness that any pooling is happening —
-and guarantees the Chrome process **and** the profile are cleaned up when the agent
-finishes or crashes.
+**Dedicated Chrome profile lanes for AI agents, via a single invariant command.**
 
-- **Not a fork.** A thin bash wrapper + a `agent-browser-pool` admin tool. The real
-  `agent-browser` binary is called by absolute path and stays upgradable.
-- **Ephemeral profiles.** Each acquire **copy-on-writes** a fresh profile from a
-  master template (`~/.agent-chrome-profiles/master-profile`). On release the Chrome
-  is killed and the ephemeral profile dir is **deleted**. Because the pool lives on
-  **btrfs**, `cp --reflink=always` makes every copy instant and deduplicated.
-- **1 agent = 1 browser.** Mutual exclusion via filesystem leases keyed on the
-  owning `pi` process. The next agent gets the next free lane.
-- **Fully invisible to agents.** They just type `agent-browser …` as the upstream
-  skill teaches; the wrapper routes everything to their lane.
+`agent-browser-pool` gives every AI agent its own dedicated, locked Chrome profile for the
+lifetime of its session — a fresh, trusted profile copied from your real Chrome, isolated
+from every other agent, and cleaned up automatically when the agent finishes or crashes.
+Agents invoke it explicitly; nothing is intercepted and nothing is shadowed.
+
+- **Not a fork.** A thin bash wrapper + the `agent-browser-pool` CLI. The real
+  [`agent-browser`](https://github.com/vercel/agent-browser) is called by absolute path and
+  stays upgradable.
+- **Ephemeral profiles.** Each acquire **copy-on-writes** a fresh profile from your **real
+  Chrome profile** (default `~/.config/google-chrome`) and deletes it on release. Because the
+  pool lives on **btrfs**, `cp --reflink=always` makes every copy instant and deduplicated.
+- **1 agent = 1 browser.** Mutual exclusion via leases keyed on the owning `pi` process (and
+  its start time). The next agent gets the next free lane.
+- **Explicit invariant command.** Agents run `agent-browser-pool <verb> <args>`; the lane is
+  selected by the caller's process identity, never an argument. The command is identical on
+  lane 1 or lane 99.
 
 See **[PRD.md](./PRD.md)** for the full product requirements and technical spec.
 
 ## Status
 
-**MVP shipped** — transparent wrapper (`bin/agent-browser`), admin CLI
-(`agent-browser-pool`), and installer (`install.sh`) are all implemented and
-tested. See **Installation** below to set it up.
+**MVP V2 — explicit invocation model (no PATH shadowing).** The sole entry point
+(`bin/agent-browser-pool`), the shared lease library (`lib/pool.sh`), the installer
+(`install.sh`), and the agent skill (`.agents/skills/agent-browser-pool/`) are all implemented
+and tested. See **Installation** below to set it up.
 
 ## Prerequisites
 
-1. **btrfs** at the pool root (`~/.agent-chrome-profiles`). The pool copy-on-writes
-   the master profile per lane; btrfs makes each `cp --reflink=always` instant and
-   deduplicated. On a non-btrfs filesystem the wrapper **refuses** the slow 4.8 GB
-   copy unless you set `AGENT_CHROME_ALLOW_SLOW_COPY` (to `1`/`true`/`yes`/`on`).
-2. **Master template** at `~/.agent-chrome-profiles/master-profile` — a full Chrome
-   profile holding the identity every agent should start from (Google login,
-   Bitwarden, the `agent-browser` extension). **Never launch Chrome directly against
-   `master-profile`**: it is a static template. The wrapper CoW-copies it per lane
-   and strips its stale `Singleton*` locks.
-3. **`agent-browser` ≥ 0.28** at `~/.local/bin/agent-browser` (supplies `--session`,
-   `connect`, `get cdp-url`, and the `AGENT_BROWSER_SESSION` env var). It stays
-   upgradable — the wrapper calls it by absolute path, so updating the binary just
-   works.
+1. **btrfs** at the pool root (`~/.agent-chrome-profiles/active`). The pool copy-on-writes a
+   profile per lane; btrfs makes each `cp --reflink=always` instant and deduplicated. On a
+   non-btrfs filesystem the pool **refuses** the ~4.8 GB copy unless you set
+   `AGENT_CHROME_ALLOW_SLOW_COPY` (to `1`/`true`/`yes`/`on`).
+2. **A real Chrome profile** at `~/.config/google-chrome` (or point `AGENT_CHROME_MASTER` at
+   any user-data-dir). It holds the identity every agent should start from (Google login,
+   password manager, the `agent-browser` extension). It **may be live/in-use** — agents CoW
+   a snapshot each acquire, so new logins propagate to the next lane automatically. The pool
+   treats it as **read-only**: it is never launched, written, or deleted.
+3. **`agent-browser` ≥ 0.28** at `~/.local/bin/agent-browser` — a hard runtime dependency. It
+   supplies `--session`, `connect`, `get cdp-url`, and the `AGENT_BROWSER_SESSION` env var. It
+   stays upgradable: the pool calls it by absolute path, so updating the binary just works.
 4. **`google-chrome-stable`** (or whatever `$AGENT_CHROME_BIN` points at).
 
-A handful of coreutils/util-linux tools are also required (`flock`, `setsid`,
-`pgrep`, `pkill`, `cp`, `curl`, `jq`; `notify-send` is optional). Run
-`agent-browser-pool doctor` to verify the whole stack — see
-[Admin commands](#admin-commands).
+A handful of coreutils/util-linux/procps tools are also required (`flock`, `setsid`, `pgrep`,
+`pkill`, `cp`, `curl`, `jq`; `notify-send` is optional). Run `agent-browser-pool doctor` to
+verify the whole stack — see [Admin commands](#admin-commands).
 
 ## Installation
 
-`install.sh` is the cutover installer. It symlinks `bin/agent-browser` →
-`~/scripts/agent-browser` (which **precedes** `~/.local/bin` on your `PATH`, so the
-wrapper **shadows** the real CLI process-wide), symlinks `bin/agent-browser-pool` →
-`~/.local/bin/agent-browser-pool`, pre-creates the pool state dir, and runs `doctor`
-to verify dependencies.
+`install.sh` does **three benign things** — there is **no PATH interception**, so installing
+**cannot disrupt running agents** (lane selection is by caller identity, never a PATH rewrite):
 
-> **Cutover warning (read before installing).** This is **all-or-nothing**: the
-> PATH-shadowing mechanism has no safe partial mode, and the only per-session opt-out
-> is `AGENT_BROWSER_POOL_DISABLE` (set to `1`/`true`/`yes`/`on`). Once installed, **running agents on the OLD
-> workflow are silently intercepted** — their next `agent-browser` call is routed to
-> a fresh ephemeral lane, abandoning any in-progress work on persistent profiles. Do
-> not install while critical agents are mid-task.
-
-Because the cutover is deliberate and not automatic, `install.sh` prints the warning
-above and asks you to type `YES`:
+1. symlinks `bin/agent-browser-pool` → `~/.local/bin/agent-browser-pool` (the sole entry point);
+2. pre-creates the pool state dir (`lanes/` + `acquire.lock`);
+3. runs `doctor` to verify the real `agent-browser` ≥ 0.28, Chrome, btrfs, and the source
+   profile.
 
 ```bash
-./install.sh            # prints the cutover warning, asks you to type YES
-./install.sh --force    # scripted / re-install (skips the YES prompt)
-./install.sh --help     # show help
+./install.sh            # symlink + state dir + doctor (benign; no confirmation needed)
+./install.sh --help     # show help (note: --force / -f exists but is a no-op)
 ```
 
-**Test before cutover** by invoking the wrapper **by absolute path** — this
-exercises every line of logic *without* touching the PATH-resolved `agent-browser`
-that running agents use:
+**Uninstall:** remove the one symlink (the repo files and state dir are untouched):
 
 ```bash
-<repo>/bin/agent-browser open https://example.com
+rm -f ~/.local/bin/agent-browser-pool
 ```
 
-**Uninstall:** remove the two symlinks (the repo files and state dir are untouched):
-
-```bash
-rm -f ~/scripts/agent-browser ~/.local/bin/agent-browser-pool
-```
-
-See [PRD.md §2.17](./PRD.md) for the full cutover & coexistence rationale.
+See [PRD.md §2.17](./PRD.md) for why installation is non-disruptive (no PATH interception).
 
 ## Usage (for agents)
 
-Just type `agent-browser …` exactly as the upstream skill teaches. The wrapper
-routes every call to your locked ephemeral lane. You cannot tell pooling is
-happening, and you cannot escape your own lane or harm another agent's lane:
+The command is `agent-browser-pool <verb> <args>`. The lane is selected by your process
+identity (your owning `pi` process and its start time) — **the command never names a lane**,
+and you cannot escape your own lane or harm another agent's:
 
-- `agent-browser open https://example.com` — your lane, the same browser for the
-  whole session.
-- `agent-browser connect <anything>` — routes to **your** lane (the argument is
-  ignored).
-- `agent-browser --session <X> …` — forced to `abpool-<N>` for your lane.
-- `agent-browser close [--all]` — disconnects **your** lane's daemon only (the
-  lane, Chrome, and ephemeral dir survive for reuse). It is **not** a release.
+- `agent-browser-pool open https://example.com` — your lane, the same browser for the whole
+  session.
+- `agent-browser-pool connect <anything>` — routes to **your** lane (the argument is ignored).
+- `agent-browser-pool --session <X> …` — `--session` is stripped and forced to `abpool-<N>`
+  for your lane (you never type this).
+- `agent-browser-pool close [--all]` — disconnects **your** lane's daemon only (the lane,
+  Chrome, and ephemeral dir survive for reuse). It is **not** a release.
 
 ```bash
-agent-browser open https://example.com     # your lane, same browser for the session
+agent-browser-pool open https://example.com     # your lane, same browser for the session
 ```
 
-> **Note for humans:** from a plain terminal with **no `pi` ancestor**, the wrapper
-> passes through to the real `agent-browser` with no lane magic — so the operator
-> can still run `agent-browser` normally in a shell. See
-> [How it works](#how-it-works-30-second-version).
+> **Driving commands require a `pi` ancestor.** From a plain terminal with no `pi` ancestor, a
+> driving command **fails fast** with an actionable message — by design. Run browser work
+> under `pi`, or call `agent-browser` directly for raw access without pooling. Pool verbs
+> (`status` / `doctor` / `reap` / `release` / `help`) and META commands work from any shell.
+> See [How it works](#how-it-works).
 
-The transparency contract (PRD.md §2.15): *an agent that has never heard of this
-pool behaves exactly as the upstream skill intends, with no setup and no special
-invocation.*
+For the full procedural contract (acquire lifecycle, reuse rules, teardown semantics), read
+the agent skill at **[`.agents/skills/agent-browser-pool/SKILL.md`](./.agents/skills/agent-browser-pool/SKILL.md)**.
 
-## Admin commands
+## Commands
 
-`agent-browser-pool` is the admin tool for the **human operator**. With no command
-given, `status` is assumed.
+`agent-browser-pool` is the sole command for **both** the operator-facing pool verbs **and**
+agent driving commands. With no command given, `status` is assumed. (This mirrors
+`agent-browser-pool help`.)
+
+### Pool verbs (operator / read-only — work from any shell)
 
 ```bash
 agent-browser-pool               # status (the default)
@@ -129,6 +116,31 @@ agent-browser-pool doctor
 agent-browser-pool help          # aliases: --help, -h
 ```
 
+### Driving commands (agent — routed to your own lane)
+
+Any token that is **not** a pool verb is treated as a **driving** command and routed to your
+own locked lane (chosen by your identity, never an argument). The real `agent-browser` runs
+against your lane:
+
+```bash
+agent-browser-pool open https://example.com   # open a URL in your lane
+agent-browser-pool screenshot                  # capture a screenshot
+agent-browser-pool close                      # disconnect your lane daemon (lane + profile survive)
+agent-browser-pool get cdp-url                # every other real agent-browser verb works the same way
+agent-browser-pool click | type | eval | find | ...
+```
+
+You never pass a lane, port, or session.
+
+> **Classification detail.** A few tokens are **META** and pass through to the real
+> `agent-browser` unchanged, acquiring no lane: `--version`; the subcommands `skills`,
+> `dashboard`, `plugin`, `mcp`; `session list`; and a flags-only invocation with no
+> subcommand (e.g. `agent-browser-pool --json`). Note that `--help` / `-h` / `help` are
+> **pool verbs** (they print this tool's help and never reach the real binary), and a bare
+> `agent-browser-pool` with no args defaults to `status`.
+
+## Admin commands
+
 ### `status` (default)
 
 Prints a read-only table of all active lanes. Empty pool prints `No active lanes.`
@@ -138,13 +150,13 @@ LANE   PORT SESSION           OWNER_PID OWNER_CWD                CHROME_PID   AG
    1  53420 abpool-1             836725 ~/projects/my-agent           104816 2m13s live
 ```
 
-`STATE` is one of: `live` (Chrome reachable) · `disconnected` (lane leased but the
-daemon dropped) · `STALE` (lease row missing/corrupt — fields show `?`).
+`STATE` is one of: `live` (Chrome reachable) · `disconnected` (lane leased but the daemon
+dropped) · `STALE` (lease row missing/corrupt — fields show `?`).
 
 ### `reap`
 
-Tear down lanes whose owning `pi` process has died (kill the Chrome process group,
-delete the ephemeral profile dir, remove the lease). Always exits 0.
+Tear down lanes whose owning `pi` process has died (kill the Chrome process group, delete the
+ephemeral profile dir, remove the lease). Always exits 0.
 
 ```
 No stale lanes found.
@@ -155,8 +167,8 @@ Reaped 2 stale lane(s).
 
 ### `release [<N>|all]`
 
-Explicitly tear down one lane by number, or every lane. With no/invalid argument it
-prints a usage block to stderr and exits 1.
+Explicitly tear down one lane by number, or every lane. With no/invalid argument it prints a
+usage block to stderr and exits 1.
 
 ```
 Released lane 1.
@@ -173,121 +185,112 @@ No active lanes to release.        # `release all` on an empty pool
 
 ### `doctor`
 
-Diagnose the pool. Checks dependencies, the real binary, the filesystem (btrfs),
-the master profile, and reconciles leases against live Chromes and ephemeral dirs.
-Exits `0` if healthy, `1` if any check fails. Sections, in order:
+Diagnose the pool. Checks dependencies, the real binary, the filesystem (btrfs), the
+source/master profile, and reconciles leases against live Chromes and ephemeral dirs. Exits
+`0` if healthy, `1` if any check fails. Sections, in order:
 
 ```
 [dependencies]   flock, setsid, pgrep, pkill, cp, curl, jq, chrome → OK / MISSING;
                  notify-send → OK / MISSING (optional)
 [binary]         the real agent-browser → OK / FAIL
 [filesystem]     ephemeral root → OK (btrfs) / WARN (non-btrfs + slow-copy allowed) / FAIL
-[master]         master profile → OK / FAIL
+[master]         the source/master profile (your real Chrome dir, $AGENT_CHROME_MASTER) → OK / FAIL
 [lanes]          per lease → OK / WARN (LEAK, DISCONNECTED, PROVISIONAL)
 [dirs]           per numeric dir → WARN (ORPHAN DIR) / "(N dir(s), all leased)"
 [summary]        OK=N  WARN=N  FAIL=N  +  "Healthy."  (or "Problems found.")
 ```
 
-A healthy summary:
+The `[master]` section label is unchanged from earlier versions, but it now checks your
+**real** Chrome user-data-dir (default `~/.config/google-chrome`, or whatever
+`$AGENT_CHROME_MASTER` points at) exists and is non-empty — it is the copy-on-write source,
+read-only to the pool. A healthy summary:
 
 ```
   OK=14  WARN=0  FAIL=0
   Healthy.
 ```
 
-See [PRD.md §2.12](./PRD.md) for the command list and §2.14 for the failure modes
-each command fixes.
+See [PRD.md §2.12](./PRD.md) for the command list and §2.14 for the failure modes each
+command fixes.
 
 ## Configuration reference
 
-All configuration is via environment variables and **all are optional**. Every path
-is resolved to an **absolute** path before any subprocess — a bare `~` is never
-emitted to Chrome, `rm`, or a log file. The table below matches
-`agent-browser-pool --help` exactly.
+All configuration is via environment variables and **all are optional**. Every path is
+resolved to an **absolute** path before any subprocess — a bare `~` is never emitted to
+Chrome, `rm`, or a log file. The table below matches `agent-browser-pool help` / the shipped
+`pool_config_init` defaults exactly.
 
 | Env var | Default | Meaning |
 |---|---|---|
-| `AGENT_BROWSER_POOL_STATE` | `~/.local/state/agent-browser-pool` | state dir (lease store `lanes/`, `acquire.lock`, `alerts.log`, `chrome-<N>.log`, `pool.log`) |
-| `AGENT_CHROME_MASTER` | `~/.agent-chrome-profiles/master-profile` | static master template (CoW source; never launched/mutated/deleted) |
-| `AGENT_CHROME_EPHEMERAL_ROOT` | `~/.agent-chrome-profiles/active` | ephemeral lane dirs live at `<root>/<N>/` |
+| `AGENT_BROWSER_POOL_STATE` | `~/.local/state/agent-browser-pool` | state dir (`lanes/`, `acquire.lock`, `alerts.log`, `chrome-<N>.log`, `pool.log`) |
+| `AGENT_CHROME_MASTER` | `~/.config/google-chrome` (your **real** Chrome user-data-dir) | CoW source profile; **read-only** to the pool; may be live/in-use |
+| `AGENT_CHROME_EPHEMERAL_ROOT` | `~/.agent-chrome-profiles/active` | ephemeral lane dirs live at `<root>/<N>/`; deleted on release |
 | `AGENT_BROWSER_REAL` | `~/.local/bin/agent-browser` | the REAL `agent-browser` CLI (called by absolute path; stays upgradable) |
 | `AGENT_CHROME_BIN` | `google-chrome-stable` | Chrome binary (bare name → `command -v`; a path → `-f -x`) |
 | `AGENT_CHROME_PORT_BASE` | `53420` | lowest pool TCP port |
 | `AGENT_CHROME_PORT_RANGE` | `1000` | number of ports in the pool → range `[53420, 54420)` |
 | `AGENT_BROWSER_POOL_WAIT` | `600` (10 min) | acquire block timeout (seconds) before force-reap + alert |
 | `AGENT_CHROME_HEADLESS` | unset = **windowed** | set to `1`/`true`/`yes`/`on` to launch Chrome with `--headless=new` |
-| `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | set to `1`/`true`/`yes`/`on` to permit a real (slow) 4.8 GB copy per acquire |
-| `AGENT_BROWSER_POOL_DISABLE` | unset = **pooling active** | `1`/`true`/`yes`/`on` = per-process passthrough (safety valve — see below) |
+| `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | set to `1`/`true`/`yes`/`on` to permit a real (slow) ~4.8 GB copy per acquire |
 
 Three vars shape behavior most:
 
-- **`AGENT_BROWSER_POOL_DISABLE`** — the safety valve; see [Safety valve](#safety-valve).
-- **`AGENT_CHROME_ALLOW_SLOW_COPY`** — on a non-btrfs filesystem the wrapper refuses
-  the expensive copy by default; set this only if you accept a slow acquire.
-- **`AGENT_CHROME_HEADLESS`** — off by default (trusted profiles must look real;
-  headless is detectable). Set for headless/server hosts.
+- **`AGENT_CHROME_MASTER`** — the CoW source. Defaults to your real Chrome user-data-dir so
+  agents start from your current auth with no separate template. Point it at a dedicated
+  profile dir if you prefer. It is treated as read-only and may be live/in-use.
+- **`AGENT_CHROME_ALLOW_SLOW_COPY`** — on a non-btrfs filesystem the pool refuses the
+  expensive copy by default; set this only if you accept a slow acquire.
+- **`AGENT_CHROME_HEADLESS`** — off by default (trusted profiles must look real; headless is
+  detectable). Set for headless/server hosts.
 
 > **Test-only hooks** (not for users): `AGENT_BROWSER_POOL_OWNER_PID` and
-> `AGENT_BROWSER_POOL_OWNER_STARTTIME` let the test harness simulate distinct agent
-> owners without a real `pi` ancestor (PRD.md §2.18). Do not set these in normal use.
+> `AGENT_BROWSER_POOL_OWNER_STARTTIME` let the test harness simulate distinct agent owners
+> without a real `pi` ancestor (PRD.md §2.18). Do not set these in normal use.
 
-## Safety valve
+For the full dispatch table, acquire lifecycle, and a troubleshooting matrix, see
+**[`.agents/skills/agent-browser-pool/references/configuration.md`](./.agents/skills/agent-browser-pool/references/configuration.md)**.
 
-`AGENT_BROWSER_POOL_DISABLE` (set to `1`/`true`/`yes`/`on`) makes **this process** pass through to the real
-`agent-browser` with **no pooling** — no lane, no ephemeral profile, no interception.
-It is per-process (exported into one shell), not global. Use it for cutover
-coexistence (stay on the old workflow) or for debugging.
+## How it works
 
-```bash
-export AGENT_BROWSER_POOL_DISABLE=1   # 1/true/yes/on all work; per-process (not global)
-agent-browser open https://example.com    # real ~/.local/bin/agent-browser, no lane
-```
-
-See [PRD.md §2.17](./PRD.md) (cutover & coexistence) and
-[Installation](#installation) above.
-
-## How it works (30-second version)
-
-The wrapper decides per invocation. It **passes through unchanged** when any of
-these is true — otherwise it runs the lane lifecycle below:
-
-- `AGENT_BROWSER_POOL_DISABLE` is set to a truthy value (`1`/`true`/`yes`/`on`) — the safety valve;
-- the command is a **META** command (`skills`, `--help`, `--version`, `session
-  list`, `dashboard`, `plugin`) **or a bare invocation with no subcommand**
-  (upstream just prints help), which need no lane;
-- there is **no `pi` ancestor** — a human in a terminal gets the raw upstream tool.
+On each invocation, `agent-browser-pool` classifies the command, then either runs a pool verb,
+passes a META command through to the real binary, or runs the lane lifecycle for a driving
+command:
 
 ```
-agent-browser open https://example.com        ← agent types this, nothing else
-   │ wrapper walks ppid → owning pi PID  (stable across the agent's bash calls)
-   ├─ already holds a lease?  reuse my lane
-   ├─ else acquire:  reap stale  →  reuse-orphan OR  cp --reflink master→ephemeral
-   │                  →  launch Chrome (anti-throttle flags)  →  connect daemon
-   ├─ force AGENT_BROWSER_SESSION=abpool-<N>   (so every later call routes here)
-   └─ exec the real agent-browser  with original args   (process replacement)
+agent-browser-pool open https://example.com        ← agent types this, nothing else
+   │ 1. classify:
+   │      pool verb (status/reap/release/doctor/help)?  → run it (no lane)
+   │      META (--version, skills, dashboard, plugin, mcp, session list, flags-only)?
+   │                                                     → passthrough to the real binary (no lane)
+   │ 2. else DRIVING:
+   │      resolve owning pi PID + starttime; no pi ancestor → FAIL-FAST (not passthrough)
+   ├─ already hold my lease?  reuse my lane
+   ├─ else acquire:  reap stale  →  reuse-orphan OR  cp --reflink master(real Chrome)→ephemeral
+   │                  →  launch Chrome (setsid process group, anti-throttle flags)  →  connect daemon
+   ├─ strip any --session, force AGENT_BROWSER_SESSION=abpool-<N>
+   └─ exec the real agent-browser with the cleaned args   (process replacement)
 ```
 
-Full lifecycle ordering (`pool_wrapper_main`):
+Lane lifecycle ordering (`pool_wrapper_main`):
 
 1. config + state init;
-2. `POOL_DISABLE=1` → passthrough (exec real binary);
-3. META command → passthrough;
-4. no `pi` ancestor → passthrough (human terminal);
-5. find my lane (`pool_lease_find_mine`) or acquire (reap-stale → reuse-orphan →
-   boot/adopt);
-6. provisional lane (port 0) → boot it (copy + port + launch + connect); adopted
-   orphan (port > 0) → reuse as-is;
-7. `pool_ensure_connected` (reconnect if the daemon died);
-8. normalize `close`/`connect` args, strip any `--session`, force
+2. classify — pool verb? META command? → handled above (no lane);
+3. **driving command → resolve the owning `pi` process**; if there is no `pi` ancestor,
+   **fail fast** with an actionable error (by design — call `agent-browser` directly for raw
+   access);
+4. find my lane (`pool_lease_find_mine`) or acquire (reap-stale → reuse-orphan → boot/adopt);
+5. provisional lane (port 0) → boot it (copy + port + launch + connect); adopted orphan
+   (port > 0) → reuse as-is;
+6. `pool_ensure_connected` (reconnect if the daemon died);
+7. normalize `close`/`connect` args, strip any `--session`, force
    `AGENT_BROWSER_SESSION=abpool-<N>`;
-9. `exec` the real `agent-browser` with the cleaned args — terminal step.
+8. `exec` the real `agent-browser` with the cleaned args — terminal step.
 
-**Release** happens when the owning `pi` process exits (the next acquire reaps it),
-on explicit `agent-browser-pool release`, or on pool-exhaustion force-reap: kill the
-Chrome **process group**, `rm -rf` the ephemeral dir, drop the lease. There is **no
-idle TTL**. A crashed agent → its `pi` PID dies → next acquire reaps it. `close`
-mid-task is **disconnect-only**: the lane, Chrome, and ephemeral dir survive for
-reuse.
+**Release** happens when the owning `pi` process exits (the next acquire reaps it), on
+explicit `agent-browser-pool release`, or on pool-exhaustion force-reap: kill the Chrome
+**process group**, `rm -rf` the ephemeral dir, drop the lease. There is **no idle TTL**. A
+crashed agent → its `pi` PID dies → next acquire reaps it. `close` mid-task is
+**disconnect-only**: the lane, Chrome, and ephemeral dir survive for reuse.
 
 ## Troubleshooting
 
@@ -300,45 +303,46 @@ agent-browser-pool reap        # tear down lanes whose owner died
 agent-browser-pool release 1   # or: release all
 ```
 
+### Driving command errored: "requires a pi ancestor"
+
+**Symptom:** an `agent-browser-pool` driving command fails with a message like *"driving
+commands require a pi ancestor (owning pi process)."*
+
+**Cause:** by design. Driving commands acquire a lane keyed on your owning `pi` process; with
+no `pi` ancestor in the process tree, there is no identity to key the lease on, so the command
+**fails fast** rather than silently doing the wrong thing.
+
+**Fix:** run browser work under `pi` (e.g. inside a `pi` session), or — for raw browser use
+without pooling — call the real `agent-browser` directly. Pool verbs (`status`, `doctor`,
+`reap`, `release`, `help`) and META commands work from any shell.
+
 ### Pool exhaustion — an agent blocks, then force-reaps
 
-**Symptom:** an agent's `agent-browser` call blocks for a long time, then a lane is
-force-reclaimed and you get a desktop notification (`notify-send`) and a line in
+**Symptom:** an agent's driving call blocks for a long time, then a lane is force-reclaimed
+and you get a desktop notification (`notify-send`) and a line in
 `~/.local/state/agent-browser-pool/alerts.log`.
 
-**Cause:** all lanes are in use. The wrapper blocks up to `AGENT_BROWSER_POOL_WAIT`
-(600 s by default), re-running stale-reap each poll. On timeout it force-reclaims
-the oldest lane whose owner is actually dead and **alerts**. If even force-reap
-can't free a lane, the wrapper exits non-zero.
+**Cause:** all lanes are in use. The pool blocks up to `AGENT_BROWSER_POOL_WAIT` (600 s by
+default), re-running stale-reap each poll. On timeout it force-reclaims the oldest lane whose
+owner is actually dead and **alerts**. If even force-reap can't free a lane, the call exits
+non-zero.
 
-**Fix:** `agent-browser-pool reap` then `release all` to clear the pool, and
-**investigate the leak** — hitting the alert at all means sessions accumulated
-without cleanup. Tune `AGENT_BROWSER_POOL_WAIT` if your workload legitimately needs
-longer. See PRD.md §2.9.
+**Fix:** `agent-browser-pool reap` then `release all` to clear the pool, and **investigate the
+leak** — hitting the alert at all means sessions accumulated without cleanup. Tune
+`AGENT_BROWSER_POOL_WAIT` if your workload legitimately needs longer. See PRD.md §2.9.
 
 ### Leaks — orphan dirs, dead Chrome, stale leases
 
-**Symptom:** `doctor` reports `WARN` lines, or ephemeral dirs / Chrome processes
-outlive their agents.
+**Symptom:** `doctor` reports `WARN` lines, or ephemeral dirs / Chrome processes outlive their
+agents.
 
 **Cause:** crashed/killed agents left behind state the reaper hasn't reclaimed yet.
 
 **Fix:** `agent-browser-pool doctor` — the `[lanes]` section flags
-`LEAK (no dir)` / `LEAK (dead chrome)` / `DISCONNECTED` / `PROVISIONAL`, and
-`[dirs]` flags `ORPHAN DIR` (a numeric dir with no lease). Clear with `reap`
-(stale lanes only) or `release <N>` / `release all` (explicit teardown). `doctor`
-exits `1` when problems are found. See PRD.md §2.14.
-
-### "It didn't do anything / wrong browser"
-
-**Symptom:** an `agent-browser` call didn't get a lane, or opened the wrong
-(legacy) profile.
-
-**Cause:** **passthrough.** Either you are a human in a terminal (no `pi`
-ancestor), or `AGENT_BROWSER_POOL_DISABLE` is set (to a truthy value) in that shell.
-
-**Fix:** for agents, confirm there is a `pi` ancestor in the process tree and that
-the disable env is unset; then `agent-browser-pool status` to see the lane.
+`LEAK (no dir)` / `LEAK (dead chrome)` / `DISCONNECTED` / `PROVISIONAL`, and `[dirs]` flags
+`ORPHAN DIR` (a numeric dir with no lease). Clear with `reap` (stale lanes only) or
+`release <N>` / `release all` (explicit teardown). `doctor` exits `1` when problems are found.
+See PRD.md §2.14.
 
 ## Repository layout
 
@@ -347,27 +351,32 @@ agent-browser-pool/
 ├── README.md                  ← this file (user docs)
 ├── PRD.md                     ← full product requirements + technical spec
 ├── AGENTS.md                  ← operating rules for AI agents in this repo
-├── install.sh                 ← cutover installer (symlinks + doctor + warning)
+├── install.sh                 ← benign 3-step installer (symlink + state dir + doctor)
 ├── bin/
-│   ├── agent-browser          ← transparent PATH-shadowing wrapper  (→ lib/pool.sh)
-│   └── agent-browser-pool     ← admin CLI dispatcher               (→ lib/pool.sh)
+│   └── agent-browser-pool     ← sole entry point: pool verbs + driving router  (→ lib/pool.sh)
 ├── lib/
 │   └── pool.sh                ← shared lease logic (config, acquire, boot, release, reap, admin)
+├── .agents/skills/agent-browser-pool/
+│   ├── SKILL.md               ← procedural "how to use your lane" guide (the agent contract)
+│   ├── README.md              ← skill overview + global install
+│   └── references/
+│       └── configuration.md   ← env-var table, dispatch, lifecycle, troubleshooting matrix
 └── test/
     ├── validate.sh            ← test framework (assertions, owner sim, hermetic setup/teardown)
     ├── concurrency.sh         ← N agents → N distinct lanes, no collision
     ├── release_reaper.sh      ← release + stale reaper + crash simulation
-    └── transparency.sh        ← the "no-idea" transparency contract checklist
+    └── transparency.sh        ← dispatch + classification contract checks
 ```
 
-Runtime state is **not** in the repo — it is created at install / on first run and
-is gitignored:
+Runtime state is **not** in the repo — it is created at install / on first run and is
+gitignored:
 
-- `~/.local/state/agent-browser-pool/` — `lanes/<N>.json`, `acquire.lock`,
-  `alerts.log`, `chrome-<N>.log`, `pool.log`.
-- `~/.agent-chrome-profiles/` — `master-profile/` (static template) and
-  `active/<N>/` (ephemeral lane dirs).
+- `~/.local/state/agent-browser-pool/` — `lanes/<N>.json`, `acquire.lock`, `alerts.log`,
+  `chrome-<N>.log`, `pool.log`.
+- `~/.agent-chrome-profiles/` — `active/<N>/` (ephemeral lane dirs). The CoW **source** is your
+  real Chrome user-data-dir at `~/.config/google-chrome` (or whatever `$AGENT_CHROME_MASTER`
+  points at); the pool never writes to it.
 
 For agent operating rules (sandbox safety, process reaping, test isolation), see
-**[AGENTS.md](./AGENTS.md)** — this README documents the shipped product; AGENTS.md
-documents how to work *in* the repo.
+**[AGENTS.md](./AGENTS.md)** — this README documents the shipped product; AGENTS.md documents
+how to work *in* the repo.

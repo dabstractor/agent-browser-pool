@@ -377,21 +377,21 @@
           "type": "Milestone",
           "id": "P2.M6",
           "title": "Sync Changeset-Level Documentation",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Final cross-cutting documentation sync. README.md is the top-level overview that summarizes the entire changeset (no PATH shadowing, explicit invocation, real Chrome source, no DISABLE). It depends on all implementing subtasks.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M6.T1",
               "title": "Rewrite README.md for the no-shadow explicit-invocation model",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Complete rewrite of README.md: remove all PATH-shadowing language, change command examples to agent-browser-pool, update installation instructions, remove AGENT_BROWSER_POOL_DISABLE, update source profile default to real Chrome dir.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M6.T1.S1",
                   "title": "Complete rewrite of README.md for new model",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M1.T1.S1",
