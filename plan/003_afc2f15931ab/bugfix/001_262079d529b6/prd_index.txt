@@ -1,0 +1,11 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: reap orphan-dir sweep kills other lanes' live Chromes (unanchored pgrep/pkill -f)
+ h2.3 Minor Issues (Nice to Fix)
+  h3.1 Issue 2: doctor hard-FAILs on a missing ss, but ss is optional (contradicts its own docstring)
+  h3.2 Issue 3: pool_ensure_connected reconnect/relaunch paths do not perform the BUG-1 identity check
+ h2.4 Testing Summary
+---
+code:4 para:31 list:6
