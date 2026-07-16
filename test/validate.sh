@@ -660,6 +660,53 @@ EOF
     assert_eq "0" "$rc" "ensure_connected rejects foreign Chrome on reconnect (no rebind, falls through) (out: $out)" || return 1
 }
 
+# --- pool_ensure_connected relaunch passes identity args to pool_wait_cdp (Issue #3 / S2) ---
+# Regression for the relaunch-branch arity fix. Models Chrome DEAD (curl fails → skip reconnect
+# → RELAUNCH branch), then asserts pool_wait_cdp receives 3 args ($2=ephemeral_dir,
+# $3=POOL_CHROME_PID). Hermetic (NO real Chrome): pool_chrome_launch is stubbed to set the
+# globals via declare -g (mirrors real) + return 0; pool_wait_cdp is stubbed as an arg RECORDER
+# (records argc/$2/$3, returns 0 so the relaunch succeeds). This proves the arity change — the
+# load-bearing invariant — without exercising pool_cdp_is_ours's /proc + DevToolsActivePort
+# signals (those are covered by the existing pool_wait_cdp identity selftests).
+selftest_ensure_connected_relaunch_passes_identity_args() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/ensure-relaunch-identity"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+# Lease: connected=false, port 53420, ephemeral_dir $2/active/1. Model Chrome DEAD so the
+# reconnect branch is skipped and the RELAUNCH branch fires (curl→1).
+#   args: LANE EPHEMERAL_DIR PORT SESSION OWNER_PID OWNER_COMM OWNER_STARTTIME CWD CHROME_PID CHROME_PGID CONNECTED
+pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 1000 "$2" 200 201 false
+# Stubs:
+curl()                { return 1; }   # Chrome DEAD → skip reconnect → RELAUNCH branch
+pool_daemon_connect() { return 0; }   # relaunch rebind succeeds → connected=true, return 0
+# pool_chrome_launch: set the globals via declare -g (mirrors real pool_chrome_launch) + return 0.
+# MUST return 0 (bare call under set -e); MUST declare -g so POOL_CHROME_PID is visible to
+# pool_wait_cdp's recorder. No REAL Chrome (AGENTS.md §1).
+pool_chrome_launch()  { declare -g POOL_CHROME_PID=4242; declare -g POOL_CHROME_PGID=4242; return 0; }
+# pool_wait_cdp RECORDER: capture argc + $2/$3, return 0 so the relaunch succeeds (connect fires).
+_wcdp_argc=0; _wcdp_arg2=""; _wcdp_arg3=""
+pool_wait_cdp()       { _wcdp_argc=$#; _wcdp_arg2="${2:-}"; _wcdp_arg3="${3:-}"; return 0; }
+ec=0
+pool_ensure_connected 1 || ec=$?   # capture rc (relaunch succeeds → 0); `|| ec=$?` is errexit-exempt
+# THE INVARIANT (Issue #3 / S2): relaunch passes 3 args to pool_wait_cdp — the ephemeral_dir
+# ($2) and POOL_CHROME_PID ($3) → identity check ENABLED (BUG-1 hardening).
+test "$_wcdp_argc" = "3"
+test "$_wcdp_arg2" = "$2/active/1"   # ephemeral_dir from the lease
+test "$_wcdp_arg3" = "4242"          # POOL_CHROME_PID set by pool_chrome_launch
+test "$ec"        = "0"              # relaunch succeeded (connected=true)
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "ensure_connected relaunch passes identity args to pool_wait_cdp (3 args) (out: $out)" || return 1
+}
+
 # --- pool_chrome_launch EADDRINUSE detection (P1.M2.T1.S1 / Issue 2) -------------
 # Mock-based test: a fake "chrome" binary writes an EADDRINUSE line to stderr then
 # exits 1 instantly. Verifies pool_chrome_launch detects the bind failure in the log

@@ -1612,7 +1612,8 @@ pool_chrome_launch() {
 # CONSUMER: pool_wait_cdp, immediately after a successful curl /json/version probe.
 #   Called ONLY when an identity check is requested (USER_DATA_DIR + EXPECTED_PID both
 #   supplied and non-empty); otherwise pool_wait_cdp keeps the legacy probe-only behavior
-#   (back-compat for standalone tests / the ensure_connected relaunch path).
+#   (back-compat for standalone tests — the ensure_connected relaunch path was hardened in
+#   the Issue #3 fix and now passes identity args).
 #
 # GOTCHA — DevToolsActivePort format: `<port>\n<webSocketDebuggerUrl-path-suffix>\n`.
 #   Read ONLY the first whitespace-stripped line; compare numerically to PORT.
@@ -1665,8 +1666,9 @@ pool_cdp_is_ours() {
 # liveness). If a DIFFERENT lane's Chrome is answering PORT (a tight-parallel-acquire
 # collision), this returns 1 ("not ours / not ready") so _pool_launch_and_verify re-picks
 # a different port instead of silently sharing a browser (PRD §1.3.2). When the optional
-# args are OMITTED, the legacy probe-only behavior is preserved (standalone tests + the
-# ensure_connected relaunch path, which already knows its Chrome is bound).
+# args are OMITTED, the legacy probe-only behavior is preserved ONLY for standalone tests
+# (the ensure_connected relaunch path now also passes identity args — Issue #3 fix — so all
+# pool_wait_cdp call sites enforce identity when a pid is available).
 #
 # LOGIC (CONTRACT 3b):
 #   - loop up to 60 times (30s total): curl -sf http://127.0.0.1:<port>/json/version
@@ -2615,7 +2617,7 @@ pool_ensure_connected() {
     # Wait for the relaunched chrome's CDP. rc 1 = timeout AND the pgroup is ALREADY KILLED
     # (pool_wait_cdp does the kill before returning 1). Non-fatal: set connected:false +
     # touch last_seen_at, return 1. (The lane is NOT dropped — wrapper/reaper's job.)
-    if ! pool_wait_cdp "$port"; then
+    if ! pool_wait_cdp "$port" "$ephemeral_dir" "${POOL_CHROME_PID:-}"; then
         _pool_log "pool_ensure_connected: lane $lane relaunch CDP timeout (chrome killed)"
         pool_lease_update "$lane" connected false
         pool_lease_update "$lane" last_seen_at "$now"
