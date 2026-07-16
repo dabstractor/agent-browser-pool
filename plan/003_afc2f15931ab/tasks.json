@@ -98,7 +98,7 @@
                   "type": "Subtask",
                   "id": "P3.M2.T1.S1",
                   "title": "Generalize spawn_sim_owner to optional comm name (2nd positional, default pi)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/test_code_map.md §1, §5a. spawn_sim_owner (test/validate.sh:103-140) currently takes `[SECONDS]` (default 600) and HARDCODES the comm to 'pi' via `bin=\"$bin_dir/pi\"` (line 122) + settle-loop `[[ \"$comm\" == \"pi\" ]]` (line 136). The kernel sets /proc/<pid>/comm to the BASENAME of the executed ELF, so copying /usr/bin/sleep to a file named 'pi' yields comm=='pi'. There are 6 callers (validate.sh:197, release_reaper.sh:157+238, concurrency.sh:233+383, transparency.sh:162), ALL passing at most a duration — so $1 MUST stay duration to preserve backward compatibility.\n2. INPUT: No upstream dependency — this is a self-contained test-framework generalization.\n3. LOGIC: Change spawn_sim_owner signature to `spawn_sim_owner [SECONDS] [COMM]` where COMM defaults to 'pi'. Concretely: (a) change the local declaration `local dur=\"${1:-600}\" ...` to add `comm_name=\"${2:-pi}\"`; (b) change `bin=\"$bin_dir/pi\"` → `bin=\"$bin_dir/$comm_name\"`; (c) change the settle-loop comparison `[[ \"$comm\" == \"pi\" ]]` → `[[ \"$comm\" == \"$comm_name\" ]]`. CRITICAL: keep `mktemp -d -t abpool-pi.XXXXXX` as the dir PREFIX (do NOT substitute $comm_name into the mktemp template) — the cleanup trap's glob backstop `rm -rf -- /tmp/abpool-pi.*` (validate.sh:170-171) matches that prefix and must stay valid for any comm name. All 6 existing callers are UNCHANGED ($2 defaults to 'pi'). Also update the function header comment (lines 103-110) to describe the new [COMM] param. Add a guard: if comm_name exceeds 15 chars (TASK_COMM_LEN), warn or truncate (the default set pi,claude,codex,agy,antigravity are all ≤15 so no truncation needed for defaults, but a custom harness name might).\n4. OUTPUT: spawn_sim_owner now optionally spawns a process with any comm name. Backward-compatible (all existing callers unchanged → existing pi-comm tests stay green). Consumed by P3.M2.T1.S2 (the new non-pi selftest calls `spawn_sim_owner 600 claude` and `spawn_sim_owner 600 xterm`). Verify with `bash -n test/validate.sh` + `shellcheck -s bash test/validate.sh` (rc 0). Do NOT run the suite (AGENTS.md §1 — planning phase).\n5. DOCS: none — no user-facing/config/API surface change (test-internal helper).",
@@ -112,7 +112,7 @@
                   "type": "Subtask",
                   "id": "P3.M2.T1.S2",
                   "title": "Add selftest_owner_resolves_non_pi_harness (positive claude + negative xterm)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M2.T1.S1",

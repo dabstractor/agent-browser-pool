@@ -100,40 +100,61 @@ assert_no_chrome() {
 }
 
 # =============================================================================
-# spawn_sim_owner [SECONDS] — echo the PID of a LIVE process whose /proc/comm=="pi".
+# spawn_sim_owner [SECONDS] [COMM] — echo the PID of a LIVE process whose
+# /proc/comm == COMM (COMM default "pi").
 #
-# WHY THIS EXISTS (the pivotal gotcha): pool_owner_alive (lib/pool.sh:616) reads the
-# REAL /proc/<pid>/comm and requires "pi". The env override (AGENT_BROWSER_POOL_OWNER_PID)
-# sets the lease's owner IDENTITY; it does NOT fake the kernel-visible process. So for a
-# lease to be "mine"/"live", its owner PID must point at a real running "pi". The kernel
-# sets /proc/<pid>/comm to the BASENAME of the executed ELF (proc(5)), NOT argv[0] — so
-# copying /usr/bin/sleep to a file named "pi" and exec'ing it yields comm=="pi"
-# (HOST-VERIFIED 2026-07-13). `exec -a pi sleep` does NOT work (argv[0] only).
+# COMM (2nd positional, default "pi") is the desired /proc/<pid>/comm. The kernel sets comm
+# to the BASENAME of the executed ELF (proc(5)), NOT argv[0] — so copying /usr/bin/sleep to a
+# temp file NAMED "$COMM" and exec'ing it yields comm=="$COMM" (HOST-VERIFIED 2026-07-13 for
+# COMM="pi"). `exec -a "$COMM" sleep` does NOT work (argv[0] only). P3.M2.T1.S1 generalized
+# this from a hardcoded "pi" so P3.M2.T1.S2 can simulate non-pi harnesses (claude/codex/agy/…)
+# for multi-harness owner-resolution tests; existing callers pass no COMM → default "pi".
+# KERNEL TRUNCATION (proc_pid_comm(5)): comm is silently truncated to 15 chars (TASK_COMM_LEN=16
+# incl NUL). A long COMM keeps its ELF filename but the kernel reports the truncated comm → the
+# settle-loop below would never match; we truncate COMM up front. (All defaults ≤15 → no-op.)
+#
+# WHY THIS EXISTS (the pivotal gotcha): pool_owner_alive (lib/pool.sh) reads the REAL
+# /proc/<pid>/comm and (after P3.M1.T1.S2) compares it to the EXPECTED_COMM it is passed. The
+# env override (AGENT_BROWSER_POOL_OWNER_PID) sets the lease's owner IDENTITY; it does NOT fake
+# the kernel-visible process. So for a lease to be "mine"/"live", its owner PID must point at a
+# real running process whose comm matches the recorded harness.
 #
 # Tracks the pid (ABPOOL_CUR_OWNER, set by setup) + its temp bin dir (trap removes it).
-# SETTLES on a poll loop: after fork the child briefly shows the PARENT's comm until
-# execve completes — reading comm/starttime in that window returns the wrong value
-# (cost a verification run: it returned "bash"). The poll guarantees a ready-to-use pid.
+# SETTLES on a poll loop: after fork the child briefly shows the PARENT's comm until execve
+# completes — reading comm/starttime in that window returns the wrong value (cost a verification
+# run: it returned "bash"). The poll guarantees a ready-to-use pid.
 # Host tooling verified: /usr/bin/sleep present.
 # =============================================================================
 spawn_sim_owner() {
-    local dur="${1:-600}" bin_dir bin pid comm tries
+    local dur="${1:-600}" comm_name="${2:-pi}" bin_dir bin pid comm tries
+    # Kernel truncates /proc/<pid>/comm to 15 chars (TASK_COMM_LEN=16 incl NUL; proc_pid_comm(5)).
+    # A longer harness name keeps its ELF filename but the kernel SILENTLY truncates comm → the
+    # settle-loop comparison below would never match. Truncate comm_name so it targets exactly what
+    # the kernel reports. (Defaults pi/claude/codex/agy/antigravity are all ≤15 → guard is a no-op.)
+    if (( ${#comm_name} > 15 )); then
+        printf 'spawn_sim_owner: comm name truncated to 15 chars (TASK_COMM_LEN): %s -> %s\n' \
+            "$comm_name" "${comm_name:0:15}" >&2
+        comm_name="${comm_name:0:15}"
+    fi
+    # KEEP the "abpool-pi" dir PREFIX: the cleanup trap's glob backstop `rm -rf -- /tmp/abpool-pi.*`
+    # must reap this dir for ANY comm (ABPOOL_SIM_BINS+= is lost across the $(...) subshell). Only
+    # the BIN filename generalizes to $comm_name; the dir name stays abpool-pi.XXXXXX.
     bin_dir="$(mktemp -d -t abpool-pi.XXXXXX)"
-    bin="$bin_dir/pi"
+    bin="$bin_dir/$comm_name"
     cp -- /usr/bin/sleep "$bin"
     chmod +x -- "$bin"
     # Detach the child's fds (</dev/null >/dev/null 2>&1) so it does NOT inherit the
     # command-substitution pipe. spawn_sim_owner is consumed via `pid="$(spawn_sim_owner)"`
     # (setup + test bodies); without this the child is killed on subshell exit (or holds the
     # pipe → the caller blocks): the returned pid is dead → _pool_get_starttime fails → setup()
-    # aborts under set -e. HOST-VERIFIED: redirected → pid ALIVE, comm=="pi", starttime OK.
+    # aborts under set -e. HOST-VERIFIED: redirected → pid ALIVE, comm==COMM, starttime OK.
     "$bin" "$dur" </dev/null >/dev/null 2>&1 &
     pid="$!"
-    # Settle: poll until execve completes and comm flips to "pi" (fork→exec race window).
+    # Settle: poll until execve completes and comm flips to "$comm_name" (fork→exec race window).
     tries=0
     while (( tries++ < 50 )); do
         comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
-        [[ "$comm" == "pi" ]] && break
+        [[ "$comm" == "$comm_name" ]] && break
         sleep 0.02
     done
     ABPOOL_SIM_BINS+=("$bin_dir")
