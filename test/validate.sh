@@ -1089,6 +1089,75 @@ EOF
     assert_eq "0" "$rc" "doctor [dependencies]: missing ss is optional, not FAIL (out: $out)" || return 1
 }
 
+# --- pool_cdp_is_ours uses the SOCKET-OWNER pid, NOT DevToolsActivePort (Chrome 149 fix) ---
+# Regression for the Chrome 149 boot storm. pool_cdp_is_ours used to REQUIRE the lane's
+# DevToolsActivePort file (first line == port) as its PRIMARY identity signal. Chrome
+# 149.0.7827.114 NEVER writes that file, so the check ALWAYS returned 1 → pool_wait_cdp
+# timed out every boot → the "relaunch CDP timeout (chrome killed)" / "foreign Chrome →
+# relaunch" loop that wedged the whole pool. The fix verifies identity via the PID that
+# OWNS the listening socket on PORT (via _pool_socket_owner_pid → ss), with a cmdline-
+# pinned fallback when ss names no owner.
+#
+# This selftest exercises the REAL pool_cdp_is_ours — it stubs ONLY the low-level
+# _pool_socket_owner_pid helper (so the branching is hermetic, NO real Chrome) and uses
+# this body's OWN pid ($$) for the cmdline fallback (its argv carries a --user-data-dir
+# marker the outer runner injects). The OLD DevToolsActivePort logic FAILS cases 1+3
+# (it always returns 1 with no DevToolsActivePort file present), locking the fix in.
+selftest_cdp_is_ours_uses_socket_owner() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/cdp-is-ours"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+
+UDD1="$2/udd1"; UDD2="$2/udd2"; UDDPRE="$2/udd"   # UDDPRE is a PREFIX of UDD1
+mkdir -p "$UDD1" "$UDD2" "$UDDPRE"
+
+# Stub ONLY the low-level ss helper. _STUB: "EMPTY" → echo nothing (forces the cmdline
+# fallback); a number → echo it (the alleged socket owner).
+_pool_socket_owner_pid() {
+    if [[ "$_STUB" == "EMPTY" ]]; then return 0; fi
+    echo "$_STUB"; return 0
+}
+
+# 1) owner == expected → OURS. (Old DevToolsActivePort logic returned 1 here → FAIL.)
+_STUB=111
+pool_cdp_is_ours 53420 "$UDD1" 111 || { echo "FAIL owner==pid expected ours"; exit 1; }
+
+# 2) owner != expected → FOREIGN (BUG-1 invariant: a different process holds PORT).
+_STUB=222
+if pool_cdp_is_ours 53420 "$UDD1" 111; then echo "FAIL owner!=pid expected foreign"; exit 1; fi
+
+# 3-5) ss names NO owner → cmdline fallback, using THIS body's own pid ($$). The outer
+#      runner injects "--user-data-dir=$outdir/udd1" as argv[3], so /proc/$$/cmdline pins
+#      UDD1 exactly. (Hermetic: no Chrome, no spawned kids to reap.)
+_STUB=EMPTY
+# 3) our udd → ours
+pool_cdp_is_ours 53420 "$UDD1" "$$" || { echo "FAIL fallback our-udd expected ours"; exit 1; }
+# 4) a DIFFERENT udd → foreign
+if pool_cdp_is_ours 53420 "$UDD2" "$$"; then echo "FAIL fallback other-udd expected foreign"; exit 1; fi
+# 5) a PREFIX of our udd → foreign (trailing-space guard: "udd" must not match "udd1")
+if pool_cdp_is_ours 53420 "$UDDPRE" "$$"; then echo "FAIL prefix collision: 'udd' must not match 'udd1'"; exit 1; fi
+
+# 6) bad args → foreign
+_STUB=111
+if pool_cdp_is_ours "" "$UDD1" 111; then echo "FAIL empty port"; exit 1; fi
+if pool_cdp_is_ours 53420 rel 111; then echo "FAIL relative udd"; exit 1; fi
+if pool_cdp_is_ours 53420 "$UDD1" abc; then echo "FAIL non-numeric pid"; exit 1; fi
+
+echo "ALL OK"
+EOF
+    rc=0
+    # argv[3] = "--user-data-dir=$outdir/udd1" so /proc/$$/cmdline pins UDD1 for cases 3-5.
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" "--user-data-dir=$outdir/udd1" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "pool_cdp_is_ours uses socket-owner pid (not DevToolsActivePort) (out: $out)" || return 1
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The

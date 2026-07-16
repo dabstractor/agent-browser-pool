@@ -1580,6 +1580,34 @@ pool_chrome_launch() {
     return 0
 }
 
+# _pool_socket_owner_pid PORT
+#
+# Query helper for pool_cdp_is_ours: echo the PID that OWNS the TCP LISTENING socket on
+# PORT (IPv4 or IPv6 loopback), or echo nothing if no listener / ss cannot tell. Uses
+# `ss -ltnHp` (listening TCP, headerless, with process info). Same-uid sockets show
+# `users:(("chrome",pid=N,fd=M))`; we extract the first pid=.
+#
+# Why ss (not DevToolsActivePort): the owner PID of the devtools listener is Chrome's MAIN
+# browser process — exactly the pid pool_chrome_launch captures (setsid exec'd chrome, so
+# $! == browser pid) — HOST-VERIFIED. This signal is Chrome-version-independent and airtight
+# against PID recycling (unlike /proc liveness) and against Chrome builds that no longer
+# write a DevToolsActivePort file (Chrome 149.0.7827.114 regression — see pool_cdp_is_ours).
+#
+# Returns 0 always (a query). stdout is the pid (digits) or empty. `|| true` degrades a
+# transient ss failure (missing binary / permission) to empty — caller's fallback handles
+# it. Never pool_die (runs on the hot path / inside pool_wait_cdp's poll loop).
+# GOTCHA — `:$port ` trailing space is the local/peer-addr word boundary (mirrors
+#   pool_find_free_port's ss GOTCHA); without it `:5342` would match `:53420`.
+# GOTCHA — grep -oE 'pid=[0-9]+' then head -n1: a listening socket has ONE owner; take it.
+_pool_socket_owner_pid() {
+    local port="${1:-}" line pidstr
+    [[ "$port" =~ ^[0-9]+$ ]] || return 0
+    line="$(ss -ltnHp 2>/dev/null | grep -F ":$port ")" || true
+    pidstr="$(grep -oE 'pid=[0-9]+' <<<"$line" | head -n1 | cut -d= -f2)" || true
+    [[ "$pidstr" =~ ^[0-9]+$ ]] && echo "$pidstr"
+    return 0
+}
+
 # pool_cdp_is_ours PORT USER_DATA_DIR EXPECTED_PID
 #
 # Identity check for the CDP answerer on PORT: verify that the browser answering
@@ -1596,18 +1624,25 @@ pool_chrome_launch() {
 # succeeded and silently drive Lane A's browser, breaking PRD §1.3.2 ("1 agent = 1
 # browser"). This function closes that gap so pool_wait_cdp can re-pick a port instead.
 #
-# LOGIC (two independent signals; BOTH must agree it is ours to return 0):
-#   1. DevToolsActivePort file: a successfully-bound Chrome writes a file named
-#      `DevToolsActivePort` into its --user-data-dir whose FIRST line is the bound port.
-#      If our Chrome bound PORT, "$USER_DATA_DIR/DevToolsActivePort" exists and its first
-#      line equals PORT. If a FOREIGN lane answered PORT, our dir has no such file (our
-#      Chrome died on EADDRINUSE before writing it) → mismatch → return 1. This is the
-#      PRIMARY signal and is reliable across Chrome versions.
-#   2. Process liveness: EXPECTED_PID (the pid we captured via $! in pool_chrome_launch)
-#      must STILL be alive (a foreign answerer means OUR Chrome is dead). Dead pid →
-#      return 1. (PID alone is not sufficient proof — a recycled pid could be a live
-#      unrelated process — but combined with the DevToolsActivePort check it strengthens
-#      correctness. /proc existence is used, NOT kill -0 — see AGENTS.md §4.)
+# LOGIC (two signals; EITHER proving ownership returns 0):
+#   1. Socket-owner identity (PRIMARY, Chrome-version-independent): the PID that OWNS the
+#      TCP listening socket on PORT (via _pool_socket_owner_pid → `ss -ltnHp`) must equal
+#      EXPECTED_PID. Chrome's main browser process holds the devtools listener exclusively
+#      (HOST-VERIFIED), so a foreign lane's Chrome on PORT shows a DIFFERENT owner pid →
+#      return 1 (caller re-picks port / relaunches). Airtight against PID recycling (ss
+#      reports the real socket owner, not a recycled /proc entry).
+#   2. Process cmdline fallback (when ss names no owner — e.g. ss unavailable): EXPECTED_PID
+#      is alive AND its /proc/.../cmdline pins our --user-data-dir=$USER_DATA_DIR. A live
+#      chrome in OUR user-data-dir holds PORT exclusively → the answerer is ours. The UDD
+#      cmdline check closes the PID-recycle hole without ss.
+#
+# WHY NOT DevToolsActivePort (REPLACED): earlier versions required
+#   "$USER_DATA_DIR/DevToolsActivePort" (first line == PORT) as the primary signal. Chrome
+#   149.0.7827.114 NEVER writes that file (HOST-VERIFIED across 3 flag variants + 10 real
+#   lane dirs), so the old check ALWAYS returned 1 → pool_wait_cdp timed out every boot →
+#   the "relaunch CDP timeout (chrome killed)" / "foreign Chrome → relaunch" storm. The
+#   socket-owner signal is strictly stronger AND version-independent, so the file check was
+#   removed entirely.
 #
 # CONSUMER: pool_wait_cdp, immediately after a successful curl /json/version probe.
 #   Called ONLY when an identity check is requested (USER_DATA_DIR + EXPECTED_PID both
@@ -1615,15 +1650,13 @@ pool_chrome_launch() {
 #   (back-compat for standalone tests — the ensure_connected relaunch path was hardened in
 #   the Issue #3 fix and now passes identity args).
 #
-# GOTCHA — DevToolsActivePort format: `<port>\n<webSocketDebuggerUrl-path-suffix>\n`.
-#   Read ONLY the first whitespace-stripped line; compare numerically to PORT.
-# GOTCHA — a missing DevToolsActivePort during a GENUINE boot is possible for a few ms
-#   (Chrome creates it slightly before /json/version answers, but be defensive): callers
-#   treat a 1-return as "not ours / not ready" and keep polling within pool_wait_cdp's
-#   budget rather than failing hard. So a transiently-missing file simply extends the
-#   wait, exactly like a still-booting Chrome.
-# GOTCHA — /proc/<pid> existence, NOT kill -0 (AGENTS.md §4: kill -0 is a trap — ESRCH
-#   and EPERM both return non-zero).
+# GOTCHA — ss SAME-UID requirement: `ss -p` shows the owner pid only for sockets owned by
+#   the calling uid (or root). The pool and all pooled chromes run as the SAME user, so the
+#   owner is always visible. ss is already a checked pool dependency (doctor + pool_find_free_port).
+# GOTCHA — the cmdline UDD match uses a TRAILING SPACE (`--user-data-dir=$UDD `) so a lane
+#   dir that is a PREFIX of another (active/1 vs active/10) cannot cross-match.
+# GOTCHA — /proc existence uses [[ -d /proc/<pid> ]] and the cmdline read is guarded; NEVER
+#   kill -0 (AGENTS.md §4: kill -0 is a trap — ESRCH and EPERM both return non-zero).
 # GOTCHA — NON-FATAL (return 1, NOT pool_die): same family as pool_wait_cdp.
 # Reads $1/$2/$3 only. No writes.
 # PRECONDITION: PORT numeric, USER_DATA_DIR absolute, EXPECTED_PID numeric (caller guards).
@@ -1631,25 +1664,36 @@ pool_cdp_is_ours() {
     local port="${1:-}"
     local user_data_dir="${2:-}"
     local expected_pid="${3:-}"
-    local dtap first_line
+    local owner
 
     # Bad/missing args → cannot prove identity → "not ours" (caller keeps polling).
     [[ "$port" =~ ^[0-9]+$ ]] || return 1
     [[ -n "$user_data_dir" && "$user_data_dir" == /* ]] || return 1
     [[ "$expected_pid" =~ ^[0-9]+$ ]] || return 1
 
-    # Signal 1 — DevToolsActivePort first line must equal PORT. File may not exist yet
-    # (Chrome still finalizing the write, or our Chrome died on EADDRINUSE). Use a guarded
-    # capture: `head` of a missing file rc 1 → keep us alive under set -e.
-    dtap="$user_data_dir/DevToolsActivePort"
-    first_line="$(head -n1 -- "$dtap" 2>/dev/null | tr -d '[:space:]')" || true
-    [[ "$first_line" == "$port" ]] || return 1
+    # Signal 1 (PRIMARY) — socket-owner identity. The PID owning the listening socket on
+    # PORT must be OUR EXPECTED_PID. A foreign lane's Chrome on PORT shows a DIFFERENT
+    # owner → return 1. `owner` is empty only if ss named no owner (transient/unavailable);
+    # fall through to the cmdline fallback rather than guessing. `if [[ -n ]]` is errexit-
+    # exempt; _pool_socket_owner_pid never pool_die's (query, never fails the caller).
+    owner="$(_pool_socket_owner_pid "$port")"
+    if [[ -n "$owner" ]]; then
+        [[ "$owner" == "$expected_pid" ]] && return 0
+        return 1
+    fi
 
-    # Signal 2 — our launched Chrome must STILL be alive (a foreign answerer ⇒ ours died).
-    # /proc existence check (NOT kill -0 — AGENTS.md §4).
-    [[ -d "/proc/$expected_pid" ]] || return 1
+    # Signal 2 (FALLBACK, ss named no owner) — our launched chrome is alive AND its cmdline
+    # pins OUR user-data-dir → it holds PORT exclusively → the answerer is ours. The UDD
+    # cmdline match (trailing space) closes the PID-recycle hole AND the active/1 vs
+    # active/10 prefix collision. tr '\0' ' ' joins NUL-delimited argv; the grep is
+    # fixed-string + errexit-exempt via the `if` condition.
+    if [[ -d "/proc/$expected_pid" ]] \
+        && tr '\0' ' ' < "/proc/$expected_pid/cmdline" 2>/dev/null \
+            | grep -qF -- "--user-data-dir=$user_data_dir "; then
+        return 0
+    fi
 
-    return 0
+    return 1
 }
 
 # pool_wait_cdp PORT [USER_DATA_DIR [EXPECTED_PID]]
@@ -1662,8 +1706,8 @@ pool_cdp_is_ours() {
 #
 # IDENTITY VERIFICATION (BUG-1 fix): when USER_DATA_DIR + EXPECTED_PID are BOTH supplied,
 # a successful curl probe is NOT trusted on its own — pool_cdp_is_ours re-checks that the
-# answerer is actually THIS lane's Chrome (via the lane's DevToolsActivePort file + pid
-# liveness). If a DIFFERENT lane's Chrome is answering PORT (a tight-parallel-acquire
+# answerer is actually THIS lane's Chrome (via the socket-owner PID + cmdline fallback —
+# see pool_cdp_is_ours). If a DIFFERENT lane's Chrome is answering PORT (a tight-parallel-acquire
 # collision), this returns 1 ("not ours / not ready") so _pool_launch_and_verify re-picks
 # a different port instead of silently sharing a browser (PRD §1.3.2). When the optional
 # args are OMITTED, the legacy probe-only behavior is preserved ONLY for standalone tests
@@ -1715,9 +1759,8 @@ pool_wait_cdp() {
         if curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
             # Probe succeeded. If an identity check was requested, verify the answerer is
             # ACTUALLY this lane's Chrome (BUG-1): a foreign lane answering our PORT would
-            # otherwise be mistaken for a successful boot. Mismatch → keep polling (our
-            # Chrome may still be finalizing its DevToolsActivePort write) instead of
-            # declaring success. The 30s budget bounds the wait; on exhaustion the pgroup
+            # otherwise be mistaken for a successful boot. Mismatch (foreign answerer) → keep
+            # polling within the budget rather than declaring success; on exhaustion the pgroup
             # is killed and the caller re-picks a port.
             if [[ "$check_identity" -eq 1 ]]; then
                 if pool_cdp_is_ours "$port" "$user_data_dir" "$expected_pid"; then
@@ -2568,7 +2611,7 @@ pool_ensure_connected() {
     # --- c. NOT connected. Chrome alive? curl /json/version (NOT kill -0 — research §2). ---
     # BUG-1 identity hardening (Issue #3, S1): a successful curl only proves SOMETHING answers on
     # $port — not that it is THIS lane's Chrome. Before rebinding the daemon, verify identity via
-    # pool_cdp_is_ours (DevToolsActivePort line1==$port AND our chrome_pid still alive). A foreign
+    # pool_cdp_is_ours (socket-owner PID == our chrome_pid, else cmdline fallback). A foreign
     # Chrome on our port (narrow race: daemon restart + our Chrome dead + foreign Chrome grabbed
     # the port) must NOT be rebound — fall through to the relaunch branch below instead. The guard
     # `chrome_pid -gt 0` enforces identity ONLY for lanes with a valid pid; old/provisional lanes
