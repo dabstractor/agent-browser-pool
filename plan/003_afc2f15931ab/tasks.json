@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P3",
       "title": "Multi-Harness Owner Resolution (Decision O9)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Generalize owner resolution from pi-only to a recognized agent-harness set (pi,claude,codex,agy,antigravity), configurable via AGENT_BROWSER_POOL_HARNESSES. One core function path + one config block + one user-facing message + a focused test/doc sweep. NOT a re-architecture — the entire no-shadow explicit-invocation model, lease writes, reaper, and liveness layer are reused unchanged. The identity triple (pid, comm, starttime) is unchanged; only the SET of acceptable comm values widens, and the RECORDED comm becomes the actual match. Source: delta_prd.md (R1-R5), PRD Decision O9.",
       "milestones": [
         {
@@ -150,14 +150,14 @@
           "type": "Milestone",
           "id": "P3.M3",
           "title": "Sync changeset-level documentation",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Mode B changeset-level documentation sync (per SOW §5). The per-file Mode A docs (configuration.md, SKILL.md, skill-README.md) already rode with the M1 implementing subtasks. This milestone sweeps the cross-cutting README.md (root) — the env-var table, callouts, architecture overview, troubleshooting section, phrasing sweep, AND the headline NEW addition: the §2.17 cross-harness skill-installation paragraph + per-harness skills-dir table + the Codex symlink caveat (openai/codex#11314). Depends on ALL implementing subtasks in M1+M2 so it runs last and summarizes the complete delta.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Cross-cutting README.md (root) generalization + the new §2.17 cross-harness skill-install section. Optional install.sh help-text pointer. This is the FINAL task — it depends on every implementing subtask and runs last to prevent a coherent delta from shipping with a stale README.",
               "subtasks": [
                 {
@@ -189,7 +189,7 @@
                   "type": "Subtask",
                   "id": "P3.M3.T1.S2",
                   "title": "Add §2.17 cross-harness skill-install paragraph + per-harness table + Codex caveat to README.md",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M3.T1.S1"
@@ -205,7 +205,7 @@
                   "type": "Subtask",
                   "id": "P3.M3.T1.S3",
                   "title": "Update install.sh --global-skill help text to point at README per-harness table (optional)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P3.M3.T1.S2"

@@ -80,6 +80,24 @@ rm -f ~/.local/bin/agent-browser-pool ~/.agents/skills/agent-browser-pool
 
 See [PRD.md §2.17](./PRD.md) for why installation is non-disruptive (no PATH interception).
 
+### Cross-harness skill installation
+
+**The agent skill is cross-harness, installed per-harness.** The skill is an Agent
+Skills-standard skill at `.agents/skills/agent-browser-pool/` (discovered project-scoped
+inside this repo). `install.sh --global-skill` symlinks it into `~/.agents/skills/`. To
+teach each harness natively, install into its own skills dir:
+
+| Harness               | Global skills dir                          | Project skills dir     | Follows symlinks?           |
+| --------------------- | ------------------------------------------ | ---------------------- | --------------------------- |
+| pi                    | `~/.agents/skills/`, `~/.pi/agent/skills/` | `.agents/skills/`      | yes                         |
+| Claude Code           | `~/.claude/skills/`                        | `.claude/skills/`      | yes                         |
+| Codex                 | `~/.codex/skills/`                         | `.agents/skills/`      | **no — openai/codex#11314** |
+| Antigravity (agy/IDE) | `~/.antigravity/skills/`                   | `.antigravity/skills/` | verify                      |
+
+> **Codex caveat:** Codex does not discover a *symlinked* `.agents/skills` (openai/codex#11314).
+> For Codex, install the skill as a real directory copy into `~/.codex/skills/` (or wait for
+> the upstream fix). pi and Claude Code follow symlinks, so `--global-skill` suffices for them.
+
 ## Usage (for agents)
 
 The command is `agent-browser-pool <verb> <args>`. The lane is selected by your process
