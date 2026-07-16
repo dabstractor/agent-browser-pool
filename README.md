@@ -13,7 +13,7 @@ Agents invoke it explicitly; nothing is intercepted and nothing is shadowed.
 - **Ephemeral profiles.** Each acquire **copy-on-writes** a fresh profile from your **real
   Chrome profile** (default `~/.config/google-chrome`) and deletes it on release. Because the
   pool lives on **btrfs**, `cp --reflink=always` makes every copy instant and deduplicated.
-- **1 agent = 1 browser.** Mutual exclusion via leases keyed on the owning `pi` process (and
+- **1 agent = 1 browser.** Mutual exclusion via leases keyed on the owning harness process (and
   its start time). The next agent gets the next free lane.
 - **Explicit invariant command.** Agents run `agent-browser-pool <verb> <args>`; the lane is
   selected by the caller's process identity, never an argument. The command is identical on
@@ -83,7 +83,7 @@ See [PRD.md §2.17](./PRD.md) for why installation is non-disruptive (no PATH in
 ## Usage (for agents)
 
 The command is `agent-browser-pool <verb> <args>`. The lane is selected by your process
-identity (your owning `pi` process and its start time) — **the command never names a lane**,
+identity (your owning harness process and its start time) — **the command never names a lane**,
 and you cannot escape your own lane or harm another agent's:
 
 - `agent-browser-pool open https://example.com` — your lane, the same browser for the whole
@@ -98,11 +98,11 @@ and you cannot escape your own lane or harm another agent's:
 agent-browser-pool open https://example.com     # your lane, same browser for the session
 ```
 
-> **Driving commands require a `pi` ancestor.** From a plain terminal with no `pi` ancestor, a
+> **Driving commands require a supported-harness ancestor.** From a plain terminal with no recognized-harness ancestor, a
 > driving command **fails fast** with an actionable message — by design. Run browser work
-> under `pi`, or call `agent-browser` directly for raw access without pooling. Pool verbs
+> under a supported harness (`pi`/`claude`/`codex`/`agy`), or call `agent-browser` directly for raw access without pooling. Pool verbs
 > (`status` / `doctor` / `reap` / `release` / `help`) work from any shell; every other
-> command is a driving command that requires a `pi` ancestor.
+> command is a driving command that requires a supported-harness ancestor.
 > See [How it works](#how-it-works).
 
 For the full procedural contract (acquire lifecycle, reuse rules, teardown semantics), read
@@ -148,7 +148,7 @@ You never pass a lane, port, or session.
 > a bare invocation defaults to `status`) and runs them with no lane. **Everything else is a
 > driving command** — including `--version`, `skills`, `dashboard`, `plugin`, `mcp`,
 > `session list`, and a flags-only invocation (e.g. `agent-browser-pool --json`). A driving
-> command resolves your owning `pi` process, **fails fast** without a `pi` ancestor, and runs
+> command resolves your owning harness process, **fails fast** without a recognized-harness ancestor, and runs
 > scoped to your own lane (any `--session <X>` you pass is stripped and
 > `AGENT_BROWSER_SESSION=abpool-<N>` is forced). This is why a caller can never aim a command
 > at another agent's lane.
@@ -169,7 +169,7 @@ dropped) · `STALE` (lease row missing/corrupt — fields show `?`).
 
 ### `reap`
 
-Tear down lanes whose owning `pi` process has died (kill the Chrome process group, delete the
+Tear down lanes whose owning harness process has died (kill the Chrome process group, delete the
 ephemeral profile dir, remove the lease). Always exits 0.
 
 ```
@@ -246,6 +246,7 @@ Chrome, `rm`, or a log file. The table below matches `agent-browser-pool help` /
 | `AGENT_BROWSER_POOL_WAIT` | `600` (10 min) | acquire block timeout (seconds) before force-reap + alert |
 | `AGENT_CHROME_HEADLESS` | unset = **windowed** | set to `1`/`true`/`yes`/`on` to launch Chrome with `--headless=new` |
 | `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | set to `1`/`true`/`yes`/`on` to permit a real (slow) ~4.8 GB copy per acquire |
+| `AGENT_BROWSER_POOL_HARNESSES` | `pi,claude,codex,agy,antigravity` | comma-separated `comm` values treated as valid lane owners; owner resolution matches the first ancestor whose comm is in this set. Empty/unset → default (never empty) |
 
 Three vars shape behavior most:
 
@@ -275,7 +276,7 @@ agent-browser-pool open https://example.com        ← agent types this, nothing
    │ 1. split (bin/agent-browser-pool):
    │      pool verb (status/reap/release/doctor/help)?  → run it (no lane, no owner resolve)
    │      else DRIVING → pool_wrapper_main:
-   │           resolve owning pi PID + starttime; no pi ancestor → FAIL-FAST
+   │           resolve owning harness PID + starttime; no recognized-harness ancestor → FAIL-FAST
    ├─ already hold my lease?  reuse my lane
    ├─ else acquire:  reap stale  →  reuse-orphan OR  cp --reflink master(real Chrome)→ephemeral
    │                  →  launch Chrome (setsid process group, anti-throttle flags)  →  connect daemon
@@ -287,7 +288,7 @@ Lane lifecycle ordering (`pool_wrapper_main`):
 
 1. config + state init;
 2. (pool verbs were handled by `bin/agent-browser-pool` above — no lane); otherwise driving:
-3. **driving command → resolve the owning `pi` process**; if there is no `pi` ancestor,
+3. **driving command → resolve the owning harness process**; if there is no recognized-harness ancestor,
    **fail fast** with an actionable error (by design — call `agent-browser` directly for raw
    access);
 4. find my lane (`pool_lease_find_mine`) or acquire (reap-stale → reuse-orphan → boot/adopt);
@@ -298,10 +299,10 @@ Lane lifecycle ordering (`pool_wrapper_main`):
    `AGENT_BROWSER_SESSION=abpool-<N>`;
 8. `exec` the real `agent-browser` with the cleaned args — terminal step.
 
-**Release** happens when the owning `pi` process exits (the next acquire reaps it), on
+**Release** happens when the owning harness process exits (the next acquire reaps it), on
 explicit `agent-browser-pool release`, or on pool-exhaustion force-reap: kill the Chrome
 **process group**, `rm -rf` the ephemeral dir, drop the lease. There is **no idle TTL**. A
-crashed agent → its `pi` PID dies → next acquire reaps it. `close` mid-task is
+crashed agent → its harness PID dies → next acquire reaps it. `close` mid-task is
 **disconnect-only**: the lane, Chrome, and ephemeral dir survive for reuse.
 
 ## Troubleshooting
@@ -315,19 +316,19 @@ agent-browser-pool reap        # tear down lanes whose owner died
 agent-browser-pool release 1   # or: release all
 ```
 
-### Driving command errored: "requires a pi ancestor"
+### Driving command errored: "requires a supported agent harness"
 
-**Symptom:** an `agent-browser-pool` driving command fails with a message like *"driving
-commands require a pi ancestor (owning pi process)."*
+**Symptom:** an `agent-browser-pool` driving command fails with a message like
+*"agent-browser-pool: driving commands require a supported agent harness (pi/claude/codex/agy). For raw browser use without pooling, call 'agent-browser' directly."*
 
-**Cause:** by design. Driving commands acquire a lane keyed on your owning `pi` process; with
-no `pi` ancestor in the process tree, there is no identity to key the lease on, so the command
+**Cause:** by design. Driving commands acquire a lane keyed on your owning harness process; with
+no recognized-harness ancestor in the process tree, there is no identity to key the lease on, so the command
 **fails fast** rather than silently doing the wrong thing.
 
-**Fix:** run browser work under `pi` (e.g. inside a `pi` session), or — for raw browser use
-without pooling — call the real `agent-browser` directly. Pool verbs (`status`, `doctor`,
-`reap`, `release`, `help`) work from any shell; all other commands are driving (they
-require a `pi` ancestor).
+**Fix:** run browser work under a supported harness (e.g. inside a `pi`/`claude`/`codex`/`agy`
+session), or — for raw browser use without pooling — call the real `agent-browser` directly. Pool
+verbs (`status`, `doctor`, `reap`, `release`, `help`) work from any shell; all other commands are
+driving (they require a supported-harness ancestor).
 
 ### Pool exhaustion — an agent blocks, then force-reaps
 

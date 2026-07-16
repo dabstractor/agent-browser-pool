@@ -164,7 +164,7 @@
                   "type": "Subtask",
                   "id": "P3.M3.T1.S1",
                   "title": "Update README.md root: env-var table, callouts, architecture, troubleshooting, phrasing sweep",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M1.T1.S1",
@@ -189,7 +189,7 @@
                   "type": "Subtask",
                   "id": "P3.M3.T1.S2",
                   "title": "Add §2.17 cross-harness skill-install paragraph + per-harness table + Codex caveat to README.md",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M3.T1.S1"
