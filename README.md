@@ -188,13 +188,16 @@ dropped) · `STALE` (lease row missing/corrupt — fields show `?`).
 ### `reap`
 
 Tear down lanes whose owning harness process has died (kill the Chrome process group, delete the
-ephemeral profile dir, remove the lease). Always exits 0.
+ephemeral profile dir, remove the lease) **and** remove orphan ephemeral dirs (numeric
+`active/<N>/` directories left by an interrupted boot or a crashed release that have no
+lease and no live owner — killing any orphaned Chrome still pointed at them). Always exits 0.
 
 ```
-No stale lanes found.
+No stale lanes or orphan dirs found.
 ```
 ```
 Reaped 2 stale lane(s).
+Removed 1 orphan dir(s).
 ```
 
 ### `release [<N>|all]`
@@ -219,7 +222,9 @@ No active lanes to release.        # `release all` on an empty pool
 
 Diagnose the pool. Checks dependencies, the real binary, the filesystem (btrfs), the
 source/master profile, and reconciles leases against live Chromes and ephemeral dirs. Exits
-`0` if healthy, `1` if any check fails. Sections, in order:
+`0` if healthy, `1` only if a blocking infrastructure check **fails**. `WARN`s are advisory
+cruft — orphan dirs, dead Chrome, a disconnected daemon, a provisional lease — that `reap`
+and `release` recover from; they do **not** affect the exit code. Sections, in order:
 
 ```
 [dependencies]   flock, setsid, pgrep, pkill, cp, curl, jq, chrome → OK / MISSING;
@@ -227,7 +232,7 @@ source/master profile, and reconciles leases against live Chromes and ephemeral 
 [binary]         the real agent-browser → OK / FAIL
 [filesystem]     ephemeral root → OK (btrfs) / WARN (non-btrfs + slow-copy allowed) / FAIL
 [master]         the source/master profile (your real Chrome dir, $AGENT_CHROME_MASTER) → OK / FAIL
-[lanes]          per lease → OK / WARN (LEAK, DISCONNECTED, PROVISIONAL)
+[lanes]          per lease → OK / WARN (LEAK, DISCONNECTED, daemon disconnected, PROVISIONAL)
 [dirs]           per numeric dir → WARN (ORPHAN DIR) / "(N dir(s), all leased)"
 [summary]        OK=N  WARN=N  FAIL=N  +  "Healthy."  (or "Problems found.")
 ```
@@ -257,7 +262,7 @@ Chrome, `rm`, or a log file. The table below matches `agent-browser-pool help` /
 | `AGENT_BROWSER_POOL_STATE` | `~/.local/state/agent-browser-pool` | state dir (`lanes/`, `acquire.lock`, `alerts.log`, `chrome-<N>.log`, `pool.log`) |
 | `AGENT_CHROME_MASTER` | `~/.config/google-chrome` (your **real** Chrome user-data-dir) | CoW source profile; **read-only** to the pool; may be live/in-use |
 | `AGENT_CHROME_EPHEMERAL_ROOT` | `~/.agent-chrome-profiles/active` | ephemeral lane dirs live at `<root>/<N>/`; deleted on release |
-| `AGENT_BROWSER_REAL` | `~/.local/bin/agent-browser` | the REAL `agent-browser` CLI (called by absolute path; stays upgradable) |
+| `AGENT_BROWSER_REAL` | `~/.local/bin/agent-browser` | the REAL `agent-browser` CLI (bare name → `command -v`; a path → `-f -x`; stays upgradable) |
 | `AGENT_CHROME_BIN` | `google-chrome-stable` | Chrome binary (bare name → `command -v`; a path → `-f -x`) |
 | `AGENT_CHROME_PORT_BASE` | `53420` | lowest pool TCP port |
 | `AGENT_CHROME_PORT_RANGE` | `1000` | number of ports in the pool → range `[53420, 54420)` |
@@ -371,10 +376,12 @@ agents.
 **Cause:** crashed/killed agents left behind state the reaper hasn't reclaimed yet.
 
 **Fix:** `agent-browser-pool doctor` — the `[lanes]` section flags
-`LEAK (no dir)` / `LEAK (dead chrome)` / `DISCONNECTED` / `PROVISIONAL`, and `[dirs]` flags
-`ORPHAN DIR` (a numeric dir with no lease). Clear with `reap` (stale lanes only) or
-`release <N>` / `release all` (explicit teardown). `doctor` exits `1` when problems are found.
-See PRD.md §2.14.
+`LEAK (no dir)` / `LEAK (dead chrome)` / `DISCONNECTED` / `daemon disconnected` /
+`PROVISIONAL`, and `[dirs]` flags `ORPHAN DIR` (a numeric dir with no lease). Clear with
+`agent-browser-pool reap` (tears down stale-owner lanes **and** removes orphan dirs), or
+`release <N>` / `release all` (explicit teardown of leased lanes). `doctor` exits `1` only on
+a blocking `FAIL` (missing deps / binary / btrfs / master); `WARN`s are advisory cruft that
+`reap`/`release` clear and do not change the exit code. See PRD.md §2.14.
 
 ## Repository layout
 

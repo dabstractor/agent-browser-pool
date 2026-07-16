@@ -769,6 +769,114 @@ selftest_launch_and_verify_repick_on_cdp_timeout() {
     assert_eq "$new" "$lease_port" "path-b: lease port updated to the re-picked port" || return 1
 }
 
+# --- AGENT_BROWSER_REAL name-or-path (F5: mirror AGENT_CHROME_BIN) ------------------
+# A bare name (no '/') is stored as-is (resolved via PATH at exec/command -v); an explicit
+# path is canonicalized via realpath -m. Before the fix, AGENT_BROWSER_REAL=agent-browser
+# resolved to <CWD>/agent-browser, tripping the preflight with a confusing 'missing' msg.
+# Pure-function body: pool_config_init reads POOL_HOME_DIR-relative defaults, so unset the
+# override + re-init under a temp HOME so nothing escapes to the operator's real paths.
+selftest_real_bin_name_or_path() {
+    local tmp_home real_val
+    tmp_home="$(mktemp -d -t abpool-test-realbin.XXXXXX)"; ABPOOL_TEST_ROOTS+=("$tmp_home")
+    mkdir -p -- "$tmp_home"
+    # bare name -> stored as-is (no canonicalization)
+    real_val="$(HOME="$tmp_home" AGENT_BROWSER_REAL=agent-browser bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s\n" "$POOL_REAL_BIN"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "agent-browser" "$real_val" "AGENT_BROWSER_REAL bare name stored as-is" || return 1
+    # explicit path -> canonicalized (realpath -m collapses + makes absolute under HOME)
+    real_val="$(HOME="$tmp_home" AGENT_BROWSER_REAL="$tmp_home/bin/agent-browser" bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s\n" "$POOL_REAL_BIN"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "$tmp_home/bin/agent-browser" "$real_val" "AGENT_BROWSER_REAL explicit path canonicalized" || return 1
+    # default -> $HOME/.local/bin/agent-browser (absolute)
+    real_val="$(HOME="$tmp_home" bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s\n" "$POOL_REAL_BIN"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "$tmp_home/.local/bin/agent-browser" "$real_val" "AGENT_BROWSER_REAL default = HOME/.local/bin/agent-browser" || return 1
+}
+
+# --- _pool_preflight_real_bin accepts a bare name on PATH (F5) ---------------------
+# With a bare name resolvable via PATH, the preflight must pass (command -v). With a
+# non-existent path it must fail (pool_die, caught as non-zero). Hermetic subshell so a
+# pool_die exit is contained + the command-v override does NOT leak into the main shell.
+selftest_preflight_accepts_bare_name_on_path() {
+    local bin_dir noop rc
+    bin_dir="$(mktemp -d -t abpool-test-preflight.XXXXXX)"; ABPOOL_TEST_ROOTS+=("$bin_dir")
+    noop="$bin_dir/agent-browser"
+    printf '#!/bin/sh\nexit 0\n' >"$noop"; chmod +x -- "$noop"
+    # bare name on PATH -> preflight returns 0
+    rc=0
+    ( PATH="$bin_dir:/usr/bin:/bin" AGENT_BROWSER_REAL=agent-browser bash -c '
+          set -e; source "$1/lib/pool.sh"; pool_config_init; _pool_preflight_real_bin
+      ' _ "$ABPOOL_REPO" ) || rc=$?
+    assert_eq "0" "$rc" "preflight passes for a bare name on PATH" || return 1
+    # non-existent bare name -> preflight pool_die's (rc != 0)
+    rc=0
+    ( PATH="/usr/bin:/bin" AGENT_BROWSER_REAL=agent-browser-nope bash -c '
+          set -e; source "$1/lib/pool.sh"; pool_config_init; _pool_preflight_real_bin
+      ' _ "$ABPOOL_REPO" ) || rc=$?
+    [[ "$rc" -ne 0 ]] || { _fail "preflight should fail for a missing bare name (rc=0)"; return 1; }
+}
+
+# --- pool_reap_orphan_dirs removes unleased orphan dirs + skips leased (F1) ---------
+# Pure-function body against the shared temp pool: (1) an unleased orphan dir is removed
+# and counted; (2) a leased dir is skipped; (3) a 2nd call finds nothing (idempotent).
+# No Chrome is involved (no orphan Chrome to kill) — the dir-only path is what we assert.
+selftest_reap_orphan_dirs_removes_and_skips() {
+    # Lane 5 is a leased lane (a real lease) -> must be SKIPPED (belongs to a live lane).
+    pool_lease_write 5 "$POOL_EPHEMERAL_ROOT/5" 0 abpool-5 11 pi 9 /x 0 0 false
+    mkdir -p "$POOL_EPHEMERAL_ROOT/5"
+    # Lane 9 + lane 12 are orphan dirs (no lease) -> must be REMOVED + counted.
+    mkdir -p "$POOL_EPHEMERAL_ROOT/9"
+    mkdir -p "$POOL_EPHEMERAL_ROOT/12"
+    local orphans; orphans="$(pool_reap_orphan_dirs)"
+    assert_eq "2" "$orphans" "orphan-reap removed 2 orphan dirs" || return 1
+    assert_no_dir "$POOL_EPHEMERAL_ROOT/9"   || return 1
+    assert_no_dir "$POOL_EPHEMERAL_ROOT/12"  || return 1
+    # leased dir 5 survives
+    [[ -d "$POOL_EPHEMERAL_ROOT/5" ]] || { _fail "leased orphan dir 5 was removed"; return 1; }
+    # idempotent: a 2nd sweep finds the remaining orphan? NO — both gone -> 0.
+    orphans="$(pool_reap_orphan_dirs)"
+    assert_eq "0" "$orphans" "orphan-reap idempotent (2nd sweep finds 0)" || return 1
+    # cleanup the leased dir so it does not pollute later bodies (inter-body backstop
+    # rm -f *.json handles the lease; the dir survives pool_state_init mkdir).
+    rm -rf -- "$POOL_EPHEMERAL_ROOT/5" 2>/dev/null || true
+}
+
+# --- doctor [lanes] flags lease connected:false (F3) -------------------------------
+# A lane with a live owner, a live chrome_pid, a responding port, but connected:false must
+# show a WARN in doctor (aligning with status's `disconnected`). We stub curl to rc 0
+# (port 'responds'), chrome_pid at a live /proc entry (1 = init, always alive), and assert
+# the WARN line fires. Hermetic, timeout-bounded subshell so the curl stub is scoped.
+selftest_doctor_flags_disconnected_lease() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/doctor-disc"
+    mkdir -p -- "$outdir/active/3"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+# Lane 3: live owner (pid 1, comm 'pi'), live chrome (pid 1 = init, /proc/1 exists),
+# port 53430 'responds' (curl stubbed to 0), but connected:false -> the F3 WARN we assert.
+pool_lease_write 3 "$2/active/3" 53430 abpool-3 1 pi 1000 /x 1 1 false
+# stub curl so the port-listening check passes (rc 0) -> without F3 this lane would be OK.
+curl() { return 0; }
+# Run doctor. It returns rc 1 when FAIL>0 (the temp tmpfs shows a non-btrfs FAIL, which is
+# UNRELATED to the F3 check) -> tolerate it with `|| true` so set -e does not abort.
+out="$(pool_admin_doctor 2>/dev/null || true)"
+# Assert ONLY the F3 invariant: the connected:false lane shows a daemon-disconnected WARN.
+printf '%s\n' "$out" | grep -qE 'lane .*3.*WARN.*daemon disconnected' || exit 1
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "doctor [lanes] warns on connected:false (out: $out)" || return 1
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The

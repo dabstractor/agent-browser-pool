@@ -18,7 +18,7 @@ passed to Chrome, `rm`, or a log. "Truthy" means `1`/`true`/`yes`/`on` (case-ins
 | `AGENT_BROWSER_POOL_STATE` | `~/.local/state/agent-browser-pool` | state dir: `lanes/<N>.json` leases, `acquire.lock`, `alerts.log`, `chrome-<N>.log`, `pool.log` |
 | `AGENT_CHROME_MASTER` | `${XDG_CONFIG_HOME:-~/.config}/google-chrome` | CoW source — your real Chrome user-data-dir. Agents copy current state on each acquire, so new logins propagate. May be live/in-use (PRD §2.7). **Never launch, mutate, or delete.** |
 | `AGENT_CHROME_EPHEMERAL_ROOT` | `~/.agent-chrome-profiles/active` | ephemeral lane dirs live at `<root>/<N>/` (deleted on release) |
-| `AGENT_BROWSER_REAL` | `~/.local/bin/agent-browser` | the REAL `agent-browser` CLI (called by absolute path; stays upgradable) |
+| `AGENT_BROWSER_REAL` | `~/.local/bin/agent-browser` | the REAL `agent-browser` CLI (bare name → `command -v`; a path → `-f -x`; stays upgradable) |
 | `AGENT_CHROME_BIN` | `google-chrome-stable` | Chrome binary (bare name → `command -v`; a path → `-f -x`) |
 | `AGENT_CHROME_PORT_BASE` | `53420` | lowest pool TCP port |
 | `AGENT_CHROME_PORT_RANGE` | `1000` | number of ports → range `[53420, 54420)` |
@@ -126,7 +126,7 @@ dir survive for reuse within the session.
 | Session logins/cookies didn't persist | Ephemeral profile is deleted on release, never written to master | By design — re-establish each session |
 | `status` shows my lane as `disconnected` | Daemon dropped but Chrome alive | Your next driving command re-binds automatically |
 | `status` shows my lane as `STALE` / field `?` | Owner process died or lease is corrupt | The reaper will reclaim it; the operator can run `reap` |
-| `doctor` reports WARN lines | Cruft from crashed agents (orphan dirs, dead Chrome, stale leases) | Operator-only: `agent-browser-pool reap` then `release <N>` / `release all` |
+| `doctor` reports WARN lines | Cruft from crashed agents (orphan dirs, dead Chrome, stale leases, disconnected daemon) | Operator-only: `agent-browser-pool reap` clears stale lanes **and** orphan dirs; `release <N>` / `release all` for explicit teardown |
 
 ## Admin CLI (operator-facing)
 
@@ -138,9 +138,9 @@ and only touch these if asked.
 ```
 agent-browser-pool                 # status (default)
 agent-browser-pool status
-agent-browser-pool reap            # tear down lanes whose owner died
+agent-browser-pool reap            # tear down stale-owner lanes + remove orphan dirs
 agent-browser-pool release 1       # explicit teardown of one lane
 agent-browser-pool release all     # clear the whole pool
-agent-browser-pool doctor          # diagnose the pool (exits 1 if unhealthy)
+agent-browser-pool doctor          # diagnose the pool (exits 1 on a blocking FAIL only; WARNs are advisory)
 agent-browser-pool help            # aliases: --help, -h
 ```

@@ -148,12 +148,21 @@ pool_config_init() {
         "${AGENT_CHROME_MASTER:-$xdg_cfg/google-chrome}")"
     ephemeral_root="$(_pool_config_canon_path \
         "${AGENT_CHROME_EPHEMERAL_ROOT:-$POOL_HOME_DIR/.agent-chrome-profiles/active}")"
-    real_bin="$(_pool_config_canon_path \
-        "${AGENT_BROWSER_REAL:-$POOL_HOME_DIR/.local/bin/agent-browser}")"
+    # AGENT_BROWSER_REAL name-or-path (mirrors the CHROME_BIN branch below): a bare name
+    # (no '/') is resolved via PATH at launch/exec time (exec "$name" honors PATH), so store
+    # it as-is; an explicit path is canonicalized via realpath -m. A bare name like
+    # `agent-browser` is then validated via `command -v`, NOT realpath-of-CWD (F5).
+    local real_in real_out
+    real_in="${AGENT_BROWSER_REAL:-$POOL_HOME_DIR/.local/bin/agent-browser}"
+    if [[ "$real_in" == */* ]]; then
+        real_out="$(_pool_config_canon_path "$real_in")"
+    else
+        real_out="$real_in"
+    fi
     POOL_STATE_DIR="$state_dir"; declare -g POOL_STATE_DIR
     POOL_MASTER_DIR="$master_dir"; declare -g POOL_MASTER_DIR
     POOL_EPHEMERAL_ROOT="$ephemeral_root"; declare -g POOL_EPHEMERAL_ROOT
-    POOL_REAL_BIN="$real_bin"; declare -g POOL_REAL_BIN
+    POOL_REAL_BIN="$real_out"; declare -g POOL_REAL_BIN
 
     # 3. CHROME_BIN name-or-path: a bare name (no '/') is resolved via PATH at launch
     #    time (M4.T2.S2), so store it as-is; an explicit path is canonicalized here.
@@ -2819,6 +2828,89 @@ pool_reap_stale() {
     return 0
 }
 
+# pool_reap_orphan_dirs
+#
+# Sweep numeric ephemeral dirs ($POOL_EPHEMERAL_ROOT/<N>/) that have NO lease (orphans —
+# left by an interrupted boot between `cp` and the lease-write, or a crashed release that
+# deleted the lease but not the dir) AND no live owner. For each orphan: kill any Chrome
+# process still pointed at it (scoped by --user-data-dir; its owning agent is gone) and
+# `rm -rf` the dir. Echoes the orphan count to stdout (the ONLY stdout write); rc 0 ALWAYS.
+#
+# THIS IS THE FIX for the report's F1/F6: pool_reap_stale is lease-driven, so it NEVER
+# sees an unleased dir. Before this helper, orphan dirs accumulated forever (each blocking
+# its lane number from reuse, F2) and NO pool command could remove them — `release <N>`
+# refused a lane with no lease, and the only remediation was manual `rm -rf`. doctor flags
+# orphans as WARN; reap now ALSO clears them, making doctor's advice actionable.
+#
+# SAFETY (why killing an orphan's Chrome is correct):
+#   - The dir has NO lease → no live owner. A Chrome pointed at it via
+#     --user-data-dir=<abs active/N> is an orphan Chrome whose owning harness died without
+#     releasing (the exact cruft reap exists to recover). Killing it mirrors pool_release_lane.
+#   - The pgrep scope is the FULL ABSOLUTE path user-data-dir=$POOL_EPHEMERAL_ROOT/$lane, so it
+#     cannot match a DIFFERENT lane's Chrome (each lane has exactly one dir active/<N>).
+#   - We SKIP a dir if pgrep can't run / finds nothing AND we leave it — no, we only skip a
+#     dir's *Chrome kill* when none matches; the dir itself is always removed (it has no
+#     lease = it's cruft). A Chrome that pgrep missed (race) is harmless: it'll be killed by
+#     the next reap (its dir is now gone → it'll exit on its own when it touches the dir).
+#   - Prefix-guarded rm -rf (reconstructed from lane#, same defense as _pool_release_lane_internals).
+#
+# LOGIC:
+#   a. if POOL_EPHEMERAL_ROOT missing → echo 0 (nothing to sweep).
+#   b. for each entry d in "$POOL_EPHEMERAL_ROOT"/*/: skip non-dir, non-numeric basename.
+#   c.   if pool_lease_exists "$base" → NOT an orphan → skip (leased dir belongs to a lane).
+#   d.   else (orphan): pgrep -f -- "user-data-dir=<abs d>"; if matches → pkill -f then SIGKILL
+#        stragglers (best-effort, || true). rm -rf -- "$d" (prefix-guarded). count++.
+#   e. echo count; return 0.
+#
+# GOTCHA — pool_lease_exists rc 1 (no lease) MUST be inside `if !` (bare ABORTS under set -e).
+# GOTCHA — pgrep/pkill return rc 1 on no-match → MUST be in `if`/`|| true` (never bare).
+# GOTCHA — nullglob NOT set → a no-match glob is its literal → `[[ -d "$d" ]] || continue` rejects it.
+# GOTCHA — snapshot iteration: the dir list is frozen before the loop; mid-loop rms can't mutate it.
+# GOTCHA — NON-FATAL always: every kill/rm is `2>/dev/null || true`. A TOCTOU (dir gone mid-sweep)
+#         → rm no-ops; a race where a lease appears mid-sweep → we skip next iteration (frozen).
+# GOTCHA — stdout discipline: ONLY the count printf. pgrep/pkill/rm are silent (2>/dev/null).
+# Reads POOL_EPHEMERAL_ROOT + POOL_LANES_DIR (via pool_lease_exists). No new globals.
+# PRECONDITION: pool_config_init. NON-FATAL (rc 0 always).
+pool_reap_orphan_dirs() {
+    local d base dir
+    local orphans=0
+
+    # (a) No ephemeral root → nothing to sweep.
+    [[ -d "$POOL_EPHEMERAL_ROOT" ]] || { printf '%s\n' "$orphans"; return 0; }
+
+    # (b) Snapshot the numeric dirs. nullglob unset → reject the literal via [[ -d ]].
+    for d in "$POOL_EPHEMERAL_ROOT"/*/; do
+        [[ -d "$d" ]] || continue
+        base="${d%/}"           # strip trailing slash
+        base="${base##*/}"      # basename
+        [[ "$base" =~ ^[0-9]+$ ]] || continue
+
+        # (c) Leased dir → belongs to a live lane, NOT an orphan → skip.
+        #     pool_lease_exists rc 1 (no lease) inside `if !` (errexit-exempt).
+        if ! pool_lease_exists "$base"; then
+            dir="$POOL_EPHEMERAL_ROOT/$base"
+            # (d) Orphan. Kill any Chrome still pointed at it (owner is gone). Scope by the
+            #     FULL ABSOLUTE --user-data-dir path so a different lane's Chrome is never hit.
+            #     pgrep rc 1 (no match) → `if` falls through (no kill). pkill best-effort.
+            if pgrep -f -- "user-data-dir=$dir" >/dev/null 2>&1; then
+                pkill -f -- "user-data-dir=$dir" 2>/dev/null || true
+                sleep 0.2                        # let renderer/GPU/utility children exit
+                pkill -9 -f -- "user-data-dir=$dir" 2>/dev/null || true
+            fi
+            # Prefix-guarded rm (mirror _pool_release_lane_internals). `|| true` (TOCTOU-safe).
+            if [[ -n "$dir" && "$dir" == "$POOL_EPHEMERAL_ROOT"/* && "$dir" != "$POOL_EPHEMERAL_ROOT/" ]]; then
+                rm -rf -- "$dir" 2>/dev/null || true
+            fi
+            _pool_log "pool_reap(orphan): removed orphan dir $dir (no lease)"
+            orphans=$((orphans + 1))
+        fi
+    done
+
+    # (e) Echo the orphan count to stdout (the ONLY stdout write). rc 0 ALWAYS.
+    printf '%s\n' "$orphans"
+    return 0
+}
+
 # -----------------------------------------------------------------------------
 # pool_reuse_orphan has been REMOVED (dead code — Issue #4; zero non-comment call
 # sites). The reuse-orphan feature is shipped via the INLINE loop inside
@@ -3344,8 +3436,16 @@ pool_force_session() {
 # RETURNS: 0 if the binary exists and is executable; otherwise it NEVER returns (pool_die).
 #   Same rc contract as pool_config_init / pool_state_init → the caller uses NO if-guard.
 _pool_preflight_real_bin() {
-    if [[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]; then
-        return 0
+    # Name-or-path (mirrors pool_config_init's CHROME_BIN branch + doctor [binary]):
+    # a path → -f + -x; a bare name → command -v (resolved via PATH at exec time).
+    if [[ "$POOL_REAL_BIN" == */* ]]; then
+        if [[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]; then
+            return 0
+        fi
+    else
+        if command -v "$POOL_REAL_BIN" >/dev/null 2>&1; then
+            return 0
+        fi
     fi
     pool_die "agent-browser-pool: the real agent-browser binary is missing or not executable:" \
              "$POOL_REAL_BIN" \
@@ -3831,36 +3931,50 @@ pool_admin_status() {
 #   Both rc-0-or-pool_die (a misconfigured pool fails loudly — correct). No guard.
 # CONSUMERS: M7.T5.S1 bin/agent-browser-pool dispatcher: `case reap) pool_admin_reap ;;`.
 pool_admin_reap() {
-    # Declare ALL locals up front (SC2155: never `local x="$(…)"`).
-    local count
+    # Declare ALL locals up front (SC2155: never `local x="$(…)"").
+    local stale_count orphan_count total
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
-    # Mirrors pool_admin_status (lib/pool.sh:3604-3606) + pool_wrapper_main step "a"
-    # (lib/pool.sh:3455-3459). pool_state_init's idempotent mkdir -p guarantees
-    # POOL_LANES_DIR exists (so a fresh pool's first reap works cleanly).
+    # Mirrors pool_admin_status + pool_wrapper_main step "a". pool_state_init's
+    # idempotent mkdir -p guarantees POOL_LANES_DIR exists (so a fresh pool's first
+    # reap works cleanly).
     pool_config_init
     pool_state_init
 
-    # --- b. CAPTURE the reaped count from pool_reap_stale -----------------------
+    # --- b. CAPTURE the stale-lane count from pool_reap_stale -------------------
     # pool_reap_stale (M5.T3.S1): scans every lane, releases each stale one (full
     # teardown: close+kill+rm+rmlease), echoes ONE integer = the count reaped, rc 0
     # ALWAYS (non-fatal). The capture is MANDATORY: pool_reap_stale writes the raw
-    # integer to ITS stdout — if we did NOT capture it, the integer would leak to
-    # the user alongside our message. $() strips the trailing newline → bare token.
+    # integer to ITS stdout — if we did NOT capture it, the integer would leak to the
+    # user alongside our message. $() strips the trailing newline → bare token.
     # NO `if !` guard: pool_reap_stale rc 0 always (unlike pool_lease_read/pool_lane_is_stale).
-    count="$(pool_reap_stale)"
+    stale_count="$(pool_reap_stale)"
 
-    # --- c. print the human report (the ONLY stdout write in this function) -----
-    # Bare `(( count == 0 ))` returns 1 when count==0 → FATAL under set -e. Inside
-    # `if` it is errexit-exempt. count is digits-only (pool_reap_stale's contract),
-    # so the arithmetic is always valid. The literal "lane(s)" handles N=1 and N>0.
-    if (( count == 0 )); then
-        printf 'No stale lanes found.\n'
-    else
-        printf 'Reaped %d stale lane(s).\n' "$count"
+    # --- c. CAPTURE the orphan-dir count from pool_reap_orphan_dirs -------------
+    # pool_reap_orphan_dirs: sweeps numeric active/<N>/ dirs with NO lease and no
+    # live owner, kills any orphan Chrome pointed at them, removes the dirs; echoes
+    # the count, rc 0 always. This is the F1 fix — before it, orphan dirs (the most
+    # common real-world cruft doctor flags) accumulated forever and NO pool command
+    # could remove them. rc 0 always → bare capture is set -e-safe.
+    orphan_count="$(pool_reap_orphan_dirs)"
+
+    # --- d. print the human report (the ONLY stdout write in this function) ----
+    # Report stale lanes AND orphan dirs separately (different cruft kinds; the
+    # operator can tell what was cleared). total drives the nothing-found message.
+    # Bare `(( ))` returns 1 when value 0 → FATAL under set -e; inside `if` it is
+    # errexit-exempt. Counts are digits-only (the helpers' contracts).
+    total=$((stale_count + orphan_count))
+    if (( stale_count > 0 )); then
+        printf 'Reaped %d stale lane(s).\n' "$stale_count"
+    fi
+    if (( orphan_count > 0 )); then
+        printf 'Removed %d orphan dir(s).\n' "$orphan_count"
+    fi
+    if (( total == 0 )); then
+        printf 'No stale lanes or orphan dirs found.\n'
     fi
 
-    # --- d. NON-FATAL always — never pool_die in body, never non-zero -----------
+    # --- e. NON-FATAL always — never pool_die in body, never non-zero -----------
     return 0
 }
 
@@ -4039,8 +4153,9 @@ pool_admin_release() {
 #   d. MASTER      — $POOL_MASTER_DIR exists + non-empty (-d + ls -A) → OK / FAIL.
 #   e. RECONCILE LANES — per lease (pool_lanes_list): ephemeral_dir missing → LEAK;
 #                    dead chrome_pid → LEAK; port not listening (curl /json/version) →
-#                    DISCONNECTED. Each = WARN. A provisional lease (port=0) → ONE WARN
-#                    "PROVISIONAL" and the three checks are SKIPPED.
+#                    DISCONNECTED; lease connected:false → daemon disconnected. Each = WARN.
+#                    A provisional lease (port=0) → ONE WARN "PROVISIONAL" and the checks
+#                    are SKIPPED.
 #   f. RECONCILE DIRS  — per numeric dir in $POOL_EPHEMERAL_ROOT: no matching lease →
 #                    ORPHAN DIR = WARN.
 #   g. SUMMARY     — print "OK=N  WARN=N  FAIL=N" + verdict; return 1 if fail>0 else 0.
@@ -4049,7 +4164,8 @@ pool_admin_release() {
 #   FAIL (exit 1): missing required dep; $POOL_REAL_BIN not executable; non-btrfs (no
 #                  slow-copy); master missing/empty.
 #   WARN (exit 0): non-btrfs + slow-copy; LEAK (no dir / dead chrome); DISCONNECTED;
-#                  ORPHAN DIR; PROVISIONAL lease; corrupt/unreadable lease.
+#                  daemon disconnected (lease connected:false); ORPHAN DIR; PROVISIONAL
+#                  lease; corrupt/unreadable lease.
 #   (not counted): notify-send MISSING (optional).
 # Rationale: infra problems BLOCK correct pool operation → FAIL; lane/dir cruft is
 #   EXACTLY what reap/release recover from → WARN. doctor = "FAIL = fix setup; WARN =
@@ -4067,7 +4183,8 @@ pool_admin_release() {
 #   [master]
 #     <MASTER_DIR>    OK | FAIL (missing or empty)
 #   [lanes]
-#     lane <N>   OK | WARN (LEAK(no dir); LEAK(dead chrome); DISCONNECTED) | WARN (PROVISIONAL)
+#     lane <N>   OK | WARN (LEAK(no dir); LEAK(dead chrome); DISCONNECTED; daemon
+#                disconnected; PROVISIONAL) | WARN (PROVISIONAL)
 #     (no active leases)   ← empty pool
 #   [dirs]
 #     <dir>      WARN (ORPHAN DIR: no lease)
@@ -4117,7 +4234,7 @@ pool_admin_doctor() {
     local ok=0 warn=0 fail=0
     local fstype dep chrome_present chrome_label dir_count orphan_count
     local -a lanes fields
-    local lane json ephemeral_dir chrome_pid port findings
+    local lane json ephemeral_dir chrome_pid port connected findings
     local d base
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
@@ -4182,10 +4299,24 @@ pool_admin_doctor() {
     fi
 
     # =========================================================================
-    # [binary] — $POOL_REAL_BIN exists + executable
+    # [binary] — $POOL_REAL_BIN exists + executable (name-or-path, mirrors preflight)
     # =========================================================================
     printf '[binary]\n'
-    if [[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]; then
+    local real_present
+    if [[ "$POOL_REAL_BIN" == */* ]]; then
+        if [[ -f "$POOL_REAL_BIN" && -x "$POOL_REAL_BIN" ]]; then
+            real_present=1
+        else
+            real_present=0
+        fi
+    else
+        if command -v "$POOL_REAL_BIN" >/dev/null 2>&1; then
+            real_present=1
+        else
+            real_present=0
+        fi
+    fi
+    if (( real_present )); then
         printf '  %-22s OK\n' "$POOL_REAL_BIN"
         ok=$((ok+1))
     else
@@ -4252,13 +4383,17 @@ pool_admin_doctor() {
                 warn=$((warn+1))
                 continue
             fi
-            # ONE jq fork (mirror status): ephemeral_dir (str), chrome_pid (num), port (num).
-            # `:-` defends a short read. jq -r echoes numbers as digit strings (fine for
-            # /proc/$chrome_pid and the curl $port interpolation).
-            mapfile -t fields < <(jq -r '.ephemeral_dir, .chrome_pid, .port' <<<"$json")
+            # ONE jq fork (mirror status): ephemeral_dir (str), chrome_pid (num), port (num),
+            # connected (bool as a string "true"/"false"). `:-` defends a short read. jq -r
+            # echoes numbers as digit strings (fine for /proc/$chrome_pid and the curl $port
+            # interpolation). `connected` is ALSO read here so doctor's lane verdict factors
+            # the lease flag (F3) — aligning doctor with `status`, which shows
+            # `disconnected` when connected: false even if Chrome is reachable.
+            mapfile -t fields < <(jq -r '.ephemeral_dir, .chrome_pid, .port, .connected' <<<"$json")
             ephemeral_dir="${fields[0]:-}"
             chrome_pid="${fields[1]:-}"
             port="${fields[2]:-}"
+            connected="${fields[3]:-}"
             findings=""
             # Provisional lease (port not a positive integer) → incomplete acquire that was
             # NOT cleaned up. Skip the three checks (they'd spuriously triple-flag a
@@ -4282,6 +4417,17 @@ pool_admin_doctor() {
                     :
                 else
                     findings+='DISCONNECTED; '
+                fi
+                # (4) daemon disconnected flag? The lease's connected:false means the daemon
+                #     is detached (Issue #3 close path) even when Chrome + port are fine. This
+                #     is exactly the status-vs-doctor divergence F3 flagged: without it, a
+                #     live-owner + live-chrome + port-responding + connected:false lane shows
+                #     `disconnected` in `status` but `OK` in `doctor`. Surface it as a WARN so
+                #     doctor no longer reports green while status reports yellow. It is advisory
+                #     cruft (the next driving call's ensure_connected rebinds automatically),
+                #     hence WARN, not a LEAK.
+                if [[ "$connected" == "false" ]]; then
+                    findings+='daemon disconnected; '
                 fi
                 if [[ -z "$findings" ]]; then
                     printf '  lane %-6s OK\n' "$lane"
@@ -4385,12 +4531,15 @@ pool_admin_help() {
     printf '                          lane, port, session, owner pid+cwd, chrome pid, age, state.\n'
     printf '  reap                    Tear down lanes whose owning process has died:\n'
     printf '                          kill Chrome, delete the ephemeral profile dir, remove the lease.\n'
+    printf '                          Also removes orphan ephemeral dirs (no lease, no live owner).\n'
     printf '  release [<N>|all]       Explicitly tear down one lane by number, or every lane.\n'
     printf '                          Use '"'"'release all'"'"' to clear the whole pool.\n'
     printf '  doctor                  Diagnose the pool: verify dependencies, the real binary,\n'
     printf '                          the filesystem (btrfs), and the master profile; reconcile\n'
     printf '                          leases against live Chromes and ephemeral dirs; report leaks.\n'
-    printf '                          Exits 1 if any check fails, 0 otherwise.\n'
+    printf '                          Exits 1 on a blocking FAIL (deps/binary/btrfs/master);\n'
+    printf '                          WARNs (orphan dirs, dead Chrome, disconnected) are advisory\n'
+    printf '                          cruft that reap/release clear and do not affect the exit code.\n'
     printf '  help                    Show this help. Aliases: --help, -h.\n'
     printf '\n'
     printf 'Driving commands:\n'
