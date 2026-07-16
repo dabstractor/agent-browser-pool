@@ -7,9 +7,9 @@
 # to its own locked ephemeral lane via the SOLE entry point bin/agent-browser-pool (explicit
 # invocation — NO PATH shadowing) and CAN NEITHER DETECT NOR ESCAPE the pool. One test_* body
 # per §2.15 clause (+ invocation-surface + fail-fast contracts):
-#   (a)  agent-browser-pool skills get core → passthrough (META → exec real binary; byte-equal)
+#   (a)  agent-browser-pool skills get core → FAIL-FAST (driving, no pi ancestor; §2.4 step 1)
 #   (b1) agent-browser-pool --help          → POOL help (bin dispatch → pool_admin_help; NOT real help)
-#   (b2) agent-browser-pool --version       → passthrough (META → exec real binary; byte-equal)
+#   (b2) agent-browser-pool --version       → FAIL-FAST (driving, no pi ancestor; §2.4 step 1)
 #   (c)  open <url> zero-prep               → lands MY lane (acquired+booted+connected+leased)
 #   (d)  2nd open same owner                → reuses the SAME lane N (find_mine, not re-acquire)
 #   (e)  connect <random>                   → routed to MY lane (the <port|url> arg is STRIPPED)
@@ -226,20 +226,52 @@ _transparency_reap_all_sim_owners() {
 }
 
 # =============================================================================
-# TEST (a) — `agent-browser-pool skills get core` → passthrough (META, byte-equal to real binary).
-# PRD §2.15: meta commands are unaffected. `skills` has no case arm in bin/agent-browser-pool →
-# the driving-command dispatcher → the pool's meta classifier
-# classifies cmd=`skills` as meta → exec
-# `$POOL_REAL_BIN skills get core`. META short-circuits BEFORE owner resolve — but set a pi
-# ancestor anyway to prove meta wins regardless. Assert EQUALITY (not content — output varies).
+# _transparency_assert_driving_no_pi_fails_fast CMD... — shared verifier: assert that a driving
+# command (CMD...) with NO pi ancestor fail-fasts with the 'pi ancestor' pool_die message.
+# Mirrors the proven mechanism of test_driving_no_pi_ancestor_fails_fast (item i):
+#   - `setsid --fork` ALWAYS forks → the detached child is reparented to the subreaper/init,
+#     so its ppid chain no longer contains `pi` (bare `setsid` only forks conditionally → flaky;
+#     `--wait` is FATAL — it keeps setsid as the parent → chain intact → no fail-fast).
+#   - `env -u` strips AGENT_BROWSER_POOL_OWNER_PID/_STARTTIME so pool_owner_resolve's TEST MODE
+#     cannot short-circuit (validate.sh::setup exports them; without -u the child would inherit
+#     a fake owner → no fail-fast).
+#   - redirect to a TEMP FILE (setsid --fork exits immediately after forking → `$()` capture is
+#     racy + could wedge on a regression) + bounded poll (10s ceiling; pool_die is sub-second).
+# pool_die fires at pool_wrapper_main step d, BEFORE any Chrome/lane work → no orphan
+# (the detached child self-exits; setsid pid reaped by `wait`). AGENTS.md §1-§3 compliant.
+_transparency_assert_driving_no_pi_fails_fast() {
+    local tmp bg deadline msg
+    tmp="$(mktemp)"
+    env -u AGENT_BROWSER_POOL_OWNER_PID -u AGENT_BROWSER_POOL_OWNER_STARTTIME \
+        setsid --fork "$ABPOOL_ADMIN" "$@" >"$tmp" 2>&1 &
+    bg=$!
+    wait "$bg" 2>/dev/null || true              # reap the setsid zombie (AGENTS.md §3); setsid exits immediately after forking
+    # Poll the temp file for the fail-fast message (bounded — pool_die is sub-second).
+    deadline=$(( $(date +%s) + 10 ))
+    msg=""
+    while (( $(date +%s) < deadline )); do
+        msg="$(cat "$tmp" 2>/dev/null || true)"
+        [[ "$msg" == *"pi ancestor"* ]] && break
+        sleep 0.2
+    done
+    rm -f -- "$tmp"
+    [[ "$msg" == *"pi ancestor"* ]] \
+        || { _fail "no-pi '$*' did NOT fail fast; got: ${msg:-<empty>}"; return 1; }
+}
+
+# TEST (a) — `agent-browser-pool skills get core` with NO pi ancestor → FAIL-FAST pool_die (§2.4 step 1).
+# Post P1.M1.T1.S1 (the step-c exec-to-real-binary path deleted), `skills` is a DRIVING command: it has no
+# case arm in bin/agent-browser-pool → falls to pool_wrapper_main → step d (owner resolve) →
+# POOL_OWNER_PID==0 (no pi ancestor) → pool_die 'driving commands require a pi ancestor …'.
+# Same fail-fast mechanism as test_driving_no_pi_ancestor_fails_fast (item i): detach via
+# `setsid --fork` (reparent the child away from the pi/bash chain) + `env -u` (strip owner
+# overrides) + capture to a temp file + poll for 'pi ancestor'. pool_die fires at step d,
+# BEFORE any Chrome/lane work → sub-second, no orphan. (A pi ancestor is deliberately NOT
+# spawned — that is the condition under test.)
 # =============================================================================
-test_passthrough_skills() {
-    _transparency_setup_real_env || return 1
-    _transparency_spawn_owner >/dev/null       # a pi ancestor IS present; meta ignores it
-    local w r
-    w="$(timeout 15 "$ABPOOL_ADMIN" skills get core 2>/dev/null || true)"
-    r="$(timeout 15 "$POOL_REAL_BIN"  skills get core 2>/dev/null || true)"
-    assert_eq "$r" "$w" "skills get core: pool output == real binary output (meta passthrough)" || return 1
+test_skills_fail_fast_no_pi() {
+    _transparency_setup_real_env || return 1   # AGENT_BROWSER_REAL MUST be set so _pool_preflight_real_bin passes BEFORE the owner-resolve die
+    _transparency_assert_driving_no_pi_fails_fast skills get core || return 1
 }
 
 # =============================================================================
@@ -262,18 +294,16 @@ test_help_shows_pool_help() {
 }
 
 # =============================================================================
-# TEST (b2) — `agent-browser-pool --version` → passthrough (META, byte-equal to real binary).
-# `--version` has NO case arm in bin/agent-browser-pool → falls to the driving-command dispatcher →
-# pool_dispatch_classify classifies `--version` as meta → exec `$POOL_REAL_BIN --version`.
-# So the byte-equal assertion STILL HOLDS (identical to the old model, just via $ABPOOL_ADMIN).
+# TEST (b2) — `agent-browser-pool --version` with NO pi ancestor → FAIL-FAST pool_die (§2.4 step 1).
+# Post P1.M1.T1.S1 (the step-c exec-to-real-binary path deleted), `--version` is a DRIVING command: it has
+# no case arm in bin/agent-browser-pool → falls to pool_wrapper_main → step d (owner resolve) →
+# POOL_OWNER_PID==0 (no pi ancestor) → pool_die 'driving commands require a pi ancestor …'.
+# Same fail-fast mechanism as test_driving_no_pi_ancestor_fails_fast (item i). pool_die fires
+# at step d, BEFORE any Chrome/lane work → sub-second, no orphan.
 # =============================================================================
-test_version_passthrough() {
-    _transparency_setup_real_env || return 1
-    _transparency_spawn_owner >/dev/null
-    local w r
-    w="$(timeout 15 "$ABPOOL_ADMIN"  --version 2>/dev/null || true)"
-    r="$(timeout 15 "$POOL_REAL_BIN" --version 2>/dev/null || true)"
-    assert_eq "$r" "$w" "--version: pool output == real binary output (meta passthrough)" || return 1
+test_version_fail_fast_no_pi() {
+    _transparency_setup_real_env || return 1   # AGENT_BROWSER_REAL MUST be set so _pool_preflight_real_bin passes BEFORE the owner-resolve die
+    _transparency_assert_driving_no_pi_fails_fast --version || return 1
 }
 
 # =============================================================================
