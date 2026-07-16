@@ -496,9 +496,9 @@ test_next_agent_distinct_lane() {
 }
 
 # =============================================================================
-# TEST (i) — driving command with NO pi ancestor → FAIL-FAST pool_die (§2.4 step 1).
-# PRD §2.4 step 1 / shipped P2.M1.T1.S2: "No pi ancestor → DRIVING fails fast" — the pool's
-# driving-command dispatcher step d calls pool_die (exit 1, stderr contains 'pi ancestor … for raw browser use call
+# TEST (i) — driving command with NO recognized-harness ancestor → FAIL-FAST pool_die (§2.4 step 1).
+# PRD §2.4 step 1 / shipped P2.M1.T1.S2 (msg text: P3.M1.T1.S3): "No recognized-harness ancestor → DRIVING fails fast" — the pool's
+# driving-command dispatcher step d calls pool_die (exit 1, stderr contains 'supported agent harness … for raw browser use call
 # 'agent-browser' directly').
 #
 # DETERMINISM: pool_owner_resolve REAL MODE walks ppid from $$. This suite is often launched BY
@@ -508,13 +508,13 @@ test_next_agent_distinct_lane() {
 # a NEW session and exits; the child reparents to the subreaper / pid 1 (systemd, comm != 'pi') →
 # ppid walk finds no 'pi' → POOL_OWNER_PID=0 → fail-fast. `env -u` strips any inherited owner
 # override. Because setsid exits before the child, $() capture is racy → redirect the detached
-# child's output to a TEMP FILE and poll (bounded) for 'pi ancestor'. pool_die fires at step d,
+# child's output to a TEMP FILE and poll (bounded) for 'supported agent harness'. pool_die fires at step d,
 # BEFORE any Chrome/lane work → sub-second. No hang, no orphan (child self-exits via pool_die;
 # setsid pid reaped by `wait`; grandchild reaped by its new parent/subreaper — AGENTS.md §3).
 # =============================================================================
 test_driving_no_pi_ancestor_fails_fast() {
     _transparency_setup_real_env || return 1   # AGENT_BROWSER_REAL MUST be set so _pool_preflight_real_bin passes BEFORE the owner-resolve die
-    # Deliberately NO _transparency_spawn_owner — this body has NO pi ancestor.
+    # Deliberately NO _transparency_spawn_owner — this body has NO recognized-harness ancestor.
     local tmp bg deadline msg
     tmp="$(mktemp)"
     # Fully detach: setsid --fork (always fork → the child is reparented to the subreaper /
@@ -532,12 +532,12 @@ test_driving_no_pi_ancestor_fails_fast() {
     msg=""
     while (( $(date +%s) < deadline )); do
         msg="$(cat "$tmp" 2>/dev/null || true)"
-        [[ "$msg" == *"pi ancestor"* ]] && break
+        [[ "$msg" == *"supported agent harness"* ]] && break
         sleep 0.2
     done
     rm -f -- "$tmp"
-    [[ "$msg" == *"pi ancestor"* ]] \
-        || { _fail "driving cmd with no pi ancestor did NOT fail fast; got: ${msg:-<empty>}"; return 1; }
+    [[ "$msg" == *"supported agent harness"* ]] \
+        || { _fail "driving cmd with no recognized-harness ancestor did NOT fail fast; got: ${msg:-<empty>}"; return 1; }
 }
 
 # =============================================================================
