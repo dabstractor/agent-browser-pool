@@ -4,14 +4,14 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bug Fix Suite — Isolation & Correctness Hardening",
-      "status": "Researching",
+      "status": "Complete",
       "description": "Fix three validated defects in agent-browser-pool: (1) Major — reaper's unanchored pgrep/pkill -f kills other lanes' live Chromes; (2) Minor — doctor hard-FAILs on missing optional `ss`; (3) Minor — pool_ensure_connected reconnect/relaunch paths skip the BUG-1 identity check. All three are in lib/pool.sh (disjoint functions, no inter-issue code dependencies). Each fix includes a regression test (implicit TDD) and inline doc updates. A final doc-sync task sweeps README.md and skill docs.",
       "milestones": [
         {
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Issue Fixes & Regression Tests",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Implement all three fixes with regression coverage. Issues are independent (disjoint functions) but applied to the same source tree sequentially. Tests follow the single-setup selftest runner pattern (AGENTS.md §4: setup() called at most once, bodies run in the main shell).",
           "tasks": [
             {
@@ -103,14 +103,14 @@
               "type": "Task",
               "id": "P1.M1.T4",
               "title": "Sync changeset-level documentation",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Final sweep of changeset-level docs (README.md, skill docs) to ensure they accurately reflect the three fixes. Per the DOC SYNC rule §5 Mode B: cross-cutting overview docs get a final pass. Each implementing subtask already updated its inline comments/docstrings (Mode A); this task handles README-level summaries.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T4.S1",
                   "title": "Sweep README.md and skill docs for accuracy post-fix",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",
