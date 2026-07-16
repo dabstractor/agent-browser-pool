@@ -136,9 +136,16 @@ Each ephemeral profile starts as a clone of the master identity:
   require a supported agent harness — that is how your lane is keyed to you. The call fails fast with an
   actionable message pointing you at the real `agent-browser` for raw browser use. Run your
   browser work under a supported harness (pi/claude/codex/agy); don't try to bypass it.
-- **"My `agent-browser-pool` call hangs a long time."** The pool may be **exhausted** (all
-  lanes busy). It self-heals — it reaps dead owners and, after `AGENT_BROWSER_POOL_WAIT`
-  (default 600s), force-reclaims one. Do **not** try to "fix" this by booting Chrome directly.
+- **"My `agent-browser-pool` call is slow but eventually connects."** The pool is likely
+  **exhausted** (all lanes busy). It self-heals — it reaps dead owners and, after
+  `AGENT_BROWSER_POOL_WAIT` (default 600s), force-reclaims one. Do **not** try to "fix" this
+  by booting Chrome directly.
+- **"My `agent-browser-pool` call fails to boot, or hangs with no progress across retries."**
+  This is **not** exhaustion and will **not** self-heal — a lane that can't boot fails
+  identically every time, so retrying in a loop just burns work. Run `agent-browser-pool doctor`
+  (read-only); if it reports problems or the failure repeats, **stop retrying and escalate to
+  the operator**. Do not boot Chrome directly, and do not run `release all` (it tears down
+  other agents' working lanes).
 - **Don't confuse `close` with release.** `close` keeps your browser alive for reuse; release
   (which happens automatically when your session ends) destroys it.
 

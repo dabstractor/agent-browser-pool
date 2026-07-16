@@ -121,7 +121,8 @@ dir survive for reuse within the session.
 |---|---|---|
 | Wrong browser / no lane acquired | Driving command run outside a supported harness (no recognized-harness ancestor → fail-fast) | Run your browser work under a supported harness; for raw browser use call `agent-browser` directly |
 | `connect <port>` "did nothing" | By design — the pool owns the connection and drops your arg | It worked; your lane is already connected. Use `agent-browser-pool status` to confirm |
-| `agent-browser-pool` call hangs a long time | Pool exhausted (all lanes busy); self-healing reaper running | Wait; it reaps dead owners and force-reclaims after `AGENT_BROWSER_POOL_WAIT` (600s). Don't boot Chrome directly |
+| `agent-browser-pool` call is slow but eventually connects | Pool exhausted (all lanes busy); self-healing reaper running | Wait; it reaps dead owners and force-reclaims after `AGENT_BROWSER_POOL_WAIT` (600s). Don't boot Chrome directly |
+| `agent-browser-pool` call **fails to boot** / never connects (errors, or no progress across retries) | **Not** exhaustion — a boot that fails does so identically every time (Chrome/profile/port/resource problem); will **not** self-heal | Run `agent-browser-pool doctor`; if it reports problems or the failure repeats, **stop retrying and escalate to the operator** — don't loop, don't boot Chrome directly, don't `release all` (kills peers' lanes) |
 | `close` didn't free my lane / Chrome still running | By design — `close` is disconnect-only; lane survives for reuse | End your session to release; or ask the operator to run `release <N>` |
 | Session logins/cookies didn't persist | Ephemeral profile is deleted on release, never written to master | By design — re-establish each session |
 | `status` shows my lane as `disconnected` | Daemon dropped but Chrome alive | Your next driving command re-binds automatically |
