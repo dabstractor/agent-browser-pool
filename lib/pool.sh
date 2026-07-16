@@ -106,6 +106,7 @@ _pool_config_bool() {
 #   AGENT_BROWSER_POOL_WAIT        600                                             POOL_WAIT             uint
 #   AGENT_CHROME_HEADLESS          (unset = windowed)                              POOL_HEADLESS         bool (1=headless)
 #   AGENT_CHROME_ALLOW_SLOW_COPY   (unset = refuse non-btrfs)                      POOL_ALLOW_SLOW_COPY  bool (1=allow real copy)
+#   AGENT_CHROME_PROFILE           (unset = derive from Local State last_used)     POOL_PROFILE_DIR      profile-dir name (e.g. "Profile 8"/"Default")
 #   AGENT_BROWSER_POOL_HARNESSES   pi,claude,codex,agy,antigravity                 POOL_HARNESSES        comma-set (lowercased; empty→default)
 #
 # Derived (no env var):
@@ -191,6 +192,13 @@ pool_config_init() {
     allow_slow_copy="$(_pool_config_bool "${AGENT_CHROME_ALLOW_SLOW_COPY:-}")"
     POOL_HEADLESS="$headless"; declare -g POOL_HEADLESS
     POOL_ALLOW_SLOW_COPY="$allow_slow_copy"; declare -g POOL_ALLOW_SLOW_COPY
+
+    # 5b. Forced Chrome profile dir (operator override). When non-empty, pool_chrome_launch
+    #     pins --profile-directory to this REGARDLESS of Local State -> profile.last_used,
+    #     which is unstable in a LIVE master and has even been observed CORRUPT (a stray
+    #     filesystem path stored as last_used). Empty (default) = derive from last_used.
+    local profile_dir_in="${AGENT_CHROME_PROFILE:-}"
+    POOL_PROFILE_DIR="$profile_dir_in"; declare -g POOL_PROFILE_DIR
 
     # 6. Recognized harnesses (owner resolution, PRD §2.11 / Decision O9) — comma-separated
     #    comm values the pool treats as valid lane owners. Normalized to a clean lowercase
@@ -1524,7 +1532,9 @@ pool_chrome_launch() {
     log_file="$POOL_STATE_DIR/chrome-$lane.log"
 
     # Build the flag list (array — survives any future arg with spaces; no word-splitting).
-    # The list is the PRD §2.6 EXACT flag set (8 flags) + headless iff POOL_HEADLESS==1.
+    # PRD §2.6 base flag set (8 flags) + headless iff POOL_HEADLESS==1. A conditional
+    # --profile-directory=<last_used|Default> is appended below (profile-pin block) to
+    # suppress the startup profile picker when the UDD carries multiple profiles.
     flags=(
         --remote-debugging-port="$port"
         --user-data-dir="$user_data_dir"
@@ -1537,6 +1547,37 @@ pool_chrome_launch() {
         --disable-back-forward-cache
     )
     [[ "$POOL_HEADLESS" == "1" ]] && flags+=(--headless=new)
+
+    # --- profile pin: suppress the multi-profile startup picker -----------------------
+    # The CoW source (master) may carry several profiles (Default, Profile 1, … , Profile
+    # N — note these dir names CONTAIN a space, handled by the array form above). With no
+    # --profile-directory, Chrome defers to Local State -> profile.last_used AND, when ≥2
+    # profiles are registered, surfaces a "choose a profile" picker on launch — a dialog an
+    # unattended agent cannot dismiss. Pin to the profile Chrome would have picked anyway
+    # (the UDD's OWN Local State -> profile.last_used), so observed behavior is unchanged
+    # except the picker is skipped. Best-effort + NEVER fatal: an unreadable/missing Local
+    # State, a missing jq, or a last_used pointing at a since-deleted dir falls back to
+    # Default, then to "add nothing" (let Chrome decide). Reading the UDD's own ephemeral
+    # Local State means a relaunch after a mid-session profile switch picks up the new
+    # last_used too. (SC2155: `local` declared here, command-sub assigned separately.)
+    local local_state profile_dir
+    local_state="$user_data_dir/Local State"
+    profile_dir=""
+    # Selection priority (first match wins; every branch is best-effort, never fatal):
+    #   1. POOL_PROFILE_DIR (AGENT_CHROME_PROFILE) — operator-forced; decouples agents from
+    #      the master's last_used, which is unstable in a LIVE master and can be corrupt.
+    #   2. Local State -> profile.last_used — only trusted if that subdir actually exists.
+    if [[ -n "${POOL_PROFILE_DIR:-}" ]]; then
+        profile_dir="$POOL_PROFILE_DIR"
+    elif [[ -f "$local_state" ]]; then
+        profile_dir="$(jq -r '.profile.last_used // empty' "$local_state" 2>/dev/null)" \
+            || profile_dir=""
+    fi
+    if [[ -n "$profile_dir" && -d "$user_data_dir/$profile_dir" ]]; then
+        flags+=(--profile-directory="$profile_dir")
+    elif [[ -d "$user_data_dir/Default" ]]; then
+        flags+=(--profile-directory=Default)
+    fi
 
     # Launch: setsid makes Chrome its own session/group leader (pgid==pid). The redirection
     # captures Chrome's combined stdout/stderr to the per-lane log. `&` backgrounds it; $!
