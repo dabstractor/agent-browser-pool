@@ -328,6 +328,67 @@ selftest_sim_owner_is_alive_pi() {
         || { _fail "pool_owner_alive rejected the simulated live owner"; return 1; }
 }
 
+# selftest_owner_resolves_non_pi_harness — POSITIVE: a recognized non-pi harness ('claude')
+# resolves via pool_owner_resolve's TEST MODE (which records the ACTUAL /proc comm, not a hardcoded
+# "pi"), is marked resolved (POOL_OWNER_PID!=0), AND pool_owner_alive accepts it; NEGATIVE: a
+# non-harness comm ('xterm') is REJECTED by pool_owner_alive (a lease expecting comm 'claude' must
+# not adopt an xterm process — identity isolation, PRD §2.13). Exercises the generalized
+# spawn_sim_owner [COMM] (P3.M2.T1.S1) + pool_owner_resolve's actual-comm TEST MODE (P3.M1.T1.S2).
+#
+# Runs under the single-setup runner (_run_selftest_suite): NO setup() re-call; the body runs via
+# `if "$fn"` in the MAIN shell (no subshell ⇒ the EXIT trap never fires mid-suite). It spawns+reaps
+# its OWN sim owners and MUST NOT overwrite the shared ABPOOL_CUR_OWNER (setup's pi owner, kept
+# alive for the whole suite incl. selftest_sim_owner_is_alive_pi).
+#
+# REAPING (AGENTS.md §3/§4 — GUARANTEED): "capture → reap → assert" ordering. Every spawned owner
+# is kill+wait'd BEFORE any assert on it, so an assert failure (return 1 under set -e) can never
+# leak a process. Between spawn and reap every op is set -e-exempt (assignments; non-fatal
+# pool_owner_resolve; `pool_owner_alive … || alive_rc=$?`; `cat … || true`) ⇒ the reap always runs.
+# The kill+wait idiom mirrors _release_kill_owner_and_reap_zombie (release_reaper.sh): the spawned
+# child is reparented out of the $(spawn_sim_owner) subshell so `wait` may return 127 — harmless
+# (the kill terminates it; the subreaper reaps the zombie; we never re-check a dead owner). Temp
+# bin dirs (/tmp/abpool-pi.*) are reaped by the EXIT trap's comm-agnostic glob backstop.
+selftest_owner_resolves_non_pi_harness() {
+    local pid st resolve_comm resolve_pid real_comm alive_rc
+
+    # --- POSITIVE: recognized non-pi harness 'claude' resolves (PRD §2.4 step 1) ---
+    pid="$(spawn_sim_owner 600 claude)"
+    st="$(_pool_get_starttime "$pid")"
+    # Drive resolve in TEST MODE for THIS pid only. The inline single-command env assignment
+    # (VAR=val func) overrides the exported AGENT_BROWSER_POOL_OWNER_* (which setup set to its pi
+    # owner) for THIS call and REVERTS after (host-verified) ⇒ no leakage into the later
+    # selftest_sim_owner_is_alive_pi. pool_owner_resolve reads the REAL /proc/comm here.
+    AGENT_BROWSER_POOL_OWNER_PID="$pid" AGENT_BROWSER_POOL_OWNER_STARTTIME="$st" pool_owner_resolve
+    resolve_comm="$POOL_OWNER_COMM"      # the ACTUAL recorded comm ("claude")
+    resolve_pid="$POOL_OWNER_PID"        # non-zero ⟹ resolved, not failed
+    # pool_owner_alive must ACCEPT the claude process (comm + starttime both match). Capture rc
+    # via `|| alive_rc=$?` (errexit-exempt) so a reject never aborts this body.
+    alive_rc=0
+    pool_owner_alive "$pid" "$st" "$resolve_comm" || alive_rc=$?
+    # REAP before asserting (guaranteed cleanup regardless of the asserts below).
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    # Asserts (deferred until after the reap):
+    assert_eq "claude" "$resolve_comm" "resolve recorded actual comm (claude)" || return 1
+    [[ "$resolve_pid" != "0" ]] || { _fail "resolve set POOL_OWNER_PID=0 (did not resolve)"; return 1; }
+    [[ "$alive_rc" -eq 0 ]] || { _fail "pool_owner_alive rejected the live claude owner (rc=$alive_rc)"; return 1; }
+
+    # --- NEGATIVE: non-harness comm 'xterm' is rejected (identity isolation, PRD §2.13) ---
+    pid="$(spawn_sim_owner 600 xterm)"
+    st="$(_pool_get_starttime "$pid")"
+    real_comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
+    # pool_owner_alive with EXPECTED_COMM="claude" MUST reject an xterm process (decision-ladder
+    # step b: /proc/<pid>/comm != expected). Capture rc via `|| alive_rc=$?`.
+    alive_rc=0
+    pool_owner_alive "$pid" "$st" "claude" || alive_rc=$?
+    # REAP before asserting.
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    # Asserts:
+    assert_eq "xterm" "$real_comm" "simulated owner /proc comm (negative case)" || return 1
+    [[ "$alive_rc" -ne 0 ]] || { _fail "pool_owner_alive ACCEPTED an xterm process as 'claude' (identity leak)"; return 1; }
+}
+
 selftest_admin_is_executable() {
     # Pre-flight the sole entry point (bin/agent-browser-pool) downstream tests invoke by
     # ABSOLUTE PATH — the explicit-invocation model (PRD §2.17: no PATH shadowing, one entry

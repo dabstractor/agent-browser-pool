@@ -84,14 +84,14 @@
           "type": "Milestone",
           "id": "P3.M2",
           "title": "Test coverage (test/)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "R4: generalize spawn_sim_owner to optionally take a comm name (default pi), add a selftest proving a non-pi harness resolves + a non-harness comm is rejected, and fix the transparency.sh fail-fast-poll blast radius from R3. Runs isolated + bounded per AGENTS.md §1/§2/§4. Do NOT boot Chrome during owner-resolution selftests — they drive lib functions (pool_owner_resolve + pool_owner_alive) directly.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M2.T1",
               "title": "Multi-harness owner-simulation test coverage",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Generalize spawn_sim_owner (backward-compatible comm arg), add the non-pi harness selftest, and update transparency.sh's fail-fast literal-string check to match R3's new message.",
               "subtasks": [
                 {
@@ -112,7 +112,7 @@
                   "type": "Subtask",
                   "id": "P3.M2.T1.S2",
                   "title": "Add selftest_owner_resolves_non_pi_harness (positive claude + negative xterm)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M2.T1.S1",
@@ -130,7 +130,7 @@
                   "type": "Subtask",
                   "id": "P3.M2.T1.S3",
                   "title": "Update transparency.sh fail-fast poll to match new R3 message text",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [
                     "P3.M1.T1.S3"
