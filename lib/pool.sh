@@ -106,6 +106,7 @@ _pool_config_bool() {
 #   AGENT_BROWSER_POOL_WAIT        600                                             POOL_WAIT             uint
 #   AGENT_CHROME_HEADLESS          (unset = windowed)                              POOL_HEADLESS         bool (1=headless)
 #   AGENT_CHROME_ALLOW_SLOW_COPY   (unset = refuse non-btrfs)                      POOL_ALLOW_SLOW_COPY  bool (1=allow real copy)
+#   AGENT_BROWSER_POOL_HARNESSES   pi,claude,codex,agy,antigravity                 POOL_HARNESSES        comma-set (lowercased; empty→default)
 #
 # Derived (no env var):
 #   POOL_HOME_DIR    = realpath($HOME)                       (fatal if unset/unresolvable)
@@ -182,7 +183,19 @@ pool_config_init() {
     POOL_HEADLESS="$headless"; declare -g POOL_HEADLESS
     POOL_ALLOW_SLOW_COPY="$allow_slow_copy"; declare -g POOL_ALLOW_SLOW_COPY
 
-    # 6. Derived paths (after POOL_STATE_DIR is final).
+    # 6. Recognized harnesses (owner resolution, PRD §2.11 / Decision O9) — comma-separated
+    #    comm values the pool treats as valid lane owners. Normalized to a clean lowercase
+    #    comma list (never empty: an empty set would fail every driving command's ancestor
+    #    check). Consumed as a lookup by pool_owner_resolve (M1.T1.S2):
+    #      [[ ",,$POOL_HARNESSES,," == *",,$comm,"* ]]   (double-comma wrap ⇒ exact-token).
+    local harnesses_raw harnesses
+    harnesses_raw="${AGENT_BROWSER_POOL_HARNESSES:-pi,claude,codex,agy,antigravity}"
+    harnesses="$(printf '%s' "$harnesses_raw" | tr '[:upper:]' '[:lower:]' | tr -s ',')"
+    harnesses="${harnesses#,}"; harnesses="${harnesses%,}"
+    [[ -n "$harnesses" ]] || harnesses="pi,claude,codex,agy,antigravity"
+    POOL_HARNESSES="$harnesses"; declare -g POOL_HARNESSES
+
+    # 7. Derived paths (after POOL_STATE_DIR is final).
     local lanes_dir lock_file
     lanes_dir="$(_pool_config_canon_path "$POOL_STATE_DIR/lanes")"
     lock_file="$(_pool_config_canon_path "$POOL_STATE_DIR/acquire.lock")"
