@@ -8,12 +8,12 @@ down.
 ## What it covers
 
 - **Acquire + connect:** the lane is created automatically on the first driving
-  `agent-browser-pool` command under `pi`; agents don't pass ports or `--session` (the pool
+  `agent-browser-pool` command under a supported harness; agents don't pass ports or `--session` (the pool
   owns them).
 - **Teardown:** `close` is disconnect-only; the real release happens automatically when the
-  owning `pi` process exits. Agents should avoid `agent-browser-pool release`/`reap`
+  owning harness process exits. Agents should avoid `agent-browser-pool release`/`reap`
   (operator tools; `release <N>` is not owner-scoped).
-- **Pitfalls:** driving commands fail fast without a `pi` ancestor (use `agent-browser`
+- **Pitfalls:** driving commands fail fast without a supported-harness ancestor (use `agent-browser`
   directly for raw access), pool exhaustion hangs, ephemeral profiles, and why to never
   launch Chrome directly.
 

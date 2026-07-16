@@ -3422,11 +3422,11 @@ pool_wrapper_main() {
     # fail fast on EVERY invocation (driving) before any lane/owner work.
     _pool_preflight_real_bin
 
-    # --- d. owner resolution (step 1): no pi ancestor → fail-fast ----------------
-    # pool_owner_resolve is rc 0 ALWAYS; sets POOL_OWNER_PID (==0 ⇒ caller has no pi ancestor).
+    # --- d. owner resolution (step 1): no recognized-harness ancestor → fail-fast --------
+    # pool_owner_resolve is rc 0 ALWAYS; sets POOL_OWNER_PID (==0 ⇒ caller has no recognized-harness ancestor).
     pool_owner_resolve
     if [[ "${POOL_OWNER_PID:-0}" == "0" ]]; then
-        pool_die "agent-browser-pool: driving commands require a pi ancestor (owning pi process)." \
+        pool_die "agent-browser-pool: driving commands require a supported agent harness (pi/claude/codex/agy)." \
                  "For raw browser use without pooling, call 'agent-browser' directly."
     fi
 

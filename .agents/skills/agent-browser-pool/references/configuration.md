@@ -53,7 +53,7 @@ lane work. Decisions (in order, first match wins):
    the pool's own help and never touch a browser.
 2. **Everything else → DRIVING** → `pool_wrapper_main`: resolve the owning recognized-harness PID; if
    there is no recognized-harness ancestor, **fail-fast** (`pool_die`: "agent-browser-pool: driving
-   commands require a pi ancestor... For raw browser use without pooling, call
+   commands require a supported agent harness (pi/claude/codex/agy)... For raw browser use without pooling, call
    'agent-browser' directly."). Otherwise acquire/reuse the caller's lane, strip any
    `--session`, force `AGENT_BROWSER_SESSION=abpool-<N>`, and exec the real binary with
    the cleaned args.

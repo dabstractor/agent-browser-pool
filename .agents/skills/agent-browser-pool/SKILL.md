@@ -132,7 +132,7 @@ Each ephemeral profile starts as a clone of the master identity:
 
 ## 4. Common pitfalls
 
-- **"I ran a driving command outside `pi` and it errored."** By design: driving commands
+- **"I ran a driving command outside a supported harness (`pi`/`claude`/`codex`/`agy`) and it errored."** By design: driving commands
   require a supported agent harness — that is how your lane is keyed to you. The call fails fast with an
   actionable message pointing you at the real `agent-browser` for raw browser use. Run your
   browser work under a supported harness (pi/claude/codex/agy); don't try to bypass it.
