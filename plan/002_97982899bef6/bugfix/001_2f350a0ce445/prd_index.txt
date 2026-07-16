@@ -1,0 +1,12 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+  h3.0 Issue 1: META passthrough retained — breaks lane isolation (cross‑lane access via --session)
+ h2.2 Major Issues (Should Fix)
+  h3.1 Issue 2: Meta/flags‑only commands bypass the no‑pi‑ancestor fail‑fast
+  h3.2 Issue 3: Test suite and agent skill still assert/describe the removed meta‑passthrough model
+ h2.3 Minor Issues (Nice to Fix)
+  h3.3 Issue 4: Duplicated/overlapping command classification (dispatcher vs pool_dispatch_classify)
+ h2.4 Testing Summary
+---
+code:3 para:29 list:5
