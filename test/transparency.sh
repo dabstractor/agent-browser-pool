@@ -487,11 +487,16 @@ test_driving_no_pi_ancestor_fails_fast() {
     # Deliberately NO _transparency_spawn_owner — this body has NO pi ancestor.
     local tmp bg deadline msg
     tmp="$(mktemp)"
-    # Fully detach: setsid (new session → reparent to subreaper, comm != 'pi') + strip owner overrides.
+    # Fully detach: setsid --fork (always fork → the child is reparented to the subreaper /
+    # init, so its ppid chain no longer contains `pi`) + strip owner overrides. The bare
+    # `setsid` (no --fork) only takes a new session and does NOT reliably change ppid
+    # (util-linux only forks when the caller is already a pgroup leader), which made this
+    # test flaky — pool_owner_resolve still walked up to `pi` and the cmd proceeded instead
+    # of failing fast. --fork guarantees the reparent so the no-pi-ancestor path is taken.
     env -u AGENT_BROWSER_POOL_OWNER_PID -u AGENT_BROWSER_POOL_OWNER_STARTTIME \
-        setsid "$ABPOOL_ADMIN" open about:blank >"$tmp" 2>&1 &
+        setsid --fork "$ABPOOL_ADMIN" open about:blank >"$tmp" 2>&1 &
     bg=$!
-    wait "$bg" 2>/dev/null || true              # setsid exits immediately after forking the detached child
+    wait "$bg" 2>/dev/null || true              # setsid --fork exits immediately after forking the detached child
     # Poll the temp file for the fail-fast message (bounded — pool_die is sub-second).
     deadline=$(( $(date +%s) + 10 ))
     msg=""

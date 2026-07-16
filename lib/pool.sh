@@ -4,7 +4,6 @@
 # lib/pool.sh — shared library for the agent-browser-pool project.
 #
 # Sourced by:
-#   - bin/agent-browser       (the transparent PATH-shadowing wrapper shim)
 #   - bin/agent-browser-pool  (the admin CLI: status / reap / release / doctor)
 #
 # This file is meant to be SOURCED (`. lib/pool.sh` or `source lib/pool.sh`),
@@ -93,7 +92,7 @@ _pool_config_bool() {
 #
 # Enforces PRD §2.2 (never pass ~ to a subprocess) by canonicalizing every path via
 # `realpath -m` against an already-absolute $POOL_HOME_DIR. Called once near the top
-# of bin/agent-browser and bin/agent-browser-pool (and re-callable for tests).
+# of bin/agent-browser-pool (and re-callable for tests).
 #
 # Configuration reference (env var → POOL_* global):
 #   ENV VAR                        DEFAULT                                         GLOBAL                CATEGORY
@@ -252,7 +251,7 @@ pool_check_btrfs() {
     fi
 
     pool_die "pool_check_btrfs: $POOL_EPHEMERAL_ROOT is not on btrfs" \
-             "(detected: '${fstype:-<empty/missing>})." \
+             "(detected: '${fstype:-<empty/missing>}')." \
              "A real copy of the 4.8 GB master per acquire would be catastrophic." \
              "Set AGENT_CHROME_ALLOW_SLOW_COPY=1 to allow it, or point" \
              "AGENT_CHROME_EPHEMERAL_ROOT at a btrfs mount (the path may not exist)."
@@ -957,7 +956,7 @@ pool_lease_exists() {
 # missing lanes dir is a VALID state (the wrapper's first-ever acquire; PRD §2.4
 # step 2 scans this), never an error.
 #
-# CONSUMERS: pool_lease_find_mine / pool_lease_find_mine_any (below); M5.T3 reap;
+# CONSUMERS: pool_lease_find_mine (below); M5.T3 reap;
 # M7.T1 status; M7.T4 doctor; M5.T4 force-reap (find oldest dead-owner lane).
 #
 # GOTCHA — nullglob is NOT set: a no-match glob expands to the LITERAL
@@ -1030,43 +1029,11 @@ pool_lease_find_mine() {
     return 1
 }
 
-# pool_lease_find_mine_any
-#
-# ★★★ DEAD CODE — CURRENTLY UNUSED (Issue #5) ★★★ This diagnostic variant has ZERO
-# non-comment call sites. Its docstring below lists reap / doctor / release as intended
-# consumers, but none actually call it: pool_reap_stale uses pool_lane_is_stale;
-# pool_admin_doctor uses pool_lease_read; pool_admin_release uses pool_lanes_list. It is
-# RETAINED as a documented building block for a future self-reap / reconcile path that
-# has not been wired. Do NOT assume it is live.
-#
-# Diagnostic variant of find_mine: return the first lane whose owner.pid ==
-# POOL_OWNER_PID REGARDLESS of liveness (no pool_owner_alive call). Surfaces a STALE
-# lease that nonetheless names this PID — for the reaper (M5.T3), doctor (M7.T4),
-# and explicit release (M7.T3) self-cleanup paths. Echo the lane N and return 0 on
-# the first pid-match; return 1 if no lane names this PID.
-#
-# CONSUMERS: M5.T3 reap (self-reap / diagnostic), M7.T4 doctor (reconcile), M7.T3
-# release [<N>|all] (find my lanes to tear down).
-#
-# DIFFERENCE from find_mine: no pool_owner_alive → returns a lane even when the owner
-# is dead/recycled. find_mine = "valid mine"; find_mine_any = "claiming to be mine".
-# GOTCHA — first-match semantics (return immediately). §2.8 invariant ⟹ ≤1 such
-# lane, so first-match == only-match in correct operation.
-# GOTCHA — corrupt lanes skipped via `|| continue` (same as find_mine).
-# GOTCHA — CALLERS under set -e MUST guard: `if n="$(pool_lease_find_mine_any)"; then`.
-# PRECONDITION: pool_config_init + pool_owner_resolve (for POOL_OWNER_PID).
-pool_lease_find_mine_any() {
-    local n pid
-    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ ]] || return 1
-    for n in $(pool_lanes_list); do
-        pid="$(pool_lease_field "$n" owner.pid 2>/dev/null)" || continue
-        if [[ "$pid" == "$POOL_OWNER_PID" ]]; then
-            printf '%s\n' "$n"
-            return 0
-        fi
-    done
-    return 1
-}
+# pool_lease_find_mine_any has been REMOVED (dead code — Issue #5; zero non-comment
+# call sites). The diagnostic "find a lane claiming to be mine, regardless of liveness"
+# variant was retained for a future self-reap / reconcile path that was never wired.
+# If that path is needed, reintroduce it alongside pool_lease_find_mine (below) and
+# COVER it with a test so it does not silently rot.
 
 # =============================================================================
 # Lease management — query operations (P1.M3.T2.S2)
@@ -1534,6 +1501,7 @@ pool_chrome_launch() {
     log_file="$POOL_STATE_DIR/chrome-$lane.log"
 
     # Build the flag list (array — survives any future arg with spaces; no word-splitting).
+    # The list is the PRD §2.6 EXACT flag set (8 flags) + headless iff POOL_HEADLESS==1.
     flags=(
         --remote-debugging-port="$port"
         --user-data-dir="$user_data_dir"
@@ -1544,7 +1512,6 @@ pool_chrome_launch() {
         --disable-renderer-backgrounding
         --disable-features=CalculateNativeWinOcclusion
         --disable-back-forward-cache
-        --disable-popup-blocking
     )
     [[ "$POOL_HEADLESS" == "1" ]] && flags+=(--headless=new)
 
@@ -1590,7 +1557,78 @@ pool_chrome_launch() {
     return 0
 }
 
-# pool_wait_cdp PORT
+# pool_cdp_is_ours PORT USER_DATA_DIR EXPECTED_PID
+#
+# Identity check for the CDP answerer on PORT: verify that the browser answering
+# http://127.0.0.1:<PORT>/json/version is ACTUALLY the Chrome this pool launched for
+# USER_DATA_DIR (the lane's ephemeral --user-data-dir), and not a DIFFERENT lane's Chrome
+# that happened to bind PORT first (the BUG-1 collision under tight parallel acquire).
+# Returns 0 (ours), 1 (foreign / not ours / cannot tell), never pool_die.
+#
+# Why this exists (BUG-1): pool_find_free_port runs OUTSIDE the flock by design
+# (key_findings FINDING 2 — concurrent boots). Two lanes can both pick PORT within a few
+# ms. Lane A's Chrome binds PORT and answers /json/version. Lane B's Chrome tries PORT,
+# hits EADDRINUSE and dies, but a plain `curl /json/version` on PORT STILL SUCCEEDS —
+# because Lane A is answering. Without an identity check, Lane B would believe its boot
+# succeeded and silently drive Lane A's browser, breaking PRD §1.3.2 ("1 agent = 1
+# browser"). This function closes that gap so pool_wait_cdp can re-pick a port instead.
+#
+# LOGIC (two independent signals; BOTH must agree it is ours to return 0):
+#   1. DevToolsActivePort file: a successfully-bound Chrome writes a file named
+#      `DevToolsActivePort` into its --user-data-dir whose FIRST line is the bound port.
+#      If our Chrome bound PORT, "$USER_DATA_DIR/DevToolsActivePort" exists and its first
+#      line equals PORT. If a FOREIGN lane answered PORT, our dir has no such file (our
+#      Chrome died on EADDRINUSE before writing it) → mismatch → return 1. This is the
+#      PRIMARY signal and is reliable across Chrome versions.
+#   2. Process liveness: EXPECTED_PID (the pid we captured via $! in pool_chrome_launch)
+#      must STILL be alive (a foreign answerer means OUR Chrome is dead). Dead pid →
+#      return 1. (PID alone is not sufficient proof — a recycled pid could be a live
+#      unrelated process — but combined with the DevToolsActivePort check it strengthens
+#      correctness. /proc existence is used, NOT kill -0 — see AGENTS.md §4.)
+#
+# CONSUMER: pool_wait_cdp, immediately after a successful curl /json/version probe.
+#   Called ONLY when an identity check is requested (USER_DATA_DIR + EXPECTED_PID both
+#   supplied and non-empty); otherwise pool_wait_cdp keeps the legacy probe-only behavior
+#   (back-compat for standalone tests / the ensure_connected relaunch path).
+#
+# GOTCHA — DevToolsActivePort format: `<port>\n<webSocketDebuggerUrl-path-suffix>\n`.
+#   Read ONLY the first whitespace-stripped line; compare numerically to PORT.
+# GOTCHA — a missing DevToolsActivePort during a GENUINE boot is possible for a few ms
+#   (Chrome creates it slightly before /json/version answers, but be defensive): callers
+#   treat a 1-return as "not ours / not ready" and keep polling within pool_wait_cdp's
+#   budget rather than failing hard. So a transiently-missing file simply extends the
+#   wait, exactly like a still-booting Chrome.
+# GOTCHA — /proc/<pid> existence, NOT kill -0 (AGENTS.md §4: kill -0 is a trap — ESRCH
+#   and EPERM both return non-zero).
+# GOTCHA — NON-FATAL (return 1, NOT pool_die): same family as pool_wait_cdp.
+# Reads $1/$2/$3 only. No writes.
+# PRECONDITION: PORT numeric, USER_DATA_DIR absolute, EXPECTED_PID numeric (caller guards).
+pool_cdp_is_ours() {
+    local port="${1:-}"
+    local user_data_dir="${2:-}"
+    local expected_pid="${3:-}"
+    local dtap first_line
+
+    # Bad/missing args → cannot prove identity → "not ours" (caller keeps polling).
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    [[ -n "$user_data_dir" && "$user_data_dir" == /* ]] || return 1
+    [[ "$expected_pid" =~ ^[0-9]+$ ]] || return 1
+
+    # Signal 1 — DevToolsActivePort first line must equal PORT. File may not exist yet
+    # (Chrome still finalizing the write, or our Chrome died on EADDRINUSE). Use a guarded
+    # capture: `head` of a missing file rc 1 → keep us alive under set -e.
+    dtap="$user_data_dir/DevToolsActivePort"
+    first_line="$(head -n1 -- "$dtap" 2>/dev/null | tr -d '[:space:]')" || true
+    [[ "$first_line" == "$port" ]] || return 1
+
+    # Signal 2 — our launched Chrome must STILL be alive (a foreign answerer ⇒ ours died).
+    # /proc existence check (NOT kill -0 — AGENTS.md §4).
+    [[ -d "/proc/$expected_pid" ]] || return 1
+
+    return 0
+}
+
+# pool_wait_cdp PORT [USER_DATA_DIR [EXPECTED_PID]]
 #
 # Poll Chrome's CDP HTTP endpoint (http://127.0.0.1:<PORT>/json/version) until it answers
 # (HTTP 200 → curl -sf exits 0) or the budget is exhausted. Returns 0 if CDP is ready;
@@ -1598,9 +1636,19 @@ pool_chrome_launch() {
 # does not leak). NON-FATAL: never pool_die — the caller (M5.T1.S2) owns the PRD §2.14
 # "retry launch once; then fail, drop lane" policy.
 #
+# IDENTITY VERIFICATION (BUG-1 fix): when USER_DATA_DIR + EXPECTED_PID are BOTH supplied,
+# a successful curl probe is NOT trusted on its own — pool_cdp_is_ours re-checks that the
+# answerer is actually THIS lane's Chrome (via the lane's DevToolsActivePort file + pid
+# liveness). If a DIFFERENT lane's Chrome is answering PORT (a tight-parallel-acquire
+# collision), this returns 1 ("not ours / not ready") so _pool_launch_and_verify re-picks
+# a different port instead of silently sharing a browser (PRD §1.3.2). When the optional
+# args are OMITTED, the legacy probe-only behavior is preserved (standalone tests + the
+# ensure_connected relaunch path, which already knows its Chrome is bound).
+#
 # LOGIC (CONTRACT 3b):
 #   - loop up to 60 times (30s total): curl -sf http://127.0.0.1:<port>/json/version
-#   - return 0 if CDP responds (curl rc 0)
+#   - on a successful probe: if identity args given, require pool_cdp_is_ours==0, else done
+#   - return 0 if CDP responds (and is ours when checked)
 #   - on timeout: kill -- -<POOL_CHROME_PGID> (if set + numeric), then return 1.
 #
 # CONSUMER: M5.T1.S2 acquire post-lock boot, called immediately after pool_chrome_launch.
@@ -1618,27 +1666,51 @@ pool_chrome_launch() {
 #   '-'). Guarded by a numeric check so pool_wait_cdp is safe to call standalone in tests
 #   (no prior launch → POOL_CHROME_PGID unset → skip the kill, just return 1).
 # GOTCHA — NON-FATAL (return 1, NOT pool_die): same family as pool_find_free_port.
-# Reads only $1 (port) + the global POOL_CHROME_PGID (set by pool_chrome_launch). No writes
+# Reads only $1/$2/$3 + the global POOL_CHROME_PGID (set by pool_chrome_launch). No writes
 # beyond the process-group signal.
 # PRECONDITION: pool_chrome_launch (for POOL_CHROME_PGID) when used in the real boot; none
 #   required for a standalone timeout test (the pgid guard makes it safe).
 # shellcheck disable=SC2034 # POOL_CDP_TRIES is the single tunable budget.
 pool_wait_cdp() {
     local port="${1:-}"
+    local user_data_dir="${2:-}"
+    local expected_pid="${3:-}"
     local i
     local -ri POOL_CDP_TRIES=60    # ×0.5s sleep = 30s budget (research §7; tunable)
+    local check_identity=0
 
     [[ "$port" =~ ^[0-9]+$ ]] || return 1   # bad port → non-fatal rc 1 (defensive)
 
+    # Enable the BUG-1 identity check only when BOTH args are supplied & well-formed.
+    if [[ -n "$user_data_dir" && "$user_data_dir" == /* && "$expected_pid" =~ ^[0-9]+$ ]]; then
+        check_identity=1
+    fi
+
     for (( i = 0; i < POOL_CDP_TRIES; i++ )); do
         if curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
-            return 0
+            # Probe succeeded. If an identity check was requested, verify the answerer is
+            # ACTUALLY this lane's Chrome (BUG-1): a foreign lane answering our PORT would
+            # otherwise be mistaken for a successful boot. Mismatch → keep polling (our
+            # Chrome may still be finalizing its DevToolsActivePort write) instead of
+            # declaring success. The 30s budget bounds the wait; on exhaustion the pgroup
+            # is killed and the caller re-picks a port.
+            if [[ "$check_identity" -eq 1 ]]; then
+                if pool_cdp_is_ours "$port" "$user_data_dir" "$expected_pid"; then
+                    return 0
+                fi
+                # Not (yet) ours — loop and retry within the budget.
+            else
+                return 0
+            fi
         fi
         sleep 0.5
     done
 
     # Timeout — tear down the process group so a half-booted Chrome does not leak.
     # The numeric guard makes this safe when called without a prior pool_chrome_launch.
+    # NOTE: this also fires on a BUG-1 identity mismatch that never resolves within the
+    # budget (a foreign lane kept answering PORT while ours stayed dead) — killing our
+    # (already-dying) pgroup is correct and lets _pool_launch_and_verify re-pick a port.
     if [[ "${POOL_CHROME_PGID:-}" =~ ^[0-9]+$ ]]; then
         kill -- -"$POOL_CHROME_PGID" 2>/dev/null || true
     fi
@@ -2201,7 +2273,10 @@ _pool_launch_and_verify() {
     # for CDP. (A pool_die from pool_chrome_launch — genuine misconfig — still propagates.)
     if pool_chrome_launch "$port" "$ephemeral_dir" "$lane"; then
         _pool_boot_write_chrome_ids "$lane"                    # globals → lease (§2)
-        if pool_wait_cdp "$port"; then
+        # BUG-1 fix: pass our ephemeral dir + launched pid so pool_wait_cdp verifies the
+        # CDP answerer is ACTUALLY this lane's Chrome (not a foreign lane that grabbed
+        # $port first). Mismatch ⇒ rc 1 ⇒ re-pick below.
+        if pool_wait_cdp "$port" "$ephemeral_dir" "${POOL_CHROME_PID:-}"; then
             return 0
         fi
         # pool_wait_cdp rc 1 ⇒ Chrome pgroup ALREADY KILLED (research §1.3). Retry once on
@@ -2220,7 +2295,7 @@ _pool_launch_and_verify() {
         # --- Attempt 2 (same-port retry — PRD §2.14) ---
         if pool_chrome_launch "$port" "$ephemeral_dir" "$lane"; then
             _pool_boot_write_chrome_ids "$lane"                # 2nd chrome-ids → lease
-            if pool_wait_cdp "$port"; then
+            if pool_wait_cdp "$port" "$ephemeral_dir" "${POOL_CHROME_PID:-}"; then
                 return 0
             fi
         fi
@@ -2246,7 +2321,7 @@ _pool_launch_and_verify() {
         return 1
     fi
     _pool_boot_write_chrome_ids "$lane"
-    if pool_wait_cdp "$new_port"; then
+    if pool_wait_cdp "$new_port" "$ephemeral_dir" "${POOL_CHROME_PID:-}"; then
         return 0
     fi
     return 1
@@ -2731,190 +2806,12 @@ pool_reap_stale() {
 }
 
 # -----------------------------------------------------------------------------
-# pool_reuse_orphan
-#
-# ★★★ DEAD CODE — CURRENTLY UNUSED (Issue #4) ★★★ This PUBLIC function has ZERO
-# non-comment call sites. The reuse-orphan feature is shipped via the INLINE loop inside
-# _pool_acquire_critical_section (@ ~line 1977-1996), which is correct + shipped. This
-# standalone function is RESERVED for a future acquire refactor / exhaustion retry /
-# admin doctor reconcile (see DESIGN below) that does not yet exist. Do NOT assume it is
-# live; do NOT delete it without confirming those future callers are abandoned.
-#
-# PRD §2.4 step 3b / IQ4 "reuse-if-responsive" — the PUBLIC building-block entry
-# point that ADOPTS the first STALE lane whose Chrome is still RESPONSIVE. Scans
-# EVERY lane (pool_lanes_list), asks the tri-state predicate pool_lane_is_stale
-# whether each lane's owner is dead/recycled, and for the first stale lane whose
-# Chrome answers (pool_daemon_connected) DELEGATES to _pool_adopt_lane (reassign
-# owner to the current POOL_OWNER_*, set connected=true, stamp last_seen_at,
-# re-bind the daemon). Echoes the adopted lane N + return 0; or return 1 if no
-# responsive orphan. Skips the ~5-10s Chrome boot + master copy (the Chrome is
-# already running). NO reap, NO choose-N, NO launch.
-#
-# DESIGN — the acquire-vs-reuse-orphan SPLIT (research §1): the LANDED acquire
-# critical section (_pool_acquire_critical_section @ ~line 1966) INLINES its OWN
-# reuse-orphan loop (@ ~1977-1996), INTERLEAVED with reap (on a failed adopt it
-# REAPS the lane, then continues — its goal is to CLAIM a lane). This PUBLIC
-# function is REUSE-ONLY: it adopts the first responsive orphan and returns; on a
-# failed adopt it falls through to the NEXT stale lane (NO reap); on exhaustion it
-# returns 1. The CONTRACT's "Consumed by acquire step 3b" is LEGACY design intent
-# (the LANDED acquire already inlines reuse-orphan); the REAL callers are a future
-# acquire refactor / exhaustion retry / admin doctor reconcile. Do NOT wire this
-# into acquire (the inline is shipped + correct).
-#
-# WARNING — THE KEY DIVERGENCE FROM pool_reap_stale — FLOCK / SERIALIZATION
-# (research §3): adoption is NOT collision-safe. Two concurrent adopters of the
-# SAME orphan would both read the lease, both find it responsive, both rewrite
-# .owner, both re-bind the daemon, and both echo lane N → BOTH believe they own N.
-# (Contrast pool_reap_stale, which is idempotent — release twice = no-op → safely
-# unflocked.) THEREFORE pool_reuse_orphan REQUIRES SERIALIZATION. DECISION: this
-# function takes NO own flock; the CALLER MUST already hold an exclusive flock on
-# $POOL_LOCK_FILE. This mirrors the codebase convention (ONLY pool_acquire_locked
-# flocks; all building-block functions are lock-free) + pool_reap_stale.
-#
-# WARNING — DO NOT add `( flock 9; … ) 9>"$POOL_LOCK_FILE"` inside this function.
-# flock(2) locks are bound per OPEN FILE DESCRIPTION
-# (https://man7.org/linux/man-pages/man2/flock.2.html): a fresh 9>"$POOL_LOCK_FILE"
-# redirect opens a NEW file description, so a blocking flock taken here while the
-# caller already holds the lock via its own fd 9 is DENIED BY THE CALLER'S OWN LOCK
-# → BLOCKS FOREVER (self-deadlock). The caller serializes; this function is
-# lock-free.
-#
-# DELEGATE (do NOT duplicate — research §2/§6): the responsiveness gate is
-# pool_daemon_connected (M4.T3.S1, READ-ONLY, never launches); the adoption
-# (owner-reassign + connected + re-bind) is _pool_adopt_lane (M5.T1.S1). Do NOT
-# re-inline the jq .owner mutation, pool_daemon_connect, or a raw curl
-# /json/version probe (raw curl is INSUFFICIENT — adoption needs the daemon to
-# know the session so the re-bind is meaningful).
-#
-# LOGIC (CONTRACT a→e):
-#   guard. POOL_OWNER_PID numeric & !=0  else return 1   (passthrough owner must not adopt)
-#   a. for n in $(pool_lanes_list)  — snapshot; empty ⇒ 0 iters.
-#   b.   if pool_lane_is_stale "$n"; then   — TRI-STATE; the if-condition is errexit-exempt:
-#          rc 0 (stale) → enter body;  rc 1 (live) / rc 2 (no lease) → fall through (skip).
-#   c.      port/session = pool_lease_field "$n" (|| true inside $(); missing → "")
-#          if [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] && pool_daemon_connected "$session" "$port"; then
-#   d.        if _pool_adopt_lane "$n"; then printf '%s\n' "$n"; return 0; fi   # adopted → DONE
-#                    # adopt rc 1 (Chrome died mid-race) → fall through, try the NEXT orphan
-#          fi        # port=0 (provisional) OR not responsive → skip (NOT reaped; reuse-only)
-#        fi
-#   e. return 1   — no responsive orphan adopted; nothing echoed.
-#
-# CALLER CONTRACT (within a SERIALIZED context — caller holds $POOL_LOCK_FILE;
-# under set -e):
-#     local n
-#     if n="$(pool_reuse_orphan)"; then
-#         <proceed: the lane n is adopted, owner=reassigned, connected=true, daemon
-#          re-bound; go straight to EXEC / ensure_connected>
-#     else
-#         <no responsive orphan: reap-sweep / claim-a-new-lane / block / alert>
-#     fi
-#
-# GOTCHA — tri-state under set -e: a BARE `pool_lane_is_stale "$n"` whose rc is 1
-#   (live) or 2 (no lease) ABORTS the caller. The `if …; then …; fi` is MANDATORY
-#   (the condition is errexit-exempt). (pool_lane_is_stale GOTCHA @ ~line 1145-1148.)
-# GOTCHA — responsiveness gate under set -e: pool_daemon_connected returns 1 (not
-#   responsive) → a BARE call ABORTS. Use it under `&&`:
-#   `[[ port>0 ]] && pool_daemon_connected …` (the &&-list is errexit-exempt; rc 1
-#   short-circuits). Likewise `if _pool_adopt_lane "$n"; then …; fi` (rc 1 falls
-#   through to the next orphan).
-# GOTCHA — port=0 provisional lease is NEVER an orphan: the `[[ -gt 0 ]]` gate
-#   rejects it (no Chrome yet → nothing to reuse). It is skipped, NOT reaped
-#   (reuse-only).
-# GOTCHA — adopt-failure-mid-race: the Chrome can die between the gate
-#   (pool_daemon_connected rc 0) and the re-bind (pool_daemon_connect rc 1 inside
-#   _pool_adopt_lane) → _pool_adopt_lane rc 1 → fall through to the next orphan.
-#   The racy lane is NOT reaped; a later reap sweep / acquire handles it.
-# GOTCHA — stdout discipline: ONLY `printf '%s\n' "$n"` writes stdout (on
-#   success). Every helper is stdout-clean. On return 1 NOTHING is echoed →
-#   `n=$(pool_reuse_orphan)` yields "". No extra >/dev/null needed on
-#   _pool_adopt_lane (its pool_daemon_connect is already >/dev/null 2>&1; its
-#   _pool_log is file-only). _pool_adopt_lane logs the adoption itself → no
-#   double-logging here.
-# GOTCHA — `local var=$(…)` masks errexit (SC2155): split every capture (local
-#   declared FIRST, assign AFTER); guard pool_lease_field's rc-1 with || true
-#   INSIDE the $().
-# GOTCHA — NON-FATAL: never pool_die; returns 0 (adopted) / 1 (none). A corrupt
-#   lease ⇒ rc 2 skip; a dead-Chrome lane ⇒ not responsive ⇒ skip; an empty pool
-#   ⇒ 0 iterations ⇒ return 1.
-# GOTCHA — NO own flock (Design B): caller MUST hold $POOL_LOCK_FILE (adoption is
-#   not collision-safe). Adding an inner flock SELF-DEADLOCKS (flock(2) per-OFD).
-#   See the WARNING block above.
-# Reads POOL_LANES_DIR + POOL_OWNER_* (via _pool_adopt_lane) + POOL_REAL_BIN
-# (via the helpers). PRECONDITION: pool_config_init + pool_owner_resolve AND the
-# caller holds $POOL_LOCK_FILE.
-# -----------------------------------------------------------------------------
-pool_reuse_orphan() {
-    local n port session
-
-    # ── Guard: a passthrough owner (POOL_OWNER_PID==0, no pi ancestor) must NOT adopt a lane ──
-    # (it would be immediately stale to everyone; _pool_adopt_lane itself returns 1 on a
-    # non-numeric POOL_OWNER_PID). Mirrors _pool_acquire_critical_section's defense.
-    # `[[ ]] || return 1` is errexit-exempt. CONTRACT step 3b INPUT = the current POOL_OWNER_*.
-    [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ && "$POOL_OWNER_PID" != "0" ]] || return 1
-
-    # (a) Iterate ALL lanes. pool_lanes_list: newline-separated, numerically-sorted lane
-    #     numbers; rc 0 always; empty/missing dir ⇒ 0 iterations. The unquoted command
-    #     substitution is the documented idiom (digits-only; word-splits on IFS into exactly
-    #     the lane numbers). The list is a SNAPSHOT (captured once before the loop) — adopting
-    #     a lane mid-loop (rewriting its lease) cannot mutate the iteration set.
-    for n in $(pool_lanes_list); do
-
-        # (b) TRI-STATE verdict. pool_lane_is_stale: 0=stale / 1=live / 2=no-lease. The `if`
-        #     condition is errexit-exempt — rc 1 (live) and rc 2 (no lease) fall through cleanly
-        #     (skip); ONLY rc 0 (stale) enters the body. A BARE call would ABORT under set -e on
-        #     rc 1/2 (pool_lane_is_stale GOTCHA @ ~line 1145-1148). (CONTRACT 3b(a/b).)
-        if pool_lane_is_stale "$n"; then
-
-            # (c) Read the orphan's port + session for the responsiveness gate.
-            #     pool_lease_field: top-level `port`/`session` read; rc 1 on missing/corrupt
-            #     (TOCTOU between the staleness verdict and this read); echoes "null" for a
-            #     missing path. The `|| true` INSIDE the $() makes the capture set -e-safe
-            #     (yields "" on failure). The assignment is split (local declared above) —
-            #     no SC2155 / errexit masking.
-            port="$(pool_lease_field "$n" port 2>/dev/null || true)"
-            session="$(pool_lease_field "$n" session 2>/dev/null || true)"
-
-            # (c) RESPONSIVENESS GATE (CONTRACT 3b(c)). A provisional lease has port=0 (no
-            #     Chrome yet) → the `[[ -gt 0 ]]` test rejects it (never an orphan).
-            #     pool_daemon_connected: READ-ONLY two-probe check (daemon `session list` +
-            #     curl /json/version); NEVER launches; rc 0 = responsive, rc 1 = not. Raw
-            #     curl ALONE is insufficient for adoption (the daemon must know the session
-            #     so the re-bind is meaningful). The `[[ ]] && func` list is errexit-exempt —
-            #     rc 1 (not responsive / bad port) short-circuits (skip this lane), NO abort.
-            #     A BARE pool_daemon_connected would ABORT under set -e on rc 1.
-            if [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
-               && pool_daemon_connected "$session" "$port"; then
-
-                # (d) ADOPT (CONTRACT 3b(d) — reassign owner / connected=true / last_seen_at /
-                #     ensure-connected, all ALREADY implemented by _pool_adopt_lane). The gate
-                #     above is the "ensure connected" CHECK; _pool_adopt_lane does the
-                #     owner-reassign + the daemon re-bind (pool_daemon_connect) — the
-                #     "if not, connect" ACT. DELEGATE — do NOT re-inline the jq .owner mutation
-                #     or pool_daemon_connect. `if _pool_adopt_lane "$n"; then …; fi` is
-                #     errexit-exempt: rc 1 (Chrome died between the gate and the re-bind) →
-                #     fall through to the NEXT stale lane (try the next orphan); the racy lane
-                #     is NOT reaped (reuse-only). On rc 0 → echo the lane + return 0 (DONE —
-                #     first responsive orphan adopted).
-                if _pool_adopt_lane "$n"; then
-                    # The ONLY stdout write: the adopted lane N. Every helper is stdout-clean
-                    # (pool_lease_field captured in $(); pool_daemon_connected redirects both
-                    # probes >/dev/null; _pool_adopt_lane's pool_daemon_connect is
-                    # >/dev/null 2>&1 and _pool_log writes the LOG FILE). _pool_adopt_lane
-                    # logs the adoption itself ("pool_acquire(adopt): reused orphan lane N …")
-                    # → no second log line here.
-                    printf '%s\n' "$n"
-                    return 0
-                fi
-            fi
-            # port=0 (provisional) OR not responsive OR adopt-failed → skip this lane (NOT
-            # reaped; reuse-only — a later reap sweep / acquire handles it). Continue.
-        fi
-    done
-
-    # (e) No responsive orphan was adoptable. CONTRACT step 3b(e). Nothing echoed (so
-    #     `n=$(pool_reuse_orphan)` yields the empty string). NON-FATAL (never pool_die).
-    return 1
-}
+# pool_reuse_orphan has been REMOVED (dead code — Issue #4; zero non-comment call
+# sites). The reuse-orphan feature is shipped via the INLINE loop inside
+# _pool_acquire_critical_section, which is correct + live. This standalone function
+# was reserved for a future acquire refactor / exhaustion retry / admin doctor
+# reconcile that was never wired. If that path is reintroduced, reimplement it
+# alongside _pool_acquire_critical_section and COVER it with a test.
 
 
 # =============================================================================
@@ -3561,7 +3458,7 @@ _pool_preflight_real_bin() {
 # =============================================================================
 # Wrapper shim — complete lifecycle (P1.M6.T3.S1)
 # =============================================================================
-# PRD §2.4 steps 0→5 — the orchestration entry point. Called by bin/agent-browser
+# PRD §2.4 steps 0→5 — the orchestration entry point. Called by bin/agent-browser-pool
 # (M6.T3.S2) as its FINAL statement (`pool_wrapper_main "$@"`; the shim runs nothing
 # after it). TERMINAL by design: every success path ends in `exec "$POOL_REAL_BIN" …`
 # (process replacement — never returns); every fatal path ends in `pool_die` (exit 1).

@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P2",
       "title": "No-Shadow Pivot — Explicit agent-browser-pool Invocation",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Pivot from the PATH-shadowing wrapper model (Plan 001) to explicit `agent-browser-pool <verb> <args>` invocation (PRD Decision O5). The existing lib/pool.sh core (lease I/O, acquire, release, reap, Chrome launch, exhaustion) is reused unchanged. Changes focus on: (1) making bin/agent-browser-pool the SOLE entry point that handles BOTH pool verbs AND driving commands; (2) removing the POOL_DISABLE safety valve and the no-pi-ancestor passthrough; (3) adding a preflight check for the real agent-browser binary; (4) deleting the old bin/agent-browser shim; (5) rewriting install.sh, SKILL.md, README.md, and tests for the no-shadow model.",
       "milestones": [
         {
@@ -169,21 +169,21 @@
           "type": "Milestone",
           "id": "P2.M3",
           "title": "Install Script Rewrite",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Completely rewrite install.sh for the no-shadow model: three benign things — symlink agent-browser-pool, pre-create state dir, run doctor. No PATH shadowing, no ~/scripts, no cutover warning, no AGENT_BROWSER_POOL_DISABLE.",
           "tasks": [
             {
               "type": "Task",
               "id": "P2.M3.T1",
               "title": "Rewrite install.sh for no-shadow model",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Replace the 221-line PATH-shadowing cutover installer with a ~60-line benign installer per PRD §2.17.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P2.M3.T1.S1",
                   "title": "Complete rewrite of install.sh — no PATH shadowing, no cutover",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P2.M2.T2.S1"

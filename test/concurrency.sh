@@ -251,6 +251,10 @@ test_n_agents_get_n_distinct_lanes() {
     #     and retries once (S2), updating the lease (pool_boot_lane re-reads it). So the N
     #     boots launch back-to-back to EXERCISE that recovery under genuine concurrent load;
     #     the distinct-port + clean-release assertions below (steps 7-9) verify it worked.
+    #     BUG-1 fix: pool_wait_cdp additionally verifies via pool_cdp_is_ours that the CDP
+    #     answerer is ACTUALLY this lane's Chrome (the lane's DevToolsActivePort file + pid
+    #     liveness) — without it, a foreign lane answering our port would let two lanes
+    #     silently share one Chrome. The identity mismatch now feeds the same re-pick path.
     #     (A rare 3-way collision where the re-picks themselves collide can still drop a lane;
     #     if that makes the test persistently flaky on a host, re-introduce a MINIMAL stagger
     #     — see the comment at the launch loop / research §3. Prefer no stagger.)
