@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Core Engine — Remove META Classification & Passthrough",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Delete the step-c META passthrough block from pool_wrapper_main (the security fix), then delete the now-dead pool_dispatch_classify function and its contract comment. After this milestone, every non-pool-verb token flows through the driving path: owner resolve → fail-fast without pi → acquire/reuse lane → normalize args → strip --session → force AGENT_BROWSER_SESSION → exec.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M1.T1",
               "title": "Remove META passthrough execution path and dispatch classifier",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Two-part fix: (1) Delete step-c (the classify call + meta exec block) from pool_wrapper_main so all non-pool-verb tokens enter the driving path. (2) Delete pool_dispatch_classify entirely since it is now dead code (always would return 'driving'), and remove its selftest from validate.sh.",
               "subtasks": [
                 {
@@ -44,7 +44,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T1.S2",
                   "title": "Delete pool_dispatch_classify function, contract comment, and obsolete selftest",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"
@@ -69,21 +69,21 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Test Contract Update — Assert Driving-Only Behavior",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Replace the two transparency.sh tests that assert the old META-passthrough contract (byte-equal to real binary) with tests that assert the new contract: non-pool-verb tokens (skills, --version, mcp, session list) fail-fast without a pi ancestor. Update the file header checklist to match.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M2.T1",
               "title": "Replace META-passthrough assertions in transparency.sh with fail-fast assertions",
-              "status": "Planned",
+              "status": "Researching",
               "description": "test_passthrough_skills (line 236) and test_version_passthrough (line 270) currently assert byte-equality with the real binary (META passthrough). Replace them with assertions that skills/--version fail-fast with the 'pi ancestor' message when invoked without a pi ancestor, mirroring the existing test_driving_no_pi_ancestor_fails_fast pattern.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "Replace test_passthrough_skills and test_version_passthrough with fail-fast tests + update header",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1"

@@ -54,15 +54,19 @@ You do not reconnect between calls.
 
 ### Which commands trigger a lane
 
-**Driving** commands acquire/use your lane. They include `open`, `connect`, `close`, `get`,
-`screenshot`, `click`, `type`, `eval`, `find`, and **any unrecognized command** — an unknown
-verb still gets your lane rather than erroring out.
+Every command except pool verbs (status/reap/release/doctor/help) is a driving command — it
+resolves your pi owner, acquires/reuses your lane, and runs scoped to `abpool-<N>` with
+`--session` stripped. This includes `open`, `connect`, `close`, `get`, `screenshot`,
+`click`, `type`, `eval`, `find`, and **any unrecognized command** (an unknown verb still
+gets your lane rather than erroring out). It also includes `--version`, `skills`,
+`dashboard`, `plugin`, `mcp`, and `session list` — these are driving now (they previously
+passed through unchanged; that path was removed for lane isolation: a caller-supplied
+`--session <X>` must never target another lane).
 
-A small set of **meta** commands pass straight through to the real `agent-browser` WITHOUT
-acquiring a lane (so they work with no lane): `skills`, `--version`, `session list`,
-`dashboard`, `plugin`, and `mcp`. (The pool's own verbs — `status`, `reap`, `release`,
-`doctor`, and `help`/`--help`/`-h` — run pool functions, not the real binary; see §2 and §3.)
-See `references/configuration.md` for the full dispatch table.
+The only commands that run WITHOUT a lane are the pool verbs (`status`, `reap`, `release`,
+`doctor`, and `help`/`--help`/`-h`), caught by the entry-point dispatcher before any lane
+work — see §2 and §3. There is no "meta / passthrough" class. See
+`references/configuration.md` for the full dispatch table.
 
 ## 2. Tear down when you're finished
 
@@ -140,6 +144,6 @@ Each ephemeral profile starts as a clone of the master identity:
 
 ## 5. Reference
 
-For the full environment-variable table, the complete meta-vs-driving dispatch classification,
-the acquire lifecycle, and a symptom→cause→fix troubleshooting matrix, read
+For the full environment-variable table, the complete pool-verbs-vs-driving dispatch
+classification, the acquire lifecycle, and a symptom→cause→fix troubleshooting matrix, read
 **`references/configuration.md`**.

@@ -3011,128 +3011,11 @@ pool_wait_for_lane() {
 }
 
 # =============================================================================
-# Wrapper shim — command dispatch (P1.M6.T1.S1)
-# =============================================================================
-# PRD §2.4 step 0 dispatcher. Classify an agent-browser invocation as 'meta'
-# (passthrough — exec the real binary unchanged) or 'driving' (route to the agent's
-# locked lane). ECHOES 'meta' or 'driving' on stdout; returns 0 ALWAYS. Called by the
-# wrapper lifecycle (M6.T3.S1) as the VERY FIRST step, BEFORE owner resolution.
-
-# pool_dispatch_classify [--] ARGS...
-#
-# Walk $@ left→right, skipping leading flags to find the first non-flag token (the
-# command), then classify. Pure: reads NO globals, writes NO files, calls NO external
-# commands. stdout = EXACTLY one token ('meta'|'driving'). Returns 0 always.
-#
-# LOGIC (item contract steps a–e):
-#   a. Flag scan (first non-flag token = command):
-#        --help | -h | --version  → echo 'meta'; return 0   (short-circuit: always a
-#                                   help/version request — PRD §2.4 / external_deps §1.2 META)
-#        --session <X>            → shift 2 (space form: consume flag + value)
-#        --session=<X>            → shift 1 (equals form: value attached; caught by --*)
-#        --json | <any --flag>    → shift 1 (caught by --*)
-#        <any -shortflag except -h> → shift 1 (caught by -*)
-#        <non-flag>               → the COMMAND; break (peek next token for session-list)
-#   b. META classification:
-#        'session' + next=='list' → 'meta'   (two-word command; bare 'session' is DRIVING)
-#        cmd ∈ {skills, dashboard, plugin, mcp} → 'meta'
-#   c. EVERYTHING ELSE → 'driving'. Covers the DRIVING set
-#      (open/click/dblclick/type/fill/press/keyboard/hover/focus/check/uncheck/select/drag/
-#       upload/download/scroll/scrollintoview/wait/screenshot/pdf/snapshot/eval/connect/
-#       close/session/back/forward/reload/get/is/find — external_deps.md §1.1) AND
-#   d. unrecognized commands (contract step d: "default to 'driving' — let the real binary
-#      handle the error"). Because (c) and (d) BOTH yield 'driving', the DRIVING set is NOT
-#      enumerated in code — detecting META + defaulting the rest is identical and stays
-#      correct as agent-browser adds driving commands (mouse, react, …).
-#   e. No command found (only flags / empty $@) → 'meta' (passthrough — a help/usage request, like --help; Issue 4).
-#
-# CONSUMERS: M6.T3.S1 wrapper lifecycle step 0; unit tests (M9).
-#
-# GOTCHA — return 0 ALWAYS. No failure mode ⇒ the caller's
-#   `class="$(pool_dispatch_classify "$@")"` is set -e-safe with NO guard (unlike
-#   pool_lease_find_mine which returns 1 on no-match and REQUIRES an `if` guard).
-# GOTCHA — NO precondition. Callable BEFORE pool_config_init / pool_owner_resolve (dispatch
-#   is PRD §2.4 STEP 0, before owner resolution step 1). Reads NO POOL_* globals. This also
-#   makes it unit-testable with zero fixtures.
-# GOTCHA — the loop guard `while (( $# > 0 ))` is a CONDITION (errexit-exempt). A BARE
-#   `(( expr ))` statement whose value is 0 returns rc 1 and ABORTS under set -e
-#   (lib/pool.sh:362-364). Shift-based iteration (NO index counter) avoids the
-#   `(( i++ ))`-returns-0 trap entirely.
-# GOTCHA — `shift 2 || shift` for --session: the `||`-list is errexit-exempt; tolerates a
-#   trailing --session with no value (shift 2 fails → shift consumes just --session).
-# GOTCHA — 'session list' (two-word) is META; bare 'session' is DRIVING. The lookahead
-#   peeks the token immediately after the command (`next="${2:-}"`). session ∈ DRIVING so
-#   'session <other>' → 'driving' via the default.
-# GOTCHA — SCOPE: CLASSIFIES ONLY. Does NOT intercept 'close --all' / normalize 'connect'
-#   (M6.T1.S2), strip '--session' / force AGENT_BROWSER_SESSION (M6.T2.S1), or wire the
-#   lifecycle (M6.T3.S1). Here connect & close simply classify 'driving'.
-# PRECONDITION: none. The function is pure.
-pool_dispatch_classify() {
-    local tok cmd next
-    cmd=""
-    while (( $# > 0 )); do
-        tok="$1"
-        case "$tok" in
-            --help|-h|--version)
-                printf 'meta\n'
-                return 0
-                ;;
-            --session)
-                # Space form: consume the flag AND its value. `|| shift` tolerates a
-                # trailing --session with no value (shift 2 fails → shift 1). The `||`
-                # list is errexit-exempt.
-                shift 2 || shift
-                ;;
-            --*)
-                # Any other long flag: --json, --session=X (equals form), --headed, …
-                shift
-                ;;
-            -*)
-                # Any short flag except -h (caught above): -i, -c, -d, -p, -v, -q, …
-                shift
-                ;;
-            *)
-                # First non-flag token = the command. Peek the next token (for the
-                # 'session list' two-word META command) and stop scanning.
-                cmd="$1"
-                next="${2:-}"
-                break
-                ;;
-        esac
-    done
-
-    # No command token found (only flags / empty $@) → 'meta' (passthrough). A
-    # subcommand-less invocation is a help/usage request (upstream prints help + exits 0),
-    # not a driving action — mirrors the --help/-h/--version short-circuit above (Issue 4).
-    if [[ -z "$cmd" ]]; then
-        printf 'meta\n'
-        return 0
-    fi
-
-    # META classification. (The DRIVING set + unrecognized commands all fall through to
-    # the default 'driving' below — contract steps c & d.)
-    if [[ "$cmd" == session && "$next" == list ]]; then
-        printf 'meta\n'
-        return 0
-    fi
-    case "$cmd" in
-        skills|dashboard|plugin|mcp)
-            printf 'meta\n'
-            return 0
-            ;;
-    esac
-
-    # Everything else → 'driving' (DRIVING set + unrecognized; contract c & d).
-    printf 'driving\n'
-    return 0
-}
-
-# =============================================================================
 # Wrapper shim — arg normalization (P1.M6.T1.S2)
 # =============================================================================
 # PRD §2.4 / §2.15 transparency normalizers. Rewrite an agent's DRIVING argv so the
 # pool — not the agent — controls connection & teardown scope. Called by the wrapper
-# lifecycle (M6.T3.S1) AFTER pool_dispatch_classify returned 'driving' and the lane is
+# lifecycle (M6.T3.S1) AFTER the bin dispatcher routed a non-pool-verb token to driving, and the lane is
 # acquired, BEFORE M6.T2.S1 strips --session / forces AGENT_BROWSER_SESSION.
 #
 # Output channel = the GLOBAL ARRAY POOL_NORM_ARGS (declare -ga) — NOT stdout (argv can
@@ -3154,7 +3037,7 @@ pool_dispatch_classify() {
 # --session abpool-<N> (M6.T2.S1) → the real exec is `close --session abpool-<N>`.
 #
 # LOGIC:
-#   a. Scan $@ (mirroring pool_dispatch_classify) to find the COMMAND (first non-flag):
+#   a. Scan $@ (mirroring the shared flag-scan pattern) to find the COMMAND (first non-flag):
 #        --session <X>  → skip 2 (consume flag + value)
 #        --session=<X>  → skip 1 (caught by --*)
 #        <any --flag>   → skip 1 (caught by --*; treated as bool — MIRRORS classify)
@@ -3173,8 +3056,8 @@ pool_dispatch_classify() {
 # GOTCHA — the index counter uses `i=$((i+1))` (assignment, always rc 0), NEVER `(( i++ ))`
 #   (returns rc 1 when i==0 → ABORT under set -e; lib/pool.sh:362-365). The only (( )) are
 #   `while (( i < ${#orig[@]} ))` (cond, exempt) — no if-cond needed here.
-# GOTCHA — MIRRORS pool_dispatch_classify's scan exactly so the two siblings agree on the
-#   command token (do NOT enumerate agent-browser value-flags). Safe for close --all.
+# GOTCHA — uses the SAME flag-scan pattern as the other arg/clean helpers so all siblings
+#   agree on the command token (do NOT enumerate agent-browser value-flags). Safe for close --all.
 # PRECONDITION: none. Reads only "$@".
 # shellcheck disable=SC2034 # POOL_NORM_ARGS/POOL_CLOSE_ALL_SEEN are OUTPUT-only contracts
 # read by the wrapper (M6.T3.S1) + tests (M9).
@@ -3183,7 +3066,7 @@ pool_normalize_close() {
     local cmd="" tok seen_all=0
     local i=0
 
-    # --- a. Find the COMMAND (mirror pool_dispatch_classify's flag-scan), index-based. ---
+    # --- a. Find the COMMAND (shared flag-scan pattern), index-based. ---
     # `i=$((i+N))` is an ASSIGNMENT (always rc 0) — avoids the bare-(( i++ )) trap. The
     # `while (( ))` is a CONDITION (errexit-exempt). --session consumes its value (skip 2);
     # all other flags skip 1 (matches classify's "all --* ⇒ shift-1" shortcut).
@@ -3310,7 +3193,7 @@ pool_normalize_connect() {
 # PRD §2.4 step 5 / §2.15 transparency. Neutralize an agent's attempt to bypass its
 # lane via the upstream-skill-taught --session <X> flag or an inherited
 # AGENT_BROWSER_SESSION=<X> env var. Called by the wrapper lifecycle (M6.T3.S1) AFTER
-# pool_dispatch_classify returned 'driving', AFTER M6.T1.S2's close/connect normalize,
+# the bin dispatcher routed a non-pool-verb token to driving, AFTER M6.T1.S2's close/connect normalize,
 # and AFTER acquire + ensure_connected, but BEFORE the exec.
 #
 # HOST-VERIFIED precedence (agent-browser 0.28.0): the --session <name> FLAG WINS over
@@ -3349,8 +3232,8 @@ pool_normalize_connect() {
 # GOTCHA — the index counter uses `i=$((i+N))` (assignment, always rc 0), NEVER `(( i++ ))`
 #   (returns rc 1 when i==0 → ABORT under set -e; lib/pool.sh:360-365). The only (( )) are
 #   `while (( i < ${#orig[@]} ))` (cond, exempt) and `if (( i+1 < ${#orig[@]} ))` (cond, exempt).
-# GOTCHA — MIRRORS pool_dispatch_classify's scan case-arms (--session / --session=*) so the
-#   wrapper-shim siblings agree on what a --session token is.
+# GOTCHA — uses the SAME --session / --session=* case-arms as the other arg/clean helpers so
+#   the wrapper-shim siblings agree on what a --session token is.
 # GOTCHA — POOL_CLEAN_ARGS is DISTINCT from M6.T1.S2's POOL_NORM_ARGS (pipeline:
 #   POOL_NORM_ARGS → strip → POOL_CLEAN_ARGS → exec). This function reads only "$@" (it does
 #   NOT reference POOL_NORM_ARGS) → decoupled from the parallel sibling.
@@ -3484,7 +3367,7 @@ _pool_preflight_real_bin() {
 # port ∈ {"0","",null}. Booting an adopted lane would re-copy/re-launch (wasteful + racy).
 #
 # RC TAXONOMY (which helpers need an `if`/`||` guard under set -e):
-#   rc 0 ALWAYS (no guard):  pool_dispatch_classify, pool_normalize_close/connect,
+#   rc 0 ALWAYS (no guard):  pool_normalize_close/connect,
 #                            pool_strip_session_args, pool_config_init, pool_state_init,
 #                            _pool_preflight_real_bin, pool_owner_resolve
 #                            (config/state/preflight/owner pool_die on FATAL misconfig)
@@ -3655,7 +3538,7 @@ pool_wrapper_main() {
 # ("<port|url> required", exit 1). This predicate lets pool_wrapper_main short-circuit that
 # erroring exec into a successful no-op (PRD §2.15 transparency; Issue #1).
 #
-# LOGIC (mirrors pool_normalize_connect / pool_dispatch_classify's flag-vs-command scan):
+# LOGIC (mirrors pool_normalize_connect / the shared flag-vs-command scan pattern):
 #   a. Walk $@; the first NON-flag token (skipping --session/--session=/--*/-*) is the COMMAND.
 #   b. If the command is NOT `connect` → return 1.
 #   c. Continue scanning PAST the command. If ANY further non-flag positional is found → return 1
@@ -3704,7 +3587,7 @@ _pool_clean_args_is_bare_connect() {
 # _pool_clean_args_is_close ARGS...
 #
 # Predicate: is the cleaned argv a `close` command? Returns 0 iff the first NON-flag
-# token (skipping --session/--session=/--*/-*, mirroring pool_dispatch_classify) equals
+# token (skipping --session/--session=/--*/-*, using the shared flag-scan pattern) equals
 # `close`; returns 1 otherwise. Twin of _pool_clean_args_is_bare_connect.
 #
 # CONSUMER: pool_wrapper_main (Issue #3 / P1.M3.T1.S1). When the agent's command is
