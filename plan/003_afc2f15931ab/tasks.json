@@ -1,0 +1,157 @@
+{
+  "backlog": [
+    {
+      "type": "Phase",
+      "id": "P3",
+      "title": "Multi-Harness Owner Resolution (Decision O9)",
+      "status": "Researching",
+      "description": "Generalize owner resolution from pi-only to a recognized agent-harness set (pi,claude,codex,agy,antigravity), configurable via AGENT_BROWSER_POOL_HARNESSES. One core function path + one config block + one user-facing message + a focused test/doc sweep. NOT a re-architecture — the entire no-shadow explicit-invocation model, lease writes, reaper, and liveness layer are reused unchanged. The identity triple (pid, comm, starttime) is unchanged; only the SET of acceptable comm values widens, and the RECORDED comm becomes the actual match. Source: delta_prd.md (R1-R5), PRD Decision O9.",
+      "milestones": [
+        {
+          "type": "Milestone",
+          "id": "P3.M1",
+          "title": "Core generalization (lib/pool.sh)",
+          "status": "Planned",
+          "description": "R1 (config var + POOL_HARNESSES global), R2 (pool_owner_resolve set-membership + record actual comm + TEST MODE reads /proc comm), R3 (fail-fast message). Static checks only (bash -n, shellcheck -s bash) per AGENTS.md §1 — do NOT boot Chrome or run the test suite during this milestone.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M1.T1",
+              "title": "Generalize owner resolution to recognized-harness set",
+              "status": "Planned",
+              "description": "The single lib/pool.sh change set: add the harness-set config (R1), generalize pool_owner_resolve to set-membership + record the actual matched comm (R2), and update the fail-fast message (R3). Three sequential subtasks editing lib/pool.sh plus their Mode A doc touch-points.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T1.S1",
+                  "title": "Add AGENT_BROWSER_POOL_HARNESSES config var + POOL_HARNESSES global",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.1", "h3.15", "h3.8", "h2.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/core_code_map.md §1. pool_config_init (lib/pool.sh:130-206) parses globals in numbered sections. The harness set is a plain string, so it follows the §3 CHROME_BIN pattern (lines 150-159: `${VAR:-default}` into `declare -g`), NOT the §4 uint pattern. Insertion point: AFTER the §5 booleans block (after line ~176 `POOL_ALLOW_SLOW_COPY=...; declare -g POOL_ALLOW_SLOW_COPY`) and BEFORE the §6 derived-paths block (line ~178). PRD §2.11 defines the var; Decision O9 (§4) resolves it.\n2. INPUT: No upstream dependency — this is the foundation subtask. The env var AGENT_BROWSER_POOL_HARNESSES is read from the environment (may be unset → default).\n3. LOGIC: Add a config block (§7) to pool_config_init that: (a) reads `AGENT_BROWSER_POOL_HARNESSES` with default `pi,claude,codex,agy,antigravity`; (b) lowercases it (`tr '[:upper:]' '[:lower:]'`), collapses repeated commas (`tr -s ','`), trims leading/trailing commas; (c) freezes into global `POOL_HARNESSES` via `declare -g`; (d) GUARDS: if the result is empty, fall back to the default (an empty set would make every driving command fail the no-ancestor check — never allow empty). The stored form must be a lookup string the walk loop can glob-match: `[[ \",,$POOL_HARNESSES,,\" == *\",,$comm,\"* ]]` (comma-wrapped for exact-token matching, so 'pi' does not match 'piXYZ'). Also update the pool_config_init header comment block (~lines 109-128) to list AGENT_BROWSER_POOL_HARNESSES alongside the other env vars.\n4. OUTPUT: Global `POOL_HARNESSES` (lowercased, de-duped, never-empty, comma-separated string) available to all functions in lib/pool.sh, consumed by P3.M1.T1.S2 (the walk loop). Verify with `bash -n lib/pool.sh` and `shellcheck -s bash lib/pool.sh` (both must be rc 0).\n5. DOCS: [Mode A] Add the `AGENT_BROWSER_POOL_HARNESSES` row to the env-var table in .agents/skills/agent-browser-pool/references/configuration.md AFTER line 27 (after AGENT_CHROME_ALLOW_SLOW_COPY), matching the 3-column `| Variable | Default | Meaning |` format. Default = `pi,claude,codex,agy,antigravity`; Meaning = 'comma-separated comm values treated as valid lane owners; the walk matches the first ancestor whose comm is in this set. Empty/unset → default (never empty)'. This rides WITH the work; do NOT create a separate docs subtask."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T1.S2",
+                  "title": "Generalize pool_owner_resolve to set-membership + record actual matched comm",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P3.M1.T1.S1"],
+                  "prd_selectors": ["h2.1", "h3.0", "h3.8", "h3.12", "h3.15", "h3.17", "h3.18", "h3.23", "h2.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/core_code_map.md §2. pool_owner_resolve (lib/pool.sh:486-583) has four blocks: (a) TEST MODE env override (507-533, hardcodes POOL_OWNER_COMM=\"pi\" at line 514); (b) REAL MODE ppid-walk loop (535-557, checks `if [[ \"$comm\" == \"pi\" ]]` at line 540); (c) RESULT block (559-579, hardcodes POOL_OWNER_COMM=\"pi\" at line 564); (d) no-ancestor path (581-582, log text says 'no pi ancestor'). The walk loop's `local` declaration at line 535 is `local pid=\"$$\" ppid=\"\" comm=\"\" line=\"\" found_pid=\"\" steps=0` — you must ADD `found_comm=\"\"` here.\n2. INPUT: Global `POOL_HARNESSES` (comma-separated lookup string) from P3.M1.T1.S1.\n3. LOGIC (four edits in pool_owner_resolve):\n  (a) TEST MODE block (line 514): replace `POOL_OWNER_COMM=\"pi\"` with code that reads the ACTUAL comm of the override pid: `POOL_OWNER_COMM=\"$(cat /proc/$ovr_pid/comm 2>/dev/null || printf 'pi')\"; declare -g POOL_OWNER_COMM`. This records the sim owner's real kernel-set comm (truthful), preserves existing pi tests (a pi sim owner → comm=\"pi\"), and enables the new non-pi selftest in P3.M2.T1.S2 WITHOUT a new env-var hook. Fall back to \"pi\" if the read fails.\n  (b) walk-loop declaration (line 535): add `found_comm=\"\"` to the local declaration.\n  (c) walk-loop check (line 540): replace `if [[ \"$comm\" == \"pi\" ]]; then found_pid=\"$pid\"; break; fi` with set-membership: `if [[ \",,$POOL_HARNESSES,,\" == *\",,$comm,\"* ]]; then found_pid=\"$pid\"; found_comm=\"$comm\"; break; fi`. The loop already reads comm generically — only the equality test changes.\n  (d) RESULT block (line 564): replace `POOL_OWNER_COMM=\"pi\"` with `POOL_OWNER_COMM=\"$found_comm\"; declare -g POOL_OWNER_COMM`.\n  (e) no-ancestor log (line 581): rephrase 'no pi ancestor (passthrough mode)' → 'no recognized-harness ancestor (passthrough mode)'.\n  (f) header comment (lines 487-498): rephrase 'walk ppid to comm==\\'pi\\'' → 'walk ppid to first ancestor whose comm is a recognized harness'; 'no pi ancestor → PID=0' → 'no recognized-harness ancestor → PID=0'.\n  DO NOT touch pool_owner_alive (624-687) or pool_lane_is_stale (1147-1234) — they are already comm-generic (confirmed: they compare the STORED comm via the lease). DO NOT touch the lease-write sites (lines 2044, 2133) — they write $POOL_OWNER_COMM and auto-correct once this subtask records the real comm.\n4. OUTPUT: pool_owner_resolve now records the ACTUAL matched harness comm in POOL_OWNER_COMM for any comm in POOL_HARNESSES, and returns POOL_OWNER_PID==0 only when no recognized harness is an ancestor. Consumed by pool_wrapper_main (fail-fast at 3414, unchanged condition), pool_lease_find_mine (1011, reuse), and the lease writers (2044/2133, auto-correct). Verify with `bash -n lib/pool.sh` + `shellcheck -s bash lib/pool.sh` (rc 0).\n5. DOCS: [Mode A] In .agents/skills/agent-browser-pool/references/configuration.md: rephrase line ~81 'under `pi`' → 'under a supported harness'; rephrase line ~85 'resolve owning pi PID (walk ppid → comm == \\\"pi\\\")' → 'resolve owning harness PID (walk ppid → first ancestor whose comm is in $POOL_HARNESSES)'; rephrase line ~53 'resolve the owning `pi` PID' → 'resolve the owning recognized-harness PID'; line ~54 'no `pi` ancestor' → 'no recognized-harness ancestor'; line ~101 'owning `pi` process exits' → 'owning harness process exits'. In .agents/skills/agent-browser-pool/SKILL.md: rephrase 'owning `pi` process' → 'owning harness process' at lines ~20, ~36, ~87; 'resolves your pi owner' → 'resolves your harness owner' at line ~58. These ride WITH the work."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M1.T1.S3",
+                  "title": "Update fail-fast message to name supported harnesses",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M1.T1.S2"],
+                  "prd_selectors": ["h2.1", "h3.8", "h3.16", "h3.22", "h2.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/core_code_map.md §3. pool_wrapper_main (lib/pool.sh:3413-3416) has the fail-fast: `if [[ \"${POOL_OWNER_PID:-0}\" == \"0\" ]]; then pool_die \"agent-browser-pool: driving commands require a pi ancestor (owning pi process).\" \"For raw browser use without pooling, call 'agent-browser' directly.\"; fi`. The CONDITION (line 3414) is UNCHANGED — only the pool_die message TEXT (line 3415) changes. The comment at lines 3411-3412 also references 'pi ancestor'. PRD §2.4 step 1 defines the fail-fast; §2.12 lists the CLI.\n2. INPUT: No data dependency — this is a static-string change. Depends on P3.M1.T1.S2 only for sequential writer safety on the same file.\n3. LOGIC: In pool_wrapper_main (lib/pool.sh:3415), change the pool_die first-line text from '\"agent-browser-pool: driving commands require a pi ancestor (owning pi process).\"' to '\"agent-browser-pool: driving commands require a supported agent harness (pi/claude/codex/agy).\"'. Keep the second line verbatim: '\"For raw browser use without pooling, call \\\"agent-browser\\\" directly.\"'. Also rephrase the comment at lines 3411-3412: 'no pi ancestor → fail-fast' → 'no recognized-harness ancestor → fail-fast'. NO condition change. ⚠️ This message-text change has a BLAST RADIUS: test/transparency.sh:528 polls for the literal substring `\"pi ancestor\"` — it WILL break. That fix is tracked in P3.M2.T1.S3 (depends on THIS subtask).\n4. OUTPUT: The fail-fast message now names the supported harnesses. Verify with `bash -n lib/pool.sh` + `shellcheck -s bash lib/pool.sh` (rc 0).\n5. DOCS: [Mode A] (a) In .agents/skills/agent-browser-pool/references/configuration.md: update the inline pool_die quote at lines ~54-55 to mirror the new message text ('requires a supported agent harness (pi/claude/codex/agy)'); rephrase line ~72 'fails fast without a `pi` ancestor' → 'without a recognized-harness ancestor'; update troubleshooting row line ~121 (all three cells: symptom/cause/fix generalize 'outside `pi`' → 'outside a supported harness', 'no pi ancestor' → 'no recognized-harness ancestor', 'under `pi`' → 'under a supported harness (pi/claude/codex/agy)'). (b) In .agents/skills/agent-browser-pool/SKILL.md §4 pitfalls (lines ~135-138): rephrase 'outside `pi`' → 'outside a supported harness (`pi`/`claude`/`codex`/`agy`)'; 'require a `pi` ancestor' → 'require a supported-harness ancestor' (add: lanes are owned by the harness process); 'under `pi`' → 'under a supported harness'. (c) In .agents/skills/agent-browser-pool/README.md line ~16: 'fail fast without a `pi` ancestor' → 'fail fast without a supported-harness ancestor' (also optional phrasing: line ~9 'under `pi`' → 'under a supported harness'; line ~11 'owning `pi` process' → 'owning harness process'). These ride WITH the work."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P3.M2",
+          "title": "Test coverage (test/)",
+          "status": "Planned",
+          "description": "R4: generalize spawn_sim_owner to optionally take a comm name (default pi), add a selftest proving a non-pi harness resolves + a non-harness comm is rejected, and fix the transparency.sh fail-fast-poll blast radius from R3. Runs isolated + bounded per AGENTS.md §1/§2/§4. Do NOT boot Chrome during owner-resolution selftests — they drive lib functions (pool_owner_resolve + pool_owner_alive) directly.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M2.T1",
+              "title": "Multi-harness owner-simulation test coverage",
+              "status": "Planned",
+              "description": "Generalize spawn_sim_owner (backward-compatible comm arg), add the non-pi harness selftest, and update transparency.sh's fail-fast literal-string check to match R3's new message.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T1.S1",
+                  "title": "Generalize spawn_sim_owner to optional comm name (2nd positional, default pi)",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": [],
+                  "prd_selectors": ["h2.1", "h3.22", "h3.8"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/test_code_map.md §1, §5a. spawn_sim_owner (test/validate.sh:103-140) currently takes `[SECONDS]` (default 600) and HARDCODES the comm to 'pi' via `bin=\"$bin_dir/pi\"` (line 122) + settle-loop `[[ \"$comm\" == \"pi\" ]]` (line 136). The kernel sets /proc/<pid>/comm to the BASENAME of the executed ELF, so copying /usr/bin/sleep to a file named 'pi' yields comm=='pi'. There are 6 callers (validate.sh:197, release_reaper.sh:157+238, concurrency.sh:233+383, transparency.sh:162), ALL passing at most a duration — so $1 MUST stay duration to preserve backward compatibility.\n2. INPUT: No upstream dependency — this is a self-contained test-framework generalization.\n3. LOGIC: Change spawn_sim_owner signature to `spawn_sim_owner [SECONDS] [COMM]` where COMM defaults to 'pi'. Concretely: (a) change the local declaration `local dur=\"${1:-600}\" ...` to add `comm_name=\"${2:-pi}\"`; (b) change `bin=\"$bin_dir/pi\"` → `bin=\"$bin_dir/$comm_name\"`; (c) change the settle-loop comparison `[[ \"$comm\" == \"pi\" ]]` → `[[ \"$comm\" == \"$comm_name\" ]]`. CRITICAL: keep `mktemp -d -t abpool-pi.XXXXXX` as the dir PREFIX (do NOT substitute $comm_name into the mktemp template) — the cleanup trap's glob backstop `rm -rf -- /tmp/abpool-pi.*` (validate.sh:170-171) matches that prefix and must stay valid for any comm name. All 6 existing callers are UNCHANGED ($2 defaults to 'pi'). Also update the function header comment (lines 103-110) to describe the new [COMM] param. Add a guard: if comm_name exceeds 15 chars (TASK_COMM_LEN), warn or truncate (the default set pi,claude,codex,agy,antigravity are all ≤15 so no truncation needed for defaults, but a custom harness name might).\n4. OUTPUT: spawn_sim_owner now optionally spawns a process with any comm name. Backward-compatible (all existing callers unchanged → existing pi-comm tests stay green). Consumed by P3.M2.T1.S2 (the new non-pi selftest calls `spawn_sim_owner 600 claude` and `spawn_sim_owner 600 xterm`). Verify with `bash -n test/validate.sh` + `shellcheck -s bash test/validate.sh` (rc 0). Do NOT run the suite (AGENTS.md §1 — planning phase).\n5. DOCS: none — no user-facing/config/API surface change (test-internal helper)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T1.S2",
+                  "title": "Add selftest_owner_resolves_non_pi_harness (positive claude + negative xterm)",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P3.M2.T1.S1", "P3.M1.T1.S2"],
+                  "prd_selectors": ["h2.1", "h3.22", "h3.8", "h3.17"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/test_code_map.md §2, §4, §5b. The selftest runner `_run_selftest_suite` (validate.sh:693-724) auto-discovers any `selftest_*` function via `compgen -A function | grep '^selftest_'` — NO registration needed. It calls setup() EXACTLY ONCE, then runs each body via `if \"$fn\"; then ...` in the MAIN shell (no subshell → EXIT trap never fires mid-suite). The existing selftest_sim_owner_is_alive_pi (validate.sh:293-307) is the template: it calls pool_owner_alive directly with the (pid, starttime, comm) triple. PRD §2.18 defines testability; §2.13 the identity rules.\n2. INPUT: (a) The generalized spawn_sim_owner from P3.M2.T1.S1 (supports `spawn_sim_owner 600 claude`). (b) pool_owner_resolve TEST MODE (from P3.M1.T1.S2) which now records the ACTUAL process comm (reads /proc/$ovr_pid/comm). (c) pool_owner_alive which is already comm-generic. (d) Test hooks AGENT_BROWSER_POOL_OWNER_PID + _STARTTIME (existing, validate.sh:181-200 setup pattern).\n3. LOGIC: Add a new function `selftest_owner_resolves_non_pi_harness()` to test/validate.sh (after selftest_sim_owner_is_alive_pi, ~line 307). It will be auto-discovered. It must:\n  POSITIVE CASE (recognized non-pi harness 'claude' resolves): (a) `pid=\"$(spawn_sim_owner 600 claude)\"`; (b) `st=\"$(_pool_get_starttime \"$pid\")\"`; (c) drive pool_owner_resolve via TEST MODE: `AGENT_BROWSER_POOL_OWNER_PID=\"$pid\" AGENT_BROWSER_POOL_OWNER_STARTTIME=\"$st\" pool_owner_resolve`; (d) assert `POOL_OWNER_COMM == \"claude\"` (proves resolve records actual comm); (e) assert `POOL_OWNER_PID != \"0\"` (proves it resolved, not failed); (f) assert `pool_owner_alive \"$pid\" \"$st\" \"$POOL_OWNER_COMM\"` returns 0 (proves liveness accepts it).\n  NEGATIVE CASE (non-harness comm 'xterm' is rejected): (a) `pid=\"$(spawn_sim_owner 600 xterm)\"`; (b) `st=\"$(_pool_get_starttime \"$pid\")\"`; (c) assert the real /proc comm IS 'xterm'; (d) assert `pool_owner_alive \"$pid\" \"$st\" \"claude\"` returns NON-zero (a lease expecting comm 'claude' must reject an xterm process).\n  REAPING (CRITICAL — AGENTS.md §3/§4): this selftest spawns+kills+waits its OWN sim owners (do NOT overwrite the shared ABPOOL_CUR_OWNER set by setup). Every code path (including failure/early-return) MUST `kill \"$pid\" 2>/dev/null || true; wait \"$pid\" 2>/dev/null || true` before returning. The temp bin dirs are reaped by the trap's `/tmp/abpool-pi.*` glob (dir-name-based, comm-agnostic — stays valid). Single-setup discipline: do NOT call setup() again.\n4. OUTPUT: A new auto-discovered selftest that proves non-pi harness resolution works and non-harness comms are rejected. Existing selftest_sim_owner_is_alive_pi stays GREEN untouched (pi ∈ default set). Verify with `bash -n test/validate.sh` + `shellcheck -s bash test/validate.sh` (rc 0). Do NOT run the suite during planning (AGENTS.md §1); the implementing agent runs it isolated + bounded per §2.\n5. DOCS: none — test-internal (no user-facing/config/API surface change)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M2.T1.S3",
+                  "title": "Update transparency.sh fail-fast poll to match new R3 message text",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P3.M1.T1.S3"],
+                  "prd_selectors": ["h2.1", "h3.22", "h3.8"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/test_code_map.md §3 (transparency.sh) and §6 (residual risk). test/transparency.sh:498-532 `test_driving_no_pi_ancestor_fails_fast()` polls a temp file for the fail-fast message. Line 528 checks `[[ \"$msg\" == *\"pi ancestor\"* ]]` — a LITERAL substring match. P3.M1.T1.S3 changed the pool_die message from 'require a pi ancestor' to 'require a supported agent harness (pi/claude/codex/agy)', so this literal check WILL FAIL (false negative — the test would never see the expected message and time out). PRD §2.18 covers testing.\n2. INPUT: The new fail-fast message text from P3.M1.T1.S3: the pool_die first line now contains 'supported agent harness'.\n3. LOGIC: In test/transparency.sh, update the poll-match at line ~528 from `[[ \"$msg\" == *\"pi ancestor\"* ]]` to match the new message text. Use a substring that is stable and specific to the new message, e.g. `[[ \"$msg\" == *\"supported agent harness\"* ]]` (this substring appears in the new pool_die text). Also scan the rest of test_driving_no_pi_ancestor_fails_fast (lines 498-532) and its header comment (498-513) for any other literal 'pi ancestor' references and update them to 'recognized-harness ancestor' / 'supported agent harness' to match. Do NOT change the test's STRUCTURE (setsid --fork detach, temp-file poll, bounded deadline) — only the matched substring + comment text.\n4. OUTPUT: test_driving_no_pi_ancestor_fails_fast matches the new fail-fast message. Verify with `bash -n test/transparency.sh` + `shellcheck -s bash test/transparency.sh` (rc 0). Do NOT run the suite during planning (AGENTS.md §1).\n5. DOCS: none — test-internal."
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "Milestone",
+          "id": "P3.M3",
+          "title": "Sync changeset-level documentation",
+          "status": "Planned",
+          "description": "Mode B changeset-level documentation sync (per SOW §5). The per-file Mode A docs (configuration.md, SKILL.md, skill-README.md) already rode with the M1 implementing subtasks. This milestone sweeps the cross-cutting README.md (root) — the env-var table, callouts, architecture overview, troubleshooting section, phrasing sweep, AND the headline NEW addition: the §2.17 cross-harness skill-installation paragraph + per-harness skills-dir table + the Codex symlink caveat (openai/codex#11314). Depends on ALL implementing subtasks in M1+M2 so it runs last and summarizes the complete delta.",
+          "tasks": [
+            {
+              "type": "Task",
+              "id": "P3.M3.T1",
+              "title": "Sync changeset-level documentation",
+              "status": "Planned",
+              "description": "Cross-cutting README.md (root) generalization + the new §2.17 cross-harness skill-install section. Optional install.sh help-text pointer. This is the FINAL task — it depends on every implementing subtask and runs last to prevent a coherent delta from shipping with a stale README.",
+              "subtasks": [
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T1.S1",
+                  "title": "Update README.md root: env-var table, callouts, architecture, troubleshooting, phrasing sweep",
+                  "status": "Planned",
+                  "story_points": 2,
+                  "dependencies": ["P3.M1.T1.S1", "P3.M1.T1.S2", "P3.M1.T1.S3", "P3.M2.T1.S1", "P3.M2.T1.S2", "P3.M2.T1.S3"],
+                  "prd_selectors": ["h2.1", "h3.8", "h3.15", "h3.16", "h3.18", "h3.21", "h2.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/docs_map.md File 4 (README.md root). README.md has the env-var table (lines 237-248), Usage blockquote callout (101-106), Classification-detail callout (145-154), How-it-works architecture diagram (269-282, esp. line 275 'resolve owning pi PID'), lane lifecycle list (line 290), and a troubleshooting section 'Driving command errored: requires a pi ancestor' (318-330). There are also owning-pi phrasing mentions at lines 16, 86, 172, 301, 304. The env-var table row here MUST match configuration.md's row (Default = pi,claude,codex,agy,antigravity; same Meaning wording) — keep them in sync.\n2. INPUT: The completed M1+M2 changes — pool_owner_resolve now records the actual matched harness comm; the fail-fast message now says 'require a supported agent harness (pi/claude/codex/agy)'; AGENT_BROWSER_POOL_HARNESSES is a real config var; tests pass.\n3. LOGIC: In README.md (root), apply these edits (per docs_map.md §4a-§4c):\n  (a) ENV-VAR TABLE: add `AGENT_BROWSER_POOL_HARNESSES` row after line 248 (after AGENT_CHROME_ALLOW_SLOW_COPY), matching the 3-column `| Env var | Default | Meaning |` format. Default = `pi,claude,codex,agy,antigravity`. Sync wording with configuration.md's row.\n  (b) USAGE BLOCKQUOTE (101-106): generalize 'require a `pi` ancestor' → 'require a supported-harness ancestor'; 'no `pi` ancestor' → 'no recognized-harness ancestor'; 'under `pi`' → 'under a supported harness (`pi`/`claude`/`codex`/`agy`)'.\n  (c) CLASSIFICATION-DETAIL CALLOUT (151-152): 'owning `pi` process' → 'owning harness process'; 'without a `pi` ancestor' → 'without a recognized-harness ancestor'.\n  (d) ARCHITECTURE DIAGRAM (275): 'resolve owning pi PID + starttime; no pi ancestor → FAIL-FAST' → 'resolve owning harness PID + starttime; no recognized-harness ancestor → FAIL-FAST'.\n  (e) LANE LIFECYCLE LIST (290): 'resolve the owning `pi` process' → 'resolve the owning harness process'; 'no `pi` ancestor' → 'no recognized-harness ancestor'.\n  (f) TROUBLESHOOTING SECTION (318-330): heading 'requires a pi ancestor' → mirror R3 message; the symptom quote → R3 message text; cause 'owning `pi` process' → 'owning harness process'; fix 'under `pi`' → 'under a supported harness'.\n  (g) PHRASING SWEEP: lines 16, 86, 172, 301, 304 — 'owning `pi` process' → 'owning harness process' where the text means the generalized owner (not where it specifically means the `pi` tool).\n4. OUTPUT: README.md reflects the recognized-harness model throughout, with the new env var surfaced. No code changes.\n5. DOCS: This IS the documentation subtask (Mode B changeset-level)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T1.S2",
+                  "title": "Add §2.17 cross-harness skill-install paragraph + per-harness table + Codex caveat to README.md",
+                  "status": "Planned",
+                  "story_points": 1,
+                  "dependencies": ["P3.M3.T1.S1"],
+                  "prd_selectors": ["h2.1", "h3.21", "h2.3"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/docs_map.md File 4 §4d. The README.md Installation section (lines 51-81) is currently pi-ONLY: it documents `install.sh --global-skill` (which symlinks into ~/.agents/skills/ for pi) and a pi-only uninstall. There is NO per-harness skills-dir table and NO Codex caveat. This is the HEADLINE doc addition of the changeset (delta_prd.md R5 Mode B item (c); PRD §2.17). PRD §2.17 defines the per-harness skill dirs and the Codex symlink caveat (openai/codex#11314: Codex does not discover a symlinked .agents/skills/).\n2. INPUT: PRD §2.17 per-harness table (pi / Claude Code / Codex / Antigravity — global skills dir, project skills dir, follows-symlinks). The completed M1+M2 changes (this section documents a capability enabled by the recognized-harness model).\n3. LOGIC: In README.md, append a NEW subsection to the Installation section (after line ~81, before '## Usage' at line ~83). Add: (a) a paragraph explaining the agent skill is cross-harness and installed per-harness; (b) a per-harness TABLE with columns: Harness | Global skills dir | Project skills dir | Follows symlinks? — rows for pi (~/.agents/skills/, ~/.pi/agent/skills/ for pi; .agents/skills/ project; yes), Claude Code (~/.claude/skills/; .claude/skills/; yes), Codex (~/.codex/skills/; .agents/skills/; NO — openai/codex#11314), Antigravity/agy (~/.antigravity/skills/; .antigravity/skills/; verify). (c) The CODEX CAVEAT as a callout/note: Codex does not discover a symlinked .agents/skills/ (openai/codex#11314) — for Codex, install the skill as a REAL DIRECTORY COPY into ~/.codex/skills/ (or wait for the upstream fix). pi and Claude Code follow symlinks, so `install.sh --global-skill` suffices for them. Keep the existing pi `--global-skill` paragraph (lines 65-69) — it remains the pi path; do NOT displace it.\n4. OUTPUT: README.md documents cross-harness skill installation for all four supported harnesses with the Codex caveat. Source of truth is PRD §2.17.\n5. DOCS: This IS the documentation subtask (Mode B changeset-level)."
+                },
+                {
+                  "type": "Subtask",
+                  "id": "P3.M3.T1.S3",
+                  "title": "Update install.sh --global-skill help text to point at README per-harness table (optional)",
+                  "status": "Planned",
+                  "story_points": 0.5,
+                  "dependencies": ["P3.M3.T1.S2"],
+                  "prd_selectors": ["h2.1", "h3.21"],
+                  "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: See plan/003_afc2f15931ab/architecture/docs_map.md File 5 (install.sh). install.sh's --global-skill flag (arg-parse lines 29-34, symlink action 89-95, success msg 117-118, --help heredoc 36-55) only ever symlinks into pi's ~/.agents/skills/. The delta says this edit is OPTIONAL (R5: 'optionally update --global-skill help text to point at the README per-harness table. No new required flag.'). install.sh gains NO new behavior.\n2. INPUT: The new README per-harness table from P3.M3.T1.S2.\n3. LOGIC: OPTIONALLY add a one-line pointer in the --global-skill help text (install.sh --help heredoc, ~lines 49-51) and/or the success message (~line 118) such as 'Other harnesses (claude/codex/agy): see README Installation → per-harness skills-dir table'. NO new flag, NO new behavior, NO new required action. If the change is deemed too minor to be worth it, this subtask may be a no-op (mark complete with a note). This subtask is OPTIONAL polish.\n4. OUTPUT: install.sh help text (optionally) references the README per-harness table. No functional change. Verify with `bash -n install.sh` (rc 0).\n5. DOCS: This IS the documentation subtask (Mode B, optional)."
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
