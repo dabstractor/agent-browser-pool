@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Restore Lane Isolation — Remove META Passthrough",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Eliminate the META command class from the agent-browser-pool dispatch pipeline. The META passthrough (pool_dispatch_classify + pool_wrapper_main step-c) was supposed to be removed in the Phase-2 delta but was never implemented, leaving a critical isolation breach: meta commands (skills, mcp, dashboard, plugin, session list, --version, flags-only) bypass session-forcing and owner-resolution, enabling cross-lane access via --session. This phase removes the META class from code, updates all tests to assert the new driving-only contract, and syncs all documentation to the pool-verbs-vs-driving model.",
       "milestones": [
         {
@@ -109,21 +109,21 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Sync Changeset-Level Documentation (Mode B)",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Final cross-cutting documentation sweep. The README.md (root user docs) describes the dispatch model in 4 sections (Usage, Classification detail, How it works diagram, Troubleshooting). All reference the removed META class and must be updated to the pool-verbs-vs-driving model. This is a Mode B task because these are overview/whole-feature docs that only make sense once the entire changeset is in place.",
           "tasks": [
             {
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Update all README.md sections that reference META commands, passthrough, or the meta-vs-driving dispatch model. Also perform a final consistency sweep across all files to confirm zero stale references to the removed META class.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Update README.md META references and perform final consistency sweep",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

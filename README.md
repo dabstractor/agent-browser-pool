@@ -92,7 +92,8 @@ agent-browser-pool open https://example.com     # your lane, same browser for th
 > **Driving commands require a `pi` ancestor.** From a plain terminal with no `pi` ancestor, a
 > driving command **fails fast** with an actionable message — by design. Run browser work
 > under `pi`, or call `agent-browser` directly for raw access without pooling. Pool verbs
-> (`status` / `doctor` / `reap` / `release` / `help`) and META commands work from any shell.
+> (`status` / `doctor` / `reap` / `release` / `help`) work from any shell; every other
+> command is a driving command that requires a `pi` ancestor.
 > See [How it works](#how-it-works).
 
 For the full procedural contract (acquire lifecycle, reuse rules, teardown semantics), read
@@ -132,12 +133,16 @@ agent-browser-pool click | type | eval | find | ...
 
 You never pass a lane, port, or session.
 
-> **Classification detail.** A few tokens are **META** and pass through to the real
-> `agent-browser` unchanged, acquiring no lane: `--version`; the subcommands `skills`,
-> `dashboard`, `plugin`, `mcp`; `session list`; and a flags-only invocation with no
-> subcommand (e.g. `agent-browser-pool --json`). Note that `--help` / `-h` / `help` are
-> **pool verbs** (they print this tool's help and never reach the real binary), and a bare
-> `agent-browser-pool` with no args defaults to `status`.
+> **Classification detail.** There is no separate "meta" class that runs without a
+> lane. `bin/agent-browser-pool`
+> catches the **pool verbs** (`status`, `reap`, `release`, `doctor`, `help`/`--help`/`-h`;
+> a bare invocation defaults to `status`) and runs them with no lane. **Everything else is a
+> driving command** — including `--version`, `skills`, `dashboard`, `plugin`, `mcp`,
+> `session list`, and a flags-only invocation (e.g. `agent-browser-pool --json`). A driving
+> command resolves your owning `pi` process, **fails fast** without a `pi` ancestor, and runs
+> scoped to your own lane (any `--session <X>` you pass is stripped and
+> `AGENT_BROWSER_SESSION=abpool-<N>` is forced). This is why a caller can never aim a command
+> at another agent's lane.
 
 ## Admin commands
 
@@ -252,18 +257,16 @@ For the full dispatch table, acquire lifecycle, and a troubleshooting matrix, se
 
 ## How it works
 
-On each invocation, `agent-browser-pool` classifies the command, then either runs a pool verb,
-passes a META command through to the real binary, or runs the lane lifecycle for a driving
-command:
+On each invocation, `bin/agent-browser-pool` splits the command: a **pool verb** runs an
+admin function (no lane); **everything else is a driving command** that runs the lane
+lifecycle:
 
 ```
 agent-browser-pool open https://example.com        ← agent types this, nothing else
-   │ 1. classify:
-   │      pool verb (status/reap/release/doctor/help)?  → run it (no lane)
-   │      META (--version, skills, dashboard, plugin, mcp, session list, flags-only)?
-   │                                                     → passthrough to the real binary (no lane)
-   │ 2. else DRIVING:
-   │      resolve owning pi PID + starttime; no pi ancestor → FAIL-FAST (not passthrough)
+   │ 1. split (bin/agent-browser-pool):
+   │      pool verb (status/reap/release/doctor/help)?  → run it (no lane, no owner resolve)
+   │      else DRIVING → pool_wrapper_main:
+   │           resolve owning pi PID + starttime; no pi ancestor → FAIL-FAST
    ├─ already hold my lease?  reuse my lane
    ├─ else acquire:  reap stale  →  reuse-orphan OR  cp --reflink master(real Chrome)→ephemeral
    │                  →  launch Chrome (setsid process group, anti-throttle flags)  →  connect daemon
@@ -274,7 +277,7 @@ agent-browser-pool open https://example.com        ← agent types this, nothing
 Lane lifecycle ordering (`pool_wrapper_main`):
 
 1. config + state init;
-2. classify — pool verb? META command? → handled above (no lane);
+2. (pool verbs were handled by `bin/agent-browser-pool` above — no lane); otherwise driving:
 3. **driving command → resolve the owning `pi` process**; if there is no `pi` ancestor,
    **fail fast** with an actionable error (by design — call `agent-browser` directly for raw
    access);
@@ -314,7 +317,8 @@ no `pi` ancestor in the process tree, there is no identity to key the lease on, 
 
 **Fix:** run browser work under `pi` (e.g. inside a `pi` session), or — for raw browser use
 without pooling — call the real `agent-browser` directly. Pool verbs (`status`, `doctor`,
-`reap`, `release`, `help`) and META commands work from any shell.
+`reap`, `release`, `help`) work from any shell; all other commands are driving (they
+require a `pi` ancestor).
 
 ### Pool exhaustion — an agent blocks, then force-reaps
 
