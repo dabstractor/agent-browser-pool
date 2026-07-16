@@ -47,7 +47,8 @@ Usage: ./install.sh [--force|-f] [--global-skill]
   --force|-f      Accepted for backward compatibility / scripted use (no-op).
   --global-skill  Also symlink the agent skill into ~/.agents/skills/, so pi sessions in
                   ANY project discover it (default: project-scoped — discovered only inside
-                  this repo).
+                  this repo). Covers pi only; for other harnesses (claude/codex/agy) see
+                  README.md "Cross-harness skill installation" (per-harness install).
   --help|-h       Show this help.
 
 Uninstall: rm -f ~/.local/bin/agent-browser-pool
@@ -116,6 +117,7 @@ printf '                -> %s/bin/agent-browser-pool\n' "$REPO_DIR"
 printf '  state dir:    %s/{lanes,acquire.lock}\n' "$POOL_STATE_DIR"
 if (( global_skill )); then
     printf '  agent skill:  %s/.agents/skills/agent-browser-pool (global; every project)\n' "$HOME"
+    printf '                (pi only; other harnesses see README.md "Cross-harness skill installation")\n'
 fi
 if (( doctor_ok )); then
     printf '  doctor:       healthy.\n'
