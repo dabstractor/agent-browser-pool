@@ -20,9 +20,12 @@ up when the agent finishes or crashes.
   process** keyed by name; `agent-browser --session <name> connect <port>` binds
   that daemon to a Chrome on a port; every later `AGENT_BROWSER_SESSION=<name>
   agent-browser …` routes there. (Verified.)
-- Every `bash` tool call an agent makes is a child of one **`pi` process**; walking
-  `ppid` to `comm == pi` yields a stable, unique-per-agent PID. (Verified: this
-  session → 836725.) Subagents are separate `pi` processes → separate lanes.
+- Every `bash` tool call an agent makes is a child of one **agent-harness process**
+  — `pi`, Claude Code (`claude`), Codex (`codex`), or Antigravity's agent (`agy`).
+  Walking `ppid` to the first ancestor whose `comm` is a **recognized harness**
+  yields a stable, unique-per-agent PID. (Verified on this host: `pi`, `claude`,
+  `codex`, `agy`, and the `antigravity` IDE are all installed; this session →
+  836725 under `pi`.) Subagents are separate harness processes → separate lanes.
 - The pool root `~/.agent-chrome-profiles` is on **btrfs**, so `cp --reflink=always`
   makes profile copies **instant and deduplicated** (each profile ≈ 4.8 GB; CoW
   shares all blocks until the agent writes). This is what makes ephemeral profiles
@@ -74,8 +77,8 @@ up when the agent finishes or crashes.
   logged-in Chrome that only it is using (lane picked by the agent's identity, not an arg).
 - Every later `agent-browser-pool …` in the session hits that same Chrome/lane, even
   though each command is a fresh shell — the command is identical every time.
-- When the agent's `pi` process exits (task done / crash), its Chrome is killed and
-  its ephemeral profile deleted within milliseconds.
+- When the agent's harness process exits (task done / crash), its Chrome is killed
+  and its ephemeral profile deleted within milliseconds.
 - Human runs `agent-browser-pool status` to see lanes/owners/ages, and
   `agent-browser-pool reap` to clean any leaked Chrome.
 
@@ -90,7 +93,8 @@ repo/lib/pool.sh                    ← shared lease logic (owner resolve / acqu
                                      ↓ calls by absolute path
 ~/.local/bin/agent-browser          ← the REAL Vercel CLI — hard runtime dependency (unchanged, upgradable)
 
-.agents/skills/agent-browser-pool/SKILL.md   ← the agent contract (the only browser skill)
+.agents/skills/agent-browser-pool/SKILL.md   ← the agent contract (Agent Skills standard;
+                                             discovered by pi, Claude Code, Codex, AGY)
 
 ~/.local/state/agent-browser-pool/  ← lease store + logs (runtime, not in repo)
 ├── acquire.lock                    ← short global flock
@@ -122,15 +126,20 @@ agent-browser-pool <args>
  ├─ 0. Classify the first non-flag token:
  │     POOL VERB (status | reap | release | doctor | help | --help | -h) → run that admin command; done (no lane).
  │     anything else → DRIVING command (open/click/type/snapshot/eval/get/find/connect/close/…) → lane logic below.
- ├─ 1. Resolve OWNER: walk ppid to first comm=="pi"; record {pid, comm, starttime}.
- │     No pi ancestor → DRIVING fails fast (“requires a pi ancestor; for raw browser use call `agent-browser` directly”).
- │     (Pool verbs never need an owner.)   [DEFAULT: pi-required; generalizing to a session root is a future option.]
- ├─ 2. Find MY lease (scan lanes/*.json for owner.pid==pid && comm=="pi" && starttime match).
- │     Found & valid → reuse lane N → goto 4.
+ ├─ 1. Resolve OWNER: walk ppid to the first ancestor whose comm is a RECOGNIZED
+ │     HARNESS (default set: pi, claude, codex, agy; configurable via
+ │     $AGENT_BROWSER_POOL_HARNESSES, §2.11). Record {pid, comm, starttime} with the
+ │     ACTUAL matched comm (not a hardcoded “pi”). No recognized-harness ancestor →
+ │     DRIVING fails fast (“requires a supported agent harness (pi/claude/codex/agy);
+ │     for raw browser use call `agent-browser` directly”).
+ │     (Pool verbs never need an owner.)   [RESOLVED — was “pi-required”; O9 generalizes it.]
+ ├─ 2. Find MY lease (scan lanes/*.json for owner.pid==pid && comm==<my matched harness>
+ │     && starttime match). Found & valid → reuse lane N → goto 4.
  ├─ 3. ACQUIRE (no valid lease):
  │     under short flock(acquire.lock):
- │       a. REAP-STALE: for each lane whose owner pid is dead / comm!="pi" / starttime mismatch
- │          → kill its Chrome pgroup, rm -rf its ephemeral dir, delete lease.
+ │       a. REAP-STALE: for each lane whose owner pid is dead / comm not a recognized
+ │          harness / starttime mismatch → kill its Chrome pgroup, rm -rf its ephemeral
+ │          dir, delete lease.
  │       b. REUSE-ORPHAN: if any lane has a *responsive* Chrome but a dead owner
  │          → adopt it (reassign owner, ensure connected), skip the copy.   [IQ4 = reuse-if-responsive]
  │       c. CHOOSE N: lowest N≥1 with no active/<N> dir and no lanes/<N>.json lease.
@@ -168,7 +177,7 @@ Release is **owner-liveness-driven**, not TTL-driven (no idle timer). Triggers:
 
 | trigger | action |
 |---|---|
-| Owning `pi` exits (task done / killed / crash) | detected by next acquire's REAP-STALE → kill pgroup, `rm -rf` ephemeral dir, delete lease |
+| Owning harness exits (task done / killed / crash) | detected by next acquire's REAP-STALE → kill pgroup, `rm -rf` ephemeral dir, delete lease |
 | Explicit `agent-browser-pool release [<N>\|all]` | same teardown |
 | Pool-exhaustion block timeout (§2.9) | force-reap the oldest dead-owner lane, then proceed; **alert** (this signals a leak) |
 
@@ -226,7 +235,7 @@ setsid google-chrome-stable \
   "ephemeral_dir": "/home/dustin/.agent-chrome-profiles/active/7",
   "port": 53427,
   "session": "abpool-7",
-  "owner": { "pid": 836725, "comm": "pi", "starttime": 1234567890, "cwd": "/home/dustin/projects/x" },
+  "owner": { "pid": 836725, "comm": "claude", "starttime": 1234567890, "cwd": "/home/dustin/projects/x" },
   "chrome_pid": 104816,
   "chrome_pgid": 104816,
   "acquired_at": 1720000000,
@@ -235,7 +244,9 @@ setsid google-chrome-stable \
 }
 ```
 - One owner holds ≤1 lane (enforced at acquire step 2).
-- `starttime` (from `/proc/<pid>/stat` field 22) defeats PID recycling into a new pi.
+- `starttime` (from `/proc/<pid>/stat` field 22) defeats PID recycling into a new harness process.
+- `comm` records the ACTUAL matched harness (pi/claude/codex/agy/…), not a constant — so
+  `status`/`doctor` show which tool owns each lane, and stale detection works across all harnesses.
 
 ### 2.9 Pool exhaustion  **[IQ2 = block-with-timeout + alert]**
 If no free/reusable lane at acquire:
@@ -257,6 +268,13 @@ If no free/reusable lane at acquire:
   promptness; not in scope unless you ask.)
 
 ### 2.11 Discovery & configuration
+- **Recognized harnesses (owner resolution):** `$AGENT_BROWSER_POOL_HARNESSES` —
+  comma-separated agent-harness process names (`comm` values) the pool treats as valid
+  lane owners. Default: `pi,claude,codex,agy,antigravity`. Owner resolution (§2.4 step 1)
+  walks `ppid` to the first ancestor matching one; the matched comm is recorded in the
+  lease. Tune the list to match how each harness is installed on a host (a node-wrapped
+  launcher may expose a different `comm` than the native binary; the Antigravity GUI's
+  integrated terminal may surface the editor's `comm` rather than `agy`).
 - **Source profile (CoW source):** `$AGENT_CHROME_MASTER` (default
   `${XDG_CONFIG_HOME:-~/.config}/google-chrome` — your real Chrome user-data-dir).
   Point at any Chrome user-data-dir; agents copy the current state on each acquire, so
@@ -306,9 +324,9 @@ Each ephemeral profile starts as a clone of the master identity:
 ### 2.14 Failure modes & recovery
 | failure | detection | recovery |
 |---|---|---|
-| agent `pi` crash/kill | owner pid dead | REAP-STALE → kill pgroup, rm dir, drop lease |
-| PID recycled into non-pi | comm != "pi" | stale → reclaimed |
-| PID recycled into new pi | starttime mismatch | stale → reclaimed |
+| agent harness crash/kill | owner pid dead | REAP-STALE → kill pgroup, rm dir, drop lease |
+| PID recycled into non-harness | comm not recognized | stale → reclaimed |
+| PID recycled into new harness proc | starttime mismatch | stale → reclaimed |
 | Chrome crash mid-task | `get cdp-url` fails in ENSURE-CONNECTED | relaunch on same dir+port, reconnect, keep lease (open tabs lost; profile kept) |
 | Chrome slow to boot | /json/version timeout (15s) | retry launch once; then fail, drop lane |
 | source profile missing/empty | acquire precheck | fail with guidance: use Chrome so the default exists, or set `AGENT_CHROME_MASTER` to an existing user-data-dir |
@@ -356,11 +374,27 @@ the old manual workflow are simply unaffected — they aren't calling `agent-bro
 yet. Coexistence is trivial and per-call. **Removed:** the `AGENT_BROWSER_POOL_DISABLE`
 safety valve (nothing to bypass) and the `~/scripts`-ahead-of-`~/.local/bin` PATH requirement.
 
+**The agent skill is cross-harness, installed per-harness.** The skill is an Agent
+Skills-standard skill at `.agents/skills/agent-browser-pool/` (discovered project-scoped
+inside this repo). `install.sh --global-skill` symlinks it into `~/.agents/skills/`. To
+teach each harness natively, install into its own skills dir:
+
+| Harness | Global skills dir | Project skills dir | Follows symlinks? |
+|---|---|---|---|
+| pi | `~/.agents/skills/`, `~/.pi/agent/skills/` | `.agents/skills/` | yes |
+| Claude Code | `~/.claude/skills/` | `.claude/skills/` | yes |
+| Codex | `~/.codex/skills/` | `.agents/skills/` | **no — openai/codex#11314** |
+| Antigravity (agy/IDE) | `~/.antigravity/skills/` | `.antigravity/skills/` | verify |
+
+> **Codex caveat:** Codex does not discover a *symlinked* `.agents/skills` (openai/codex#11314).
+> For Codex, install the skill as a real directory copy into `~/.codex/skills/` (or wait for
+> the upstream fix). pi and Claude Code follow symlinks, so `--global-skill` suffices for them.
+
 ### 2.18 Testing & validation
-- **Owner resolution needs a `pi` ancestor.** A harness run from a plain
-  interactive shell has none → driving commands can't key a lane (§2.4 step 1).
-  Remedies: (a) run the harness **under pi** (a subagent) so owner resolution works
-  for real; or (b) set testability overrides
+- **Owner resolution needs a recognized-harness ancestor.** A command run from a
+  plain interactive shell has none → driving commands can't key a lane (§2.4 step 1).
+  Remedies: (a) run the command **under a supported harness** (`pi`/`claude`/`codex`/
+  `agy`) so owner resolution works for real; or (b) set testability overrides
   `AGENT_BROWSER_POOL_OWNER_PID=<pid>` (+ `_OWNER_STARTTIME`) to simulate distinct
   agents from distinct subshell PIDs. (Narrowly-scoped test hooks; pool verbs like
   `status`/`doctor` need no owner and work from any shell.)
@@ -368,9 +402,10 @@ safety valve (nothing to bypass) and the `~/scripts`-ahead-of-`~/.local/bin` PAT
   window. For unattended harness runs set `AGENT_CHROME_HEADLESS=1` (plumbing tests
   only; headless trips some anti-bot walls, so it's not valid for trusted-profile
   wall-passing validation).
-- **The main interactive `pi` is long-lived**, so a lease it takes persists until
-  explicit release — every test must call `agent-browser-pool release`/`reap` and
-  assert the ephemeral dir + Chrome process group are gone.
+- **A long-lived interactive harness** (e.g. the main `pi`, or a persistent
+  `claude`/`codex`/`agy` session) keeps its lease until explicit release — every test
+  must call `agent-browser-pool release`/`reap` and assert the ephemeral dir + Chrome
+  process group are gone.
 - **Concurrency harness:** N parallel "agents" (distinct owner PIDs via the
   override) must each get a distinct lane; assert no two share a lane and all
   release cleanly with no leftover dirs/processes.
@@ -441,8 +476,16 @@ agent-browser-pool/
   unchanged; the pool owns only connection/session/lifecycle. ✅
 - **O8 — `agent-browser` is a hard runtime dependency**, enforced by `doctor` + a
   pool preflight (fail-fast); called by absolute path, not required on PATH. ✅
+- **O9 — Multi-harness owner resolution.** Owner resolution generalizes from
+  `pi`-only to a **recognized harness set** (default `pi,claude,codex,agy,antigravity`;
+  configurable via `$AGENT_BROWSER_POOL_HARNESSES`, §2.11). The lease records the *actual*
+  matched `comm`, so identity, reuse, and stale-detection work identically for every
+  harness. Driving commands fail fast only when NO recognized harness is an ancestor;
+  the skill is installed per-harness (§2.17, incl. the Codex symlink caveat). ✅ (Resolves
+  the earlier "[DEFAULT: pi-required; … future option]" note in §2.4.)
 
 Everything is locked: btrfs/reflink copies, delete-on-release, block-with-timeout
 + alert, reuse-orphan-if-responsive, explicit invariant invocation, identity-keyed
 isolation, `agent-browser-pool` binary, port base 53420, `$HOME`/absolute-path
-resolution. Ready to build.
+resolution, and multi-harness owner resolution (pi/Claude Code/Codex/AGY, O9).
+Ready to build.
