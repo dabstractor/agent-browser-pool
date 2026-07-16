@@ -4152,9 +4152,9 @@ pool_admin_release() {
 #
 # LOGIC (CONTRACT a→g):
 #   a. DEPS        — command -v each required dep {flock, setsid, pgrep, pkill, cp,
-#                    curl, jq} + the Chrome binary ($POOL_CHROME_BIN, name-or-path) +
-#                    the OPTIONAL notify-send. Required MISSING → FAIL; notify-send
-#                    MISSING → "(optional)", NOT counted.
+#                    curl, jq, findmnt} + the Chrome binary ($POOL_CHROME_BIN, name-or-path)
+#                    + the OPTIONAL notify-send AND ss. Required MISSING → FAIL;
+#                    notify-send/ss MISSING → "(optional)", NOT counted.
 #   b. REAL BIN    — $POOL_REAL_BIN is a regular file + executable → OK / FAIL.
 #   c. FS          — btrfs at $POOL_EPHEMERAL_ROOT (findmnt -T) → OK; non-btrfs +
 #                    POOL_ALLOW_SLOW_COPY==1 → WARN; non-btrfs + no-slow-copy → FAIL.
@@ -4174,16 +4174,17 @@ pool_admin_release() {
 #   WARN (exit 0): non-btrfs + slow-copy; LEAK (no dir / dead chrome); DISCONNECTED;
 #                  daemon disconnected (lease connected:false); ORPHAN DIR; PROVISIONAL
 #                  lease; corrupt/unreadable lease.
-#   (not counted): notify-send MISSING (optional).
+#   (not counted): notify-send MISSING (optional); ss MISSING (optional, degrades to curl-only port probe).
 # Rationale: infra problems BLOCK correct pool operation → FAIL; lane/dir cruft is
 #   EXACTLY what reap/release recover from → WARN. doctor = "FAIL = fix setup; WARN =
 #   run reap/release." Precedent: brew doctor (advisory vs hard), git fsck (non-zero).
 #
 # OUTPUT (ALL to stdout — capturable):
 #   [dependencies]
-#     <dep>           OK | MISSING            (MISSING = FAIL, except notify-send)
+#     <dep>           OK | MISSING            (MISSING = FAIL, except notify-send and ss)
 #     chrome (<bin>)  OK | MISSING
 #     notify-send     OK | MISSING (optional)
+#     ss              OK | MISSING (optional; port-probe degrades to curl-only)
 #   [binary]
 #     <POOL_REAL_BIN> OK | MISSING (not executable)
 #   [filesystem]
@@ -4263,7 +4264,7 @@ pool_admin_doctor() {
     #   ss      — used by pool_find_free_port (ss -tlnH) for port allocation. Absence
     #            degrades SILENTLY to a curl-only probe (the || true empty-snapshot path);
     #            no FAIL, no WARN → name it so the operator can see the degradation.
-    for dep in flock setsid pgrep pkill cp curl jq findmnt ss; do
+    for dep in flock setsid pgrep pkill cp curl jq findmnt; do
         if command -v "$dep" >/dev/null 2>&1; then
             printf '  %-22s OK\n' "$dep"
             ok=$((ok+1))
@@ -4304,6 +4305,16 @@ pool_admin_doctor() {
         ok=$((ok+1))
     else
         printf '  %-22s MISSING (optional)\n' "notify-send"
+    fi
+    # ss — OPTIONAL (pool_find_free_port lib/pool.sh:1412 degrades to a curl-only probe
+    # when absent via `|| true`). Absence is NOT a FAIL (and NOT a WARN) — port allocation
+    # still works via the live curl /json/version probe. (Issue #2: was wrongly in the
+    # FAIL loop, contradicting the comment above it.)
+    if command -v ss >/dev/null 2>&1; then
+        printf '  %-22s OK\n' "ss"
+        ok=$((ok+1))
+    else
+        printf '  %-22s MISSING (optional; port-probe degrades to curl-only)\n' "ss"
     fi
 
     # =========================================================================

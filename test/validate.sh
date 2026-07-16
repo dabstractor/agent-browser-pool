@@ -957,6 +957,45 @@ EOF
     assert_eq "0" "$rc" "doctor [lanes] warns on connected:false (out: $out)" || return 1
 }
 
+# Issue #2: ss is OPTIONAL (pool_find_free_port degrades to curl-only when absent).
+# doctor must NOT count a missing ss as a FAIL — the ss line must carry "(optional …)".
+# Hermetic: stub `command -v ss` to fail in the body subshell (scoped, no leak); the
+# tmpfs temp tree yields 1 unrelated btrfs FAIL, so assert the ss LINE (not fail==0).
+selftest_doctor_ss_optional_when_missing() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/doctor-ss-opt"
+    mkdir -p -- "$outdir/active"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+# Stub `command` so `command -v ss` returns 1 (ss "missing") while every other
+# `command -v <dep>` passes through to the real builtin. Scoped to this subshell.
+command() {
+    if [[ "${1:-}" == "-v" && "${2:-}" == "ss" ]]; then
+        return 1
+    fi
+    builtin command "$@"
+}
+# doctor returns rc 1 when FAIL>0 (the tmpfs temp tree shows a non-btrfs FAIL, which
+# is UNRELATED to the ss check) -> tolerate with `|| true` so set -e does not abort.
+out="$(pool_admin_doctor 2>/dev/null || true)"
+# PRIMARY invariant: the ss line carries "(optional" (not a bare MISSING). A missing ss
+# is non-blocking, so its MISSING line must be qualified — NOT counted as FAIL. This is
+# the load-bearing assertion (the only ss-specific contract). We deliberately do NOT
+# pin the absolute FAIL count: the temp tree also trips unrelated FAILs (binary missing
+# in the temp HOME, master dir empty, tmpfs non-btrfs), so FAIL is host/env-dependent.
+printf '%s\n' "$out" | grep -qE 'ss +MISSING \(optional' || exit 1
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "doctor [dependencies]: missing ss is optional, not FAIL (out: $out)" || return 1
+}
+
 # --- source-vs-execute gate: run the self-test ONLY when executed directly. -----
 # ★★★ SINGLE-SETUP RUNNER (HARD CONSTRAINT — AGENTS.md §4 / Issue #3) ★★★
 # setup() spawns a REAL sim-owner process (spawn_sim_owner) every time it is called. The
