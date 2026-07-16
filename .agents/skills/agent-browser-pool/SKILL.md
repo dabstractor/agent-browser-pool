@@ -17,7 +17,7 @@ with a dedicated ephemeral profile*, for the lifetime of your session:
 
 **The command never names a lane.** `agent-browser-pool <verb> <args>` is **identical every
 time** — the same on lane 1 or lane 99. Your lane is selected by your own process identity
-(your owning `pi` process and its start time), never by an argument. You do not — and cannot —
+(your owning harness process and its start time), never by an argument. You do not — and cannot —
 pass a lane number, port, or session.
 
 **You do not manage lanes — `agent-browser-pool` does. Just type the command.** That is the
@@ -33,7 +33,7 @@ agent-browser-pool open https://example.com     # this single call does everythi
 ```
 
 Behind the scenes it:
-1. Finds a free lane just for you, keyed on your owning `pi` process (and its start time, so a
+1. Finds a free lane just for you, keyed on your owning harness process (and its start time, so a
    recycled PID can never steal your lane).
 2. Copy-on-writes a fresh profile from the master template.
 3. Launches Chrome on the lane's port, connects the daemon, and pins your session to `abpool-<N>` (you never type this).
@@ -55,7 +55,7 @@ You do not reconnect between calls.
 ### Which commands trigger a lane
 
 Every command except pool verbs (status/reap/release/doctor/help) is a driving command — it
-resolves your pi owner, acquires/reuses your lane, and runs scoped to `abpool-<N>` with
+resolves your harness owner, acquires/reuses your lane, and runs scoped to `abpool-<N>` with
 `--session` stripped. This includes `open`, `connect`, `close`, `get`, `screenshot`,
 `click`, `type`, `eval`, `find`, and **any unrecognized command** (an unknown verb still
 gets your lane rather than erroring out). It also includes `--version`, `skills`,
@@ -84,7 +84,7 @@ the pool strips it and forces `--session abpool-<N>` — it can never kill a pee
 
 ### The real teardown is automatic
 
-**Just end your session normally.** When your owning `pi` process exits, the lane is released:
+**Just end your session normally.** When your owning harness process exits, the lane is released:
 the Chrome process group is killed, the ephemeral profile directory is deleted, and the lease
 is dropped. You normally do nothing explicit.
 
@@ -133,9 +133,9 @@ Each ephemeral profile starts as a clone of the master identity:
 ## 4. Common pitfalls
 
 - **"I ran a driving command outside `pi` and it errored."** By design: driving commands
-  require a `pi` ancestor — that is how your lane is keyed to you. The call fails fast with an
+  require a supported agent harness — that is how your lane is keyed to you. The call fails fast with an
   actionable message pointing you at the real `agent-browser` for raw browser use. Run your
-  browser work under `pi`; don't try to bypass it.
+  browser work under a supported harness (pi/claude/codex/agy); don't try to bypass it.
 - **"My `agent-browser-pool` call hangs a long time."** The pool may be **exhausted** (all
   lanes busy). It self-heals — it reaps dead owners and, after `AGENT_BROWSER_POOL_WAIT`
   (default 600s), force-reclaims one. Do **not** try to "fix" this by booting Chrome directly.

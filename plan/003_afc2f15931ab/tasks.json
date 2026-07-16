@@ -11,14 +11,14 @@
           "type": "Milestone",
           "id": "P3.M1",
           "title": "Core generalization (lib/pool.sh)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "R1 (config var + POOL_HARNESSES global), R2 (pool_owner_resolve set-membership + record actual comm + TEST MODE reads /proc comm), R3 (fail-fast message). Static checks only (bash -n, shellcheck -s bash) per AGENTS.md §1 — do NOT boot Chrome or run the test suite during this milestone.",
           "tasks": [
             {
               "type": "Task",
               "id": "P3.M1.T1",
               "title": "Generalize owner resolution to recognized-harness set",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The single lib/pool.sh change set: add the harness-set config (R1), generalize pool_owner_resolve to set-membership + record the actual matched comm (R2), and update the fail-fast message (R3). Three sequential subtasks editing lib/pool.sh plus their Mode A doc touch-points.",
               "subtasks": [
                 {
@@ -40,7 +40,7 @@
                   "type": "Subtask",
                   "id": "P3.M1.T1.S2",
                   "title": "Generalize pool_owner_resolve to set-membership + record actual matched comm",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P3.M1.T1.S1"
@@ -62,7 +62,7 @@
                   "type": "Subtask",
                   "id": "P3.M1.T1.S3",
                   "title": "Update fail-fast message to name supported harnesses",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P3.M1.T1.S2"

@@ -187,7 +187,7 @@ pool_config_init() {
     #    comm values the pool treats as valid lane owners. Normalized to a clean lowercase
     #    comma list (never empty: an empty set would fail every driving command's ancestor
     #    check). Consumed as a lookup by pool_owner_resolve (M1.T1.S2):
-    #      [[ ",,$POOL_HARNESSES,," == *",,$comm,"* ]]   (double-comma wrap ⇒ exact-token).
+    #      [[ ",$POOL_HARNESSES," == *",$comm,"* ]]   (comma-delimited wrap ⇒ exact-token match).
     local harnesses_raw harnesses
     harnesses_raw="${AGENT_BROWSER_POOL_HARNESSES:-pi,claude,codex,agy,antigravity}"
     harnesses="$(printf '%s' "$harnesses_raw" | tr '[:upper:]' '[:lower:]' | tr -s ',')"
@@ -497,8 +497,8 @@ _pool_owner_starttime() {
 }
 
 pool_owner_resolve() {
-    # Resolve the owning pi process and populate POOL_OWNER_* globals.
-    # Implements PRD §2.4 step 1 (resolve OWNER), §1.1 (walk ppid to comm=='pi'),
+    # Resolve the owning harness process and populate POOL_OWNER_* globals.
+    # Implements PRD §2.4 step 1 (resolve OWNER), §1.1 (walk ppid to first ancestor whose comm is a recognized harness),
     # and the test-hook overrides of PRD §2.18 / key_findings FINDING 8.
     #
     # TEST-HOOK env vars (TEST-ONLY, PRD §2.18 / key_findings FINDING 8 — narrowly
@@ -507,7 +507,7 @@ pool_owner_resolve() {
     #   AGENT_BROWSER_POOL_OWNER_STARTTIME  — simulate the owner starttime.
     #
     # LOGIC: (1) TEST MODE if AGENT_BROWSER_POOL_OWNER_PID set+numeric → use
-    # directly; (2) REAL MODE walk ppid from $$ to comm=='pi'; (3) no pi ancestor
+    # directly; (2) REAL MODE walk ppid from $$ to first ancestor in $POOL_HARNESSES; (3) no recognized-harness ancestor
     # → PID=0 (passthrough). NEVER fatal. Globals MUTABLE → re-runnable. One
     # _pool_log line per call (never inside the walk loop — this runs on every
     # agent-browser invocation).
@@ -524,7 +524,7 @@ pool_owner_resolve() {
             return 0
         fi
         POOL_OWNER_PID="$ovr_pid"; declare -g POOL_OWNER_PID
-        POOL_OWNER_COMM="pi";      declare -g POOL_OWNER_COMM
+        POOL_OWNER_COMM="$(cat /proc/"$ovr_pid"/comm 2>/dev/null || printf 'pi')"; declare -g POOL_OWNER_COMM
         if [[ -n "${AGENT_BROWSER_POOL_OWNER_STARTTIME:-}" ]]; then
             POOL_OWNER_STARTTIME="$AGENT_BROWSER_POOL_OWNER_STARTTIME"; declare -g POOL_OWNER_STARTTIME
         else
@@ -546,12 +546,13 @@ pool_owner_resolve() {
 
     # --- 2. REAL MODE: walk ppid chain from $$ ------------------------------
     local pid="$$"
-    local ppid="" comm="" line="" found_pid="" steps=0
+    local ppid="" comm="" line="" found_pid="" found_comm="" steps=0
     while (( steps++ < 128 )); do
         comm=""
         IFS= read -r comm < "/proc/$pid/comm" 2>/dev/null || true
-        if [[ "$comm" == "pi" ]]; then
+        if [[ ",$POOL_HARNESSES," == *",$comm,"* ]]; then
             found_pid="$pid"
+            found_comm="$comm"
             break
         fi
         ppid=""
@@ -574,7 +575,7 @@ pool_owner_resolve() {
     # --- 3. RESULT ----------------------------------------------------------
     if [[ -n "$found_pid" ]]; then
         POOL_OWNER_PID="$found_pid"; declare -g POOL_OWNER_PID
-        POOL_OWNER_COMM="pi";         declare -g POOL_OWNER_COMM
+        POOL_OWNER_COMM="$found_comm"; declare -g POOL_OWNER_COMM
         local st=""
         st="$(_pool_owner_starttime "$found_pid" 2>/dev/null)" || true
         if [[ -n "$st" ]]; then
@@ -591,7 +592,7 @@ pool_owner_resolve() {
         return 0
     fi
 
-    _pool_log "pool_owner_resolve: no pi ancestor (passthrough mode)"
+    _pool_log "pool_owner_resolve: no recognized-harness ancestor (passthrough mode)"
     return 0
 }
 

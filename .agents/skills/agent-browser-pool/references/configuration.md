@@ -51,8 +51,8 @@ lane work. Decisions (in order, first match wins):
    `status`, `reap`, `release [<N>|all]`, `doctor`, `--help`/`-h`/`help`. A bare
    `agent-browser-pool` (no arguments) defaults to `status`. These print pool state or
    the pool's own help and never touch a browser.
-2. **Everything else → DRIVING** → `pool_wrapper_main`: resolve the owning `pi` PID; if
-   there is no `pi` ancestor, **fail-fast** (`pool_die`: "agent-browser-pool: driving
+2. **Everything else → DRIVING** → `pool_wrapper_main`: resolve the owning recognized-harness PID; if
+   there is no recognized-harness ancestor, **fail-fast** (`pool_die`: "agent-browser-pool: driving
    commands require a pi ancestor... For raw browser use without pooling, call
    'agent-browser' directly."). Otherwise acquire/reuse the caller's lane, strip any
    `--session`, force `AGENT_BROWSER_SESSION=abpool-<N>`, and exec the real binary with
@@ -61,7 +61,7 @@ lane work. Decisions (in order, first match wins):
 ### Driving commands (use your lane)
 
 Every non-pool-verb token is a driving command — it resolves the caller's owner identity,
-fails fast without a `pi` ancestor, and runs scoped to the caller's own lane. This
+fails fast without a recognized-harness ancestor, and runs scoped to the caller's own lane. This
 includes:
 
 - `open <url>`, `connect <port|url>` (arg ignored — pool owns connection), `close [--all]`
@@ -79,11 +79,11 @@ includes:
 
 ## How acquire works (the lifecycle)
 
-For a driving command under `pi`:
+For a driving command under a supported harness:
 
 ```
 agent-browser-pool open <url>
- │ 1. resolve owning pi PID (walk ppid → comm == 'pi'); record (pid, starttime) identity
+ │ 1. resolve owning harness PID (walk ppid → first ancestor whose comm is in $POOL_HARNESSES); record (pid, starttime) identity
  ├─ already hold a lease for me?  → reuse my lane (skip boot)
  ├─ else acquire (under flock):
  │     reap stale lanes → reuse an orphaned-but-live lane  OR
@@ -94,7 +94,7 @@ agent-browser-pool open <url>
  └─ exec the real agent-browser with cleaned args   (process replacement)
 ```
 
-Lane identity is keyed on the owning `pi` **PID + starttime** (not PID alone — PID recycling
+Lane identity is keyed on the owning harness **PID + starttime** (not PID alone — PID recycling
 is real). That triple is what guarantees a crashed agent's lane is detected as stale and
 reclaimed, and that a recycled PID can never hijack your lane.
 
@@ -102,7 +102,7 @@ reclaimed, and that a recycled PID can never hijack your lane.
 
 Release happens when **any** of these occurs:
 
-- **Your owning `pi` process exits** → the lane becomes stale → the next acquire's reaper
+- **Your owning harness process exits** → the lane becomes stale → the next acquire's reaper
   (or `agent-browser-pool reap`) tears it down. This is the normal path for agents.
 - **Explicit `agent-browser-pool release <N>` / `release all`** → operator-driven teardown.
 - **Pool exhaustion** → after `AGENT_BROWSER_POOL_WAIT`, the oldest dead-owner lane is
@@ -119,7 +119,7 @@ dir survive for reuse within the session.
 
 | Symptom | Likely cause | Fix / response |
 |---|---|---|
-| Wrong browser / no lane acquired | Driving command run outside `pi` (no pi ancestor → fail-fast) | Run your browser work under `pi`; for raw browser use call `agent-browser` directly |
+| Wrong browser / no lane acquired | Driving command run outside a supported harness (no recognized-harness ancestor → fail-fast) | Run your browser work under a supported harness; for raw browser use call `agent-browser` directly |
 | `connect <port>` "did nothing" | By design — the pool owns the connection and drops your arg | It worked; your lane is already connected. Use `agent-browser-pool status` to confirm |
 | `agent-browser-pool` call hangs a long time | Pool exhausted (all lanes busy); self-healing reaper running | Wait; it reaps dead owners and force-reclaims after `AGENT_BROWSER_POOL_WAIT` (600s). Don't boot Chrome directly |
 | `close` didn't free my lane / Chrome still running | By design — `close` is disconnect-only; lane survives for reuse | End your session to release; or ask the operator to run `release <N>` |
