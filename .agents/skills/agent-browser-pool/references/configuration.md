@@ -5,7 +5,7 @@ env-var values, the full command dispatch table, the acquire lifecycle, or a
 troubleshooting matrix. For the procedural "how to use your lane" guide, see `SKILL.md`.
 
 All of this reflects the shipped behavior in `lib/pool.sh` (`pool_config_init`,
-`pool_dispatch_classify`, `pool_wrapper_main`, `pool_admin_*`). Defaults assume the standard
+`pool_wrapper_main`, `pool_admin_*`). Defaults assume the standard
 install; this host may override any of them via environment.
 
 ## Environment variables (all optional)
@@ -41,38 +41,40 @@ The three that most affect behavior:
 > `AGENT_BROWSER_POOL_OWNER_STARTTIME` simulate distinct agent owners without a real `pi`
 > ancestor. Never set these in normal use.
 
-## Command dispatch: meta vs. driving
+## Command dispatch: pool verbs vs. driving
 
-The wrapper classifies each invocation **before** touching a lane. Decisions (in order, first
-match wins) from `pool_wrapper_main`:
+The entry-point dispatcher (`bin/agent-browser-pool`) splits each invocation **before** any
+lane work. Decisions (in order, first match wins):
 
-1. **meta** command → **passthrough** (no lane — the real binary runs unchanged).
-2. No `pi` ancestor in the process tree → **fail-fast**: `pool_die` with
-   "agent-browser-pool: driving commands require a pi ancestor (owning pi process). For raw
-   browser use without pooling, call 'agent-browser' directly."
-3. Otherwise → acquire/find your lane, then run the command against it.
-
-### Meta commands (passthrough — never acquire a lane)
-
-These reach the real `agent-browser` unchanged, without acquiring a lane:
-
-- `--version`
-- `skills`, `dashboard`, `plugin`, `mcp`
-- `session list`
-- A flags-only invocation with no subcommand (e.g. `agent-browser-pool --json`) — upstream prints help/usage
-
-> `--help`, `-h`, and `help` are **pool verbs**, not meta-passthrough: the entry-point
-> dispatcher (`bin/agent-browser-pool`) catches them first and prints the pool's own help
-> (`pool_admin_help`), so they never reach the real binary. A bare `agent-browser-pool`
-> (no arguments) is also a pool verb — it defaults to `status`. See "Admin CLI" below.
+1. **Pool verb** → admin function (no lane — no Chrome, no owner resolution):
+   `status`, `reap`, `release [<N>|all]`, `doctor`, `--help`/`-h`/`help`. A bare
+   `agent-browser-pool` (no arguments) defaults to `status`. These print pool state or
+   the pool's own help and never touch a browser.
+2. **Everything else → DRIVING** → `pool_wrapper_main`: resolve the owning `pi` PID; if
+   there is no `pi` ancestor, **fail-fast** (`pool_die`: "agent-browser-pool: driving
+   commands require a pi ancestor... For raw browser use without pooling, call
+   'agent-browser' directly."). Otherwise acquire/reuse the caller's lane, strip any
+   `--session`, force `AGENT_BROWSER_SESSION=abpool-<N>`, and exec the real binary with
+   the cleaned args.
 
 ### Driving commands (use your lane)
 
-Everything else, including:
+Every non-pool-verb token is a driving command — it resolves the caller's owner identity,
+fails fast without a `pi` ancestor, and runs scoped to the caller's own lane. This
+includes:
 
 - `open <url>`, `connect <port|url>` (arg ignored — pool owns connection), `close [--all]`
 - `get <resource>` (e.g. `get cdp-url`), `screenshot`, scrape/automate commands
+- `--version`, `skills`, `dashboard`, `plugin`, `mcp`, `session list` — all driving now
+  (they previously short-circuited to an unchanged exec; that path is removed for lane
+  isolation: a caller-supplied `--session <X>` must never target another lane)
+- A flags-only invocation (e.g. `agent-browser-pool --json`) — driving (fails fast
+  without a `pi` ancestor, same as any unrecognized verb)
 - **Any unrecognized command** (defaults to driving, so unknown verbs still get a lane)
+
+> There is no "meta / passthrough" class. The only commands that run without a lane are
+> the pool verbs above, caught by `bin/agent-browser-pool` before `pool_wrapper_main`.
+> See "Admin CLI" below.
 
 ## How acquire works (the lifecycle)
 

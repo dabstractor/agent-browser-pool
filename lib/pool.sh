@@ -3437,13 +3437,13 @@ pool_force_session() {
 # _pool_preflight_real_bin
 #
 # PRD §2.16 enforcement (b): the real agent-browser binary ($POOL_REAL_BIN, frozen by
-# pool_config_init) is a HARD runtime dependency — every driving call exec's it, and meta
-# commands (skills/--version/…) exec it too. Fail FAST with an actionable message if it is
+# pool_config_init) is a HARD runtime dependency — every driving call exec's it. Fail FAST
+# with an actionable message if it is
 # missing or non-executable, instead of booting a lane we can't drive (or exec'ing a bad
 # path). The per-invocation counterpart to `doctor`'s [binary] check (§2.16 (a)).
 #
 # PRECONDITION: pool_config_init has frozen $POOL_REAL_BIN (called as the tail of step a in
-#   pool_wrapper_main, BEFORE dispatch/owner/lane work — so it guards BOTH driving + meta).
+#   pool_wrapper_main, BEFORE owner/lane work — so it guards the driving path).
 # RETURNS: 0 if the binary exists and is executable; otherwise it NEVER returns (pool_die).
 #   Same rc contract as pool_config_init / pool_state_init → the caller uses NO if-guard.
 _pool_preflight_real_bin() {
@@ -3465,7 +3465,6 @@ _pool_preflight_real_bin() {
 # There is NO `return` on the success path — there is no caller state to resume.
 #
 # This is the ONLY place the full pipeline is wired. It COMPOSES (does not re-implement):
-#   - M6.T1.S1 pool_dispatch_classify   (step c: meta vs driving)
 #   - M6.T1.S2 pool_normalize_close/connect (step i: scope close --all, strip connect positional)
 #   - M6.T2.S1 pool_strip_session_args / pool_force_session (step j: neutralize --session + env)
 #   - M2    pool_owner_resolve          (step d: find the owning pi; ==0 ⇒ human terminal)
@@ -3495,10 +3494,10 @@ _pool_preflight_real_bin() {
 #   rc 0/1, rc 1 ⇒ lane KEPT: pool_ensure_connected (NEVER drops the lane; reaper's job later)
 #   pool_die FATAL (propagates): inside pool_boot_lane / pool_ensure_connected (chrome instant-exit)
 #
-# GOTCHA — TERMINAL: exits are exec (c/k) or pool_die (d + error branches). NO return on success.
-# GOTCHA — passthrough exec (c) passes the ORIGINAL "$@" UNCHANGED (PRD §2.4 step 0:
-#   "exec real binary unchanged"; §2.15: "skills get core → passthrough (unaffected)"). ONLY
-#   step k (driving) uses the cleaned "${POOL_CLEAN_ARGS[@]}".
+# GOTCHA — TERMINAL: exits are exec (k) or pool_die (d + error branches). NO return on success.
+# GOTCHA — step k exec uses the cleaned "${POOL_CLEAN_ARGS[@]}" (driving path only;
+#   pool_strip_session_args + pool_force_session ran first). The original "$@" is never
+#   exec'd unchanged — every non-pool-verb token gets a scoped session.
 # GOTCHA — pool_boot_lane rc 1 ⇒ lane DROPPED ⇒ pool_die (no in-place retry; re-entering
 #   acquire with the same exhausted state would loop).
 # GOTCHA — pool_ensure_connected rc 1 ⇒ lane NOT dropped ⇒ pool_die (surface the failure;
@@ -3515,7 +3514,7 @@ _pool_preflight_real_bin() {
 # EXPORTS (via pool_force_session): AGENT_BROWSER_SESSION=abpool-<N> (inherited by the step-k exec).
 pool_wrapper_main() {
     # Declare ALL locals up front (SC2155: never `local x="$(…)"` — declare then assign).
-    local class N port _has_json _a
+    local N port _has_json _a
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
     # config freezes POOL_REAL_BIN, POOL_WAIT, POOL_LANES_DIR, POOL_LOCK_FILE.
@@ -3523,17 +3522,8 @@ pool_wrapper_main() {
     pool_config_init
     pool_state_init
     # preflight (PRD §2.16b): real agent-browser binary must exist + be executable, else
-    # fail fast on EVERY invocation (driving + meta) before any lane/dispatch work.
+    # fail fast on EVERY invocation (driving) before any lane/owner work.
     _pool_preflight_real_bin
-
-    # --- c. dispatch (step 0): meta → exec passthrough UNCHANGED -----------------
-    # pool_dispatch_classify is rc 0 ALWAYS (no guard); prints exactly one token meta|driving.
-    # Plain assignment (class declared above) → SC2155-clean + errexit-safe (classify never fails).
-    class="$(pool_dispatch_classify "$@")"
-    if [[ "$class" == "meta" ]]; then
-        _pool_log "pool_wrapper_main: meta command → passthrough"
-        exec "$POOL_REAL_BIN" "$@"           # UNCHANGED — skills/--help/session list/etc.
-    fi
 
     # --- d. owner resolution (step 1): no pi ancestor → fail-fast ----------------
     # pool_owner_resolve is rc 0 ALWAYS; sets POOL_OWNER_PID (==0 ⇒ caller has no pi ancestor).
