@@ -2507,7 +2507,7 @@ pool_boot_lane() {
 # PRECONDITION: pool_config_init + pool_state_init + a BOOTED lease for LANE (port>0).
 pool_ensure_connected() {
     local lane="${1:-}"
-    local json session port ephemeral_dir connected now
+    local json session port ephemeral_dir connected chrome_pid now
     local -a _f
 
     # Validate lane.
@@ -2521,7 +2521,7 @@ pool_ensure_connected() {
         _pool_log "pool_ensure_connected: no/corrupt lease for lane $lane"
         return 1
     fi
-    # Extract the 4 fields we need in ONE jq fork (comma → N lines; mapfile -t strips \n):
+    # Extract the 5 fields we need in ONE jq fork (comma → N lines; mapfile -t strips \n):
     # session, port, ephemeral_dir, connected. `connected` is the Issue-#3 signal — S1's close
     # path flips it false, so a post-close call must NOT trust the lingering pool_daemon_connected
     # probe (step b). Default true for backward compat with leases predating S1 (or lacking the
@@ -2529,12 +2529,18 @@ pool_ensure_connected() {
     # so the default is purely defensive. jq -r renders an absent field as the bare word `null`
     # (NOT empty), so coalesce both empty and the literal `null` to `true` here. jq cannot fail
     # here (valid JSON guaranteed by pool_lease_read's _pool_json_valid).
-    mapfile -t _f < <(jq -r '.session, .port, .ephemeral_dir, .connected' <<<"$json")
+    mapfile -t _f < <(jq -r '.session, .port, .ephemeral_dir, .connected, .chrome_pid' <<<"$json")
     session="${_f[0]:-}"
     port="${_f[1]:-}"
     ephemeral_dir="${_f[2]:-}"
     connected="${_f[3]:-true}"
+    chrome_pid="${_f[4]:-}"
     [[ "$connected" == "true" || "$connected" == "false" ]] || connected=true
+    # Issue #3 (S1): coalesce chrome_pid to 0 for the reconnect-branch identity gate. jq -r renders
+    # an absent .chrome_pid as the bare word `null` (NOT empty) — neither `null` nor empty matches
+    # ^[0-9]+$, so both fall to 0. The gate (step c) only fires for chrome_pid>0, so a 0 (provisional
+    # / stale / pre-boot lane) preserves the legacy connect-to-whatever-answers behavior.
+    [[ "$chrome_pid" =~ ^[0-9]+$ ]] || chrome_pid=0
 
     # A not-booted (provisional) lane has port:0 — ensure_connected is for BOOTED lanes.
     # Reconstruct session/ephemeral_dir defensively if the lease fields are empty.
@@ -2558,17 +2564,32 @@ pool_ensure_connected() {
     fi
 
     # --- c. NOT connected. Chrome alive? curl /json/version (NOT kill -0 — research §2). ---
+    # BUG-1 identity hardening (Issue #3, S1): a successful curl only proves SOMETHING answers on
+    # $port — not that it is THIS lane's Chrome. Before rebinding the daemon, verify identity via
+    # pool_cdp_is_ours (DevToolsActivePort line1==$port AND our chrome_pid still alive). A foreign
+    # Chrome on our port (narrow race: daemon restart + our Chrome dead + foreign Chrome grabbed
+    # the port) must NOT be rebound — fall through to the relaunch branch below instead. The guard
+    # `chrome_pid -gt 0` enforces identity ONLY for lanes with a valid pid; old/provisional lanes
+    # (chrome_pid=0) preserve the legacy connect-to-whatever-answers behavior (no silent break of
+    # stale lanes). pool_cdp_is_ours is NON-FATAL (returns 1, never pool_die) → `! pool_cdp_is_ours`
+    # is a clean set -e branch. Mirrors the acquire path's pool_wait_cdp identity check (BUG-1).
     if curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
-        # Chrome ALIVE → the daemon just lost its binding. RECONNECT (cheap ~ms attach).
-        if pool_daemon_connect "$session" "$port"; then
+        # Something answers on $port. Is it OUR Chrome? (Only check when we have a valid pid.)
+        if [[ "$chrome_pid" =~ ^[0-9]+$ && "$chrome_pid" -gt 0 ]] \
+            && ! pool_cdp_is_ours "$port" "$ephemeral_dir" "$chrome_pid"; then
+            # NOT ours (foreign Chrome) → do NOT rebind. Fall through to the relaunch branch below.
+            _pool_log "pool_ensure_connected: lane $lane foreign Chrome on port $port → relaunch"
+        elif pool_daemon_connect "$session" "$port"; then
+            # Ours (or no valid pid → legacy) → the daemon just lost its binding. RECONNECT.
             pool_lease_update "$lane" connected true
             pool_lease_update "$lane" last_seen_at "$now"
             _pool_log "pool_ensure_connected: lane $lane reconnected (same chrome, port=$port)"
             return 0
+        else
+            _pool_log "pool_ensure_connected: lane $lane reconnect FAILED (chrome alive, connect rc 1)"
+            pool_lease_update "$lane" last_seen_at "$now"
+            return 1
         fi
-        _pool_log "pool_ensure_connected: lane $lane reconnect FAILED (chrome alive, connect rc 1)"
-        pool_lease_update "$lane" last_seen_at "$now"
-        return 1
     fi
 
     # --- c. Chrome DEAD → RELAUNCH on the SAME dir+port (PRD §2.14 "Chrome crash mid-task"). ---

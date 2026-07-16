@@ -574,6 +574,7 @@ pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 100 "$2" 200 201 false
 # connect stub records that it was called (the rebind we want to FORCE) + returns 0.
 pool_daemon_connected() { return 0; }
 curl()                  { return 0; }
+pool_cdp_is_ours()      { return 0; }   # ours → identity gate (Issue #3) passes → reconnect fires
 _connect_called=0
 pool_daemon_connect()   { _connect_called=1; return 0; }
 # The fix: connected=false MUST skip the early-exit → reach pool_daemon_connect + flip connected.
@@ -612,6 +613,51 @@ EOF
     out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
           timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
     assert_eq "0" "$rc" "connected=true → ensure_connected early-exits, no rebind (out: $out)" || return 1
+}
+
+# --- pool_ensure_connected rejects a foreign Chrome on reconnect (Issue #3 / S1) ---
+# Regression for the BUG-1 identity gap on the reconnect branch. Models the PRD Issue #3
+# 5-step race: lane was connected (connected=true), daemon restarted (pool_daemon_connected→1
+# → step b falls through), a foreign Chrome answers our port (curl→0), and it is NOT ours
+# (pool_cdp_is_ours→1). THE INVARIANT: pool_daemon_connect must NOT be called (the daemon must
+# not be bound to the foreign Chrome) AND the function must fall through to relaunch.
+# Hermetic (NO real Chrome): pool_chrome_launch is stubbed to a no-op (also records
+# _relaunch_called to PROVE fall-through); pool_wait_cdp is stubbed→1 so the relaunch returns 1
+# BEFORE its own pool_daemon_connect (otherwise _connect_called would be 1 regardless and the
+# assertion could not distinguish fixed vs buggy).
+selftest_ensure_connected_rejects_foreign_chrome_on_reconnect() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/ensure-foreign"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+# Lease: connected=true (was connected before the daemon restart), valid chrome_pid (1 = init,
+# alive at /proc/1) so the identity gate's `chrome_pid -gt 0` predicate is TRUE and the gate FIRES.
+#   args: LANE EPHEMERAL_DIR PORT SESSION OWNER_PID OWNER_COMM OWNER_STARTTIME CWD CHROME_PID CHROME_PGID CONNECTED
+pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 1000 "$2" 1 1 true
+# Stubs modeling the foreign-chrome-on-reconnect race (PRD Issue #3 step 5):
+pool_daemon_connected() { return 1; }   # daemon restarted → does NOT know our session (step b falls through)
+curl()                  { return 0; }   # SOMETHING answers on our port (a foreign Chrome)
+pool_cdp_is_ours()      { return 1; }   # ... and it is NOT ours (foreign) → gate must NOT rebind
+pool_chrome_launch()    { _relaunch_called=1; return 0; }   # no-op: prevent REAL Chrome (AGENTS.md §1)
+pool_wait_cdp()         { return 1; }   # relaunch "CDP timeout" → return 1 BEFORE its pool_daemon_connect
+_connect_called=0
+_relaunch_called=0
+pool_daemon_connect()   { _connect_called=1; return 0; }
+ec=0
+pool_ensure_connected 1 || ec=$?   # capture rc (returns 1 — relaunch CDP "timeout"); `|| ec=$?` is errexit-exempt
+test "$_connect_called"  = "0"   # THE INVARIANT: daemon NOT bound to the foreign Chrome on reconnect
+test "$_relaunch_called" = "1"   # fell through to relaunch (not silently rebound)
+test "$ec"               != "0"  # pool_ensure_connected returned non-zero (relaunch CDP timeout)
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "ensure_connected rejects foreign Chrome on reconnect (no rebind, falls through) (out: $out)" || return 1
 }
 
 # --- pool_chrome_launch EADDRINUSE detection (P1.M2.T1.S1 / Issue 2) -------------
