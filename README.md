@@ -59,14 +59,23 @@ verify the whole stack — see [Admin commands](#admin-commands).
    profile.
 
 ```bash
-./install.sh            # symlink + state dir + doctor (benign; no confirmation needed)
-./install.sh --help     # show help (note: --force / -f exists but is a no-op)
+./install.sh                 # symlink + state dir + doctor (benign; no confirmation needed)
+./install.sh --global-skill  # ALSO symlink the agent skill into ~/.agents/skills/ (opt-in)
+./install.sh --help          # show help (note: --force / -f exists but is a no-op)
 ```
 
-**Uninstall:** remove the one symlink (the repo files and state dir are untouched):
+**The agent skill is opt-in.** By default the skill is *project-scoped*: pi discovers it only
+while working inside this repo. Pass `--global-skill` to also expose it to pi sessions in
+**every** project:
 
 ```bash
-rm -f ~/.local/bin/agent-browser-pool
+./install.sh --global-skill   # ~/.local/bin/agent-browser-pool + ~/.agents/skills/agent-browser-pool
+```
+
+**Uninstall:** remove the symlink(s) (the repo files and state dir are untouched):
+
+```bash
+rm -f ~/.local/bin/agent-browser-pool ~/.agents/skills/agent-browser-pool
 ```
 
 See [PRD.md §2.17](./PRD.md) for why installation is non-disruptive (no PATH interception).

@@ -27,7 +27,13 @@ down.
 
 This skill is project-scoped (lives at `.agents/skills/agent-browser-pool/`), so any
 Agent Skills-compatible client working in this repo discovers it automatically. To make it
-available **globally** (every project), symlink it into your user skills dir:
+available **globally** (every project), the easiest path is the installer's opt-in flag:
+
+```bash
+./install.sh --global-skill      # symlinks this skill into ~/.agents/skills/
+```
+
+…or symlink it into your user skills dir by hand:
 
 ```bash
 ln -s "$(pwd)/.agents/skills/agent-browser-pool" ~/.agents/skills/agent-browser-pool

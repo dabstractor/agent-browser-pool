@@ -8,6 +8,9 @@
 #   1. symlinks bin/agent-browser-pool -> ~/.local/bin/agent-browser-pool (sole entry point)
 #   2. pre-creates the pool state dir (lanes/ + acquire.lock)
 #   3. runs `doctor` to verify the real agent-browser, Chrome, btrfs, and the master profile
+# Optional (--global-skill): also symlink the agent skill into ~/.agents/skills/ so pi
+# sessions in ANY project discover it (default: the skill stays project-scoped, discovered
+# only when working inside this repo).
 #
 # Mode A (PRD §2.15): this script's success output IS the install documentation.
 set -euo pipefail
@@ -16,11 +19,18 @@ set -euo pipefail
 REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 
 # --- argument parsing ---
+global_skill=0     # opt-in: also expose the agent skill to every project (see --global-skill)
 for arg in "$@"; do
     case "$arg" in
         --force|-f)
             # Backward-compat / scripted use. There is no confirmation to skip (this installer
             # is benign), so this is intentionally a no-op.
+            ;;
+        --global-skill|--skill)
+            # Opt-in: symlink .agents/skills/agent-browser-pool into ~/.agents/skills/ so a pi
+            # session in ANY project loads the lane guide. Default is project-scoped (discovered
+            # only inside this repo).
+            global_skill=1
             ;;
         --help|-h)
             cat <<'EOF'
@@ -31,19 +41,23 @@ bin/agent-browser-pool), pre-creates the pool state dir, and runs `doctor`.
 There is NO PATH interception and NO disruptive takeover — installing cannot
 disrupt running agents.
 
-Usage: ./install.sh [--force|-f]
+Usage: ./install.sh [--force|-f] [--global-skill]
 
-  (no flag)   Install (no confirmation needed — benign).
-  --force|-f  Accepted for backward compatibility / scripted use (no-op).
-  --help|-h   Show this help.
+  (no flag)       Install (no confirmation needed — benign).
+  --force|-f      Accepted for backward compatibility / scripted use (no-op).
+  --global-skill  Also symlink the agent skill into ~/.agents/skills/, so pi sessions in
+                  ANY project discover it (default: project-scoped — discovered only inside
+                  this repo).
+  --help|-h       Show this help.
 
 Uninstall: rm -f ~/.local/bin/agent-browser-pool
+           (add ~/.agents/skills/agent-browser-pool if you used --global-skill)
 EOF
             exit 0
             ;;
         *)
             printf 'install.sh: unknown option: %s\n' "$arg" >&2
-            printf 'Usage: ./install.sh [--force|-f]\n' >&2
+            printf 'Usage: ./install.sh [--force|-f] [--global-skill]\n' >&2
             exit 1
             ;;
     esac
@@ -54,6 +68,11 @@ done
     || { printf 'install.sh: missing or not executable: %s/bin/agent-browser-pool\n' "$REPO_DIR" >&2; exit 1; }
 [[ -f "$REPO_DIR/lib/pool.sh" && -r "$REPO_DIR/lib/pool.sh" ]] \
     || { printf 'install.sh: missing or not readable: %s/lib/pool.sh\n' "$REPO_DIR" >&2; exit 1; }
+# When --global-skill is requested, the skill we symlink must exist too.
+if (( global_skill )); then
+    [[ -f "$REPO_DIR/.agents/skills/agent-browser-pool/SKILL.md" ]] \
+        || { printf 'install.sh: --global-skill set but skill missing: %s/.agents/skills/agent-browser-pool/SKILL.md\n' "$REPO_DIR" >&2; exit 1; }
+fi
 
 # --- source the shared lib + freeze config globals (validates $HOME, etc.) ---
 # shellcheck source=lib/pool.sh
@@ -66,6 +85,15 @@ pool_config_init
 mkdir -p -- "$HOME/.local/bin"
 # -sfnv: symbolic / force / no-deref / verbose. Source is absolute (PRD §2.2: never bare ~).
 ln -sfnv -- "$REPO_DIR/bin/agent-browser-pool" "$HOME/.local/bin/agent-browser-pool"
+
+# --- 1b. (opt-in) expose the agent skill to EVERY project, not just this repo ----------
+# Default leaves the skill project-scoped (`.agents/skills/` is discovered only inside this
+# repo). `--global-skill` additionally symlinks it into ~/.agents/skills/ so a pi session in
+# any project loads the lane guide. Idempotent; $HOME is absolute (PRD §2.2: never bare ~).
+if (( global_skill )); then
+    mkdir -p -- "$HOME/.agents/skills"
+    ln -sfnv -- "$REPO_DIR/.agents/skills/agent-browser-pool" "$HOME/.agents/skills/agent-browser-pool"
+fi
 
 # --- 2. pre-create the pool state dir (lanes/ + acquire.lock) — idempotent ---
 pool_state_init
@@ -86,6 +114,9 @@ printf '\n'
 printf '  entry point:  %s/.local/bin/agent-browser-pool\n' "$HOME"
 printf '                -> %s/bin/agent-browser-pool\n' "$REPO_DIR"
 printf '  state dir:    %s/{lanes,acquire.lock}\n' "$POOL_STATE_DIR"
+if (( global_skill )); then
+    printf '  agent skill:  %s/.agents/skills/agent-browser-pool (global; every project)\n' "$HOME"
+fi
 if (( doctor_ok )); then
     printf '  doctor:       healthy.\n'
 else
@@ -102,4 +133,7 @@ printf '  agent-browser-pool release [<N>|all] # tear down one lane (or all)\n'
 printf '  agent-browser-pool help              # full command + env reference\n'
 printf '\n'
 printf 'UNINSTALL: rm -f %s/.local/bin/agent-browser-pool\n' "$HOME"
+if (( global_skill )); then
+    printf '           rm -f %s/.agents/skills/agent-browser-pool\n' "$HOME"
+fi
 printf '\n'
