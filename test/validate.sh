@@ -844,6 +844,86 @@ selftest_reap_orphan_dirs_removes_and_skips() {
     rm -rf -- "$POOL_EPHEMERAL_ROOT/5" 2>/dev/null || true
 }
 
+# --- pool_reap_orphan_dirs kills ONLY the orphan lane (no prefix-collision) (F1) ---
+# Regression for Issue #1 (unanchored pgrep/pkill -f prefix collision). Spawns TWO
+# fake-Chrome processes with controlled argv on prefix-colliding lane numbers (3 and 30),
+# makes lane 3 the orphan (no lease) and lane 30 leased, calls pool_reap_orphan_dirs,
+# and asserts lane 3's process is DEAD while lane 30's process is ALIVE. Runs in a
+# hermetic timeout-bounded subshell (mirror selftest_doctor_flags_disconnected_lease)
+# so spawned processes + temp tree cannot contaminate the suite. Reaps the survivor.
+selftest_reap_orphan_dirs_kills_only_target_lane() {
+    local outdir script rc out
+    outdir="$ABPOOL_TEST_ROOT/reap-prefix"
+    mkdir -p -- "$outdir/active/3" "$outdir/active/30"
+    script="$outdir/body.sh"
+    # fakechrome.sh: a process that (a) accepts arbitrary chrome-like argv, (b) blocks
+    # forever (until killed), (c) holds a CLEAN /proc/<pid>/cmdline. NB: `sleep` CANNOT
+    # be used as the chrome stand-in — it rejects `--user-data-dir=...` as an unknown
+    # option and exits immediately. We block forever by opening a fifo read-end that no
+    # writer will ever open (open() blocks); this stays a SINGLE bash process (no child
+    # is ever spawned), so a process-group kill -9 can never leak an orphaned `sleep`
+    # behind (AGENTS.md §3 — leave zero orphans).
+    cat >"$outdir/fakechrome.sh" <<'FAKE'
+#!/usr/bin/env bash
+# Hold the caller-supplied argv (incl. --user-data-dir=<dir>) alive until killed.
+# Block forever on a fifo read-end with no writer; never spawns a subprocess.
+trap '' TERM    # ignore SIGTERM; we expect -9. Harmless if not delivered.
+fifo=$(mktemp -u)
+mkfifo "$fifo"
+exec 9< "$fifo"   # open() blocks forever: no writer will ever open the write-end
+FAKE
+    chmod +x -- "$outdir/fakechrome.sh"
+    cat >"$script" <<'EOF'
+set -uo pipefail    # NO set -e: pgrep/pkill return 1 legitimately; we assert via rc.
+source "$1/lib/pool.sh"
+pool_config_init
+pool_state_init
+
+EPH="$2/active"
+# Spawn TWO fake chromes in their own process groups (setsid; pgid == $!). Plain
+# setsid (NOT -f) so $! is the long-lived session leader, not a transient launcher.
+setsid "$2/fakechrome.sh" "--user-data-dir=$EPH/3"  "--remote-debugging-port=53423" >/dev/null 2>&1 &
+pgid3=$!
+setsid "$2/fakechrome.sh" "--user-data-dir=$EPH/30" "--remote-debugging-port=53453" >/dev/null 2>&1 &
+pgid30=$!
+sleep 0.5   # let both enter their read loop (cmdline visible in /proc)
+
+# Lane 30 is LEASED (a live lane) → must be SKIPPED by the orphan sweep.
+#   args: LANE EPHEMERAL_DIR PORT SESSION OWNER_PID OWNER_COMM OWNER_STARTTIME CWD CHROME_PID CHROME_PGID CONNECTED
+pool_lease_write 30 "$EPH/30" 53453 abpool-30 1 pi 1000 /x "$pgid30" "$pgid30" true
+# Lane 3 is an ORPHAN (no lease) with a live fake-Chrome → must be KILLED.
+
+# Sanity: both fake chromes are alive before the reap.
+[[ -d /proc/$pgid3 ]]  || { echo "PRE: lane3 proc $pgid3 not alive"; exit 1; }
+[[ -d /proc/$pgid30 ]] || { echo "PRE: lane30 proc $pgid30 not alive"; exit 1; }
+
+orphans="$(pool_reap_orphan_dirs)"
+[[ "$orphans" == "1" ]] || { echo "expected 1 orphan reaped, got [$orphans]"; exit 1; }
+
+sleep 0.4   # let the pkill -9 propagate
+# THE core assertion: lane 3 DEAD, lane 30 ALIVE (no collateral kill).
+if [[ -d /proc/$pgid3 ]];  then echo "FAIL: lane3 (orphan) still alive"; rc=1; else rc=0; fi
+if [[ -d /proc/$pgid30 ]]; then
+    : # good — spared
+else
+    echo "FAIL: lane30 (leased) was collateral-killed by the prefix collision"; rc=1
+fi
+
+# Reap the survivor (AGENTS.md §3 — never leak processes). Kill the process GROUP.
+kill -9 -- "-$pgid30" 2>/dev/null || true
+wait "$pgid30" 2>/dev/null || true
+wait "$pgid3"  2>/dev/null || true
+exit "${rc:-0}"
+EOF
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" \
+          AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+          timeout 15 bash "$script" "$ABPOOL_REPO" "$outdir" 2>&1)" || rc=$?
+    # Defensive: even on failure, sweep any leaked fakechrome under this outdir.
+    pkill -9 -f -- "$outdir/fakechrome.sh" 2>/dev/null || true
+    assert_eq "0" "$rc" "reap kills only the orphan lane (no prefix-collision collateral) (out: $out)" || return 1
+}
+
 # --- doctor [lanes] flags lease connected:false (F3) -------------------------------
 # A lane with a live owner, a live chrome_pid, a responding port, but connected:false must
 # show a WARN in doctor (aligning with status's `disconnected`). We stub curl to rc 0

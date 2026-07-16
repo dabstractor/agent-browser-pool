@@ -2889,13 +2889,21 @@ pool_reap_orphan_dirs() {
         #     pool_lease_exists rc 1 (no lease) inside `if !` (errexit-exempt).
         if ! pool_lease_exists "$base"; then
             dir="$POOL_EPHEMERAL_ROOT/$base"
-            # (d) Orphan. Kill any Chrome still pointed at it (owner is gone). Scope by the
-            #     FULL ABSOLUTE --user-data-dir path so a different lane's Chrome is never hit.
+            # (d) Orphan. Kill any Chrome still pointed at it (owner is gone). The pattern is
+            #     ANCHORED to the lane-dir boundary with `( |$)` so a prefix-colliding lane
+            #     (e.g. lane 30 when reaping lane 3) is never hit — pgrep/pkill -f match as a
+            #     regex SUBSTRING of /proc/<pid>/cmdline, so an UNanchored `user-data-dir=$dir`
+            #     would also match `$dir` followed by more digits (lane 3's pattern is a
+            #     substring of lane 30/31/.../300/...). Chrome's cmdline has the dir followed
+            #     by a space (next --flag) or EOL, so `( |$)` is exact. `$dir` is absolute;
+            #     `$base` is validated ^[0-9]+$ upstream → injection-safe. `.` in the path is
+            #     a regex metachar but matches itself (permissive, not unsafe).
             #     pgrep rc 1 (no match) → `if` falls through (no kill). pkill best-effort.
-            if pgrep -f -- "user-data-dir=$dir" >/dev/null 2>&1; then
-                pkill -f -- "user-data-dir=$dir" 2>/dev/null || true
+            local pat="user-data-dir=$dir( |\$)"
+            if pgrep -f -- "$pat" >/dev/null 2>&1; then
+                pkill    -f -- "$pat" 2>/dev/null || true
                 sleep 0.2                        # let renderer/GPU/utility children exit
-                pkill -9 -f -- "user-data-dir=$dir" 2>/dev/null || true
+                pkill    -9 -f -- "$pat" 2>/dev/null || true
             fi
             # Prefix-guarded rm (mirror _pool_release_lane_internals). `|| true` (TOCTOU-safe).
             if [[ -n "$dir" && "$dir" == "$POOL_EPHEMERAL_ROOT"/* && "$dir" != "$POOL_EPHEMERAL_ROOT/" ]]; then
