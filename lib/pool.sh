@@ -97,7 +97,7 @@ _pool_config_bool() {
 # Configuration reference (env var → POOL_* global):
 #   ENV VAR                        DEFAULT                                         GLOBAL                CATEGORY
 #   AGENT_BROWSER_POOL_STATE       $HOME/.local/state/agent-browser-pool           POOL_STATE_DIR        path (may not exist)
-#   AGENT_CHROME_MASTER            $XDG_CONFIG_HOME/google-chrome (real profile)   POOL_MASTER_DIR       path (may not exist; default = your live Chrome)
+#   AGENT_CHROME_MASTER            ~/.agent-chrome-profiles/master-profile         POOL_MASTER_DIR       path (dedicated agent master; may not exist)
 #   AGENT_CHROME_EPHEMERAL_ROOT    $HOME/.agent-chrome-profiles/active             POOL_EPHEMERAL_ROOT   path (may not exist)
 #   AGENT_BROWSER_REAL             $HOME/.local/bin/agent-browser                  POOL_REAL_BIN         path (may not exist)
 #   AGENT_CHROME_BIN               google-chrome-stable                            POOL_CHROME_BIN       name-or-path
@@ -138,15 +138,15 @@ pool_config_init() {
     POOL_HOME_DIR="$home_resolved"; declare -g POOL_HOME_DIR
 
     # 2. Path globals (defaults anchored on POOL_HOME_DIR; realpath -m via the helper).
-    local state_dir master_dir ephemeral_root real_bin xdg_cfg
+    local state_dir master_dir ephemeral_root real_bin
     state_dir="$(_pool_config_canon_path \
         "${AGENT_BROWSER_POOL_STATE:-$POOL_HOME_DIR/.local/state/agent-browser-pool}")"
-    # CoW SOURCE: defaults to the user's REAL Chrome user-data-dir (auto-detected), so
-    # agents start from the human's current auth without a separate template. The source
-    # may be live/in-use (PRD §2.7). Override AGENT_CHROME_MASTER for a dedicated template.
-    xdg_cfg="${XDG_CONFIG_HOME:-$POOL_HOME_DIR/.config}"
+    # CoW SOURCE: a DEDICATED master template the operator curates (the "Google Chrome for
+    # Agents" identity), NOT the human's personal ~/.config/google-chrome (which the pool
+    # must never read or write). Override AGENT_CHROME_MASTER to point elsewhere. Day-1
+    # spec / PRD §2.7: $POOL_HOME_DIR/.agent-chrome-profiles/master-profile.
     master_dir="$(_pool_config_canon_path \
-        "${AGENT_CHROME_MASTER:-$xdg_cfg/google-chrome}")"
+        "${AGENT_CHROME_MASTER:-$POOL_HOME_DIR/.agent-chrome-profiles/master-profile}")"
     ephemeral_root="$(_pool_config_canon_path \
         "${AGENT_CHROME_EPHEMERAL_ROOT:-$POOL_HOME_DIR/.agent-chrome-profiles/active}")"
     # AGENT_BROWSER_REAL name-or-path (mirrors the CHROME_BIN branch below): a bare name
@@ -307,8 +307,8 @@ pool_check_master() {
 
     pool_die "pool_check_master: source profile missing or empty:" \
              "$POOL_MASTER_DIR" \
-             "This is the CoW SOURCE agents copy from (default: your real Chrome" \
-             "user-data-dir). Use Chrome so the default exists, or set" \
+             "This is the CoW SOURCE agents copy from (default: your agent master" \
+             "template). Bootstrap it once from a logged-in Chrome, or set" \
              "AGENT_CHROME_MASTER to an existing Chrome user-data-dir, e.g.:" \
              "  cp -a --reflink=always <your-chrome-profile> \"$POOL_MASTER_DIR\"" \
              "(see PRD §2.7 — the source is read-only to the pool; never launched/written/deleted.)"
