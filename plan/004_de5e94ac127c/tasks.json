@@ -205,7 +205,7 @@
           "type": "Milestone",
           "id": "P4.M2",
           "title": "Test coverage (R5): validate.sh selftests + optional concurrency E2E + validation matrix",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Chrome-free selftests in test/validate.sh (auto-discovered, single-setup runner, sim-owner hooks per PRD §2.19), the concurrency.sh single-setup conversion required before any real-Chrome E2E addition, and the full validation matrix run in an isolated sandbox. Every test respects AGENTS.md §1–§4: timeout-bounded, hermetic state dirs, kill+wait reaping, zero orphans.",
           "tasks": [
             {
@@ -332,14 +332,14 @@
               "type": "Task",
               "id": "P4.M2.T3",
               "title": "Full validation matrix in the isolated sandbox (PRD acceptance gate)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Run the complete test matrix — new + existing — inside the isolated sandbox and audit for zero orphans, proving 'default path byte-identical' and 'all suites green'.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M2.T3.S1",
                   "title": "Unit matrix: validate.sh full suite green",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M2.T1.S1",
@@ -359,7 +359,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T3.S2",
                   "title": "Real-Chrome suites + orphan/temp-dir leak audit",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M2.T2.S1",
