@@ -581,7 +581,33 @@ pool_owner_resolve() {
         return 0
     fi
 
-    # --- 2. REAL MODE: walk ppid chain from $$ ------------------------------
+    # --- 2. CALLER MODE: owner = this shell's parent (PRD §2.12 mode 1 / O10,
+    #     P4.M1.T3.S1). Production: the orchestrator subprocess that invoked
+    #     bin/agent-browser-pool. The recognized-harness fail-fast does NOT apply
+    #     here; no ppid walk, no POOL_HARNESSES matching.
+    if [[ "$POOL_OWNER_MODE" == "caller" ]]; then
+        if [[ "$PPID" == "1" || ! -d "/proc/$PPID" ]]; then
+            pool_die "agent-browser-pool: ABPOOL_OWNER=caller requires a live parent process (got ppid $PPID); invoke agent-browser-pool as a child of the long-lived orchestrator process"
+        fi
+        local c_pid="$PPID" c_comm="" c_st="" c_cwd=""
+        POOL_OWNER_PID="$c_pid"; declare -g POOL_OWNER_PID
+        c_comm="$(cat /proc/"$c_pid"/comm 2>/dev/null)" || c_comm="unknown"
+        POOL_OWNER_COMM="$c_comm"; declare -g POOL_OWNER_COMM
+        c_st="$(_pool_owner_starttime "$c_pid" 2>/dev/null)" || true
+        if [[ -n "$c_st" ]]; then
+            POOL_OWNER_STARTTIME="$c_st"; declare -g POOL_OWNER_STARTTIME
+        fi
+        c_cwd="$(readlink "/proc/$c_pid/cwd" 2>/dev/null)" || true
+        if [[ -n "$c_cwd" ]]; then
+            POOL_OWNER_CWD="$c_cwd"; declare -g POOL_OWNER_CWD
+        fi
+        _pool_log "pool_owner_resolve: CALLER MODE owner pid=$POOL_OWNER_PID" \
+                  "comm=$POOL_OWNER_COMM starttime=${POOL_OWNER_STARTTIME:-<none>}" \
+                  "cwd=${POOL_OWNER_CWD:-<unknown>}"
+        return 0
+    fi
+
+    # --- 3. REAL MODE: walk ppid chain from $$ ------------------------------
     local pid="$$"
     local ppid="" comm="" line="" found_pid="" found_comm="" steps=0
     while (( steps++ < 128 )); do
@@ -609,7 +635,7 @@ pool_owner_resolve() {
         pid="$ppid"
     done
 
-    # --- 3. RESULT ----------------------------------------------------------
+    # --- 4. RESULT ----------------------------------------------------------
     if [[ -n "$found_pid" ]]; then
         POOL_OWNER_PID="$found_pid"; declare -g POOL_OWNER_PID
         POOL_OWNER_COMM="$found_comm"; declare -g POOL_OWNER_COMM
