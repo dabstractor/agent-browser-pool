@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P4",
       "title": "Caller-scoped lane selection & lane pinning (ABPOOL_OWNER / ABPOOL_LANE)",
-      "status": "Planned",
+      "status": "Researching",
       "description": "Add caller-scoped lane ownership (ABPOOL_OWNER=caller keys the lane owner on the invoking process instead of the harness ancestor) and explicit lane pinning (ABPOOL_LANE=N adopts a free/stale lane or hard-errors on a live foreign lease), plus the mechanical PRD citation renumber sweep (§2.12–§2.19 → §2.13–§2.20) that precedes all new code. One branch in owner resolution, one branch in the acquire path, config parsing, tests, docs. Lease model, reaper, liveness, flock acquire, boot pipeline, arg cleaning are reused UNCHANGED. Default path must remain byte-identical. Grounded in plan/004_de5e94ac127c/architecture/ (synthesis.md + system_context.md + citation_audit.md + test_framework.md + docs_map.md).",
       "milestones": [
         {
@@ -381,21 +381,21 @@
           "type": "Milestone",
           "id": "P4.M3",
           "title": "Changeset-level documentation sync (R6, Mode B — FINAL)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "The final Task of the changeset: README.md root sync (env rows, orchestrator-mode section, troubleshooting block, checklist mention) plus the cross-changeset audit (citation sweep verification against the NEW numbering, pool_die text mirrors, doc cross-consistency). Depends on every implementing subtask it summarizes.",
           "tasks": [
             {
               "type": "Task",
               "id": "P4.M3.T1",
               "title": "Sync changeset-level documentation",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Mode B catch-all: README.md feature/env/troubleshooting sync + final cross-changeset audit. Runs last; depends on all implementing subtasks.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P4.M3.T1.S1",
                   "title": "README.md: env rows + orchestrator-mode section + troubleshooting + checklist",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T2.S1",
@@ -424,7 +424,7 @@
                   "type": "Subtask",
                   "id": "P4.M3.T1.S2",
                   "title": "Final audit: citation sweep, die-text mirrors, cross-doc consistency",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T1.S1",

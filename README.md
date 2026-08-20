@@ -126,6 +126,54 @@ agent-browser-pool open https://example.com     # your lane, same browser for th
 For the full procedural contract (acquire lifecycle, reuse rules, teardown semantics), read
 the agent skill at **[`.agents/skills/agent-browser-pool/SKILL.md`](./.agents/skills/agent-browser-pool/SKILL.md)**.
 
+### Orchestrator mode (caller-scoped lanes)
+
+With `ABPOOL_OWNER` set to any non-empty value (recommended: `caller`), lane ownership keys
+on the **calling subprocess** — the process that invoked `agent-browser-pool` (it must have a
+live parent) — instead of the recognized-harness ancestor. One orchestrator session can run
+many parallel browser-driving subprocesses, each transparently getting its own lane:
+
+- **Auto-reap.** When the subprocess exits, its lane is reaped by the existing lazy reaper
+  (on the next acquire or `reap`) → no manual cleanup needed.
+- **Fail-fast exemption.** The recognized-harness fail-fast does **not** apply in caller
+  mode — caller mode with no harness ancestor is fine.
+- **Default path unchanged.** With `ABPOOL_OWNER` unset, ownership keys on the harness
+  ancestor exactly as before.
+
+Typical usage — parallel scrapers from one orchestrator session:
+
+```bash
+ABPOOL_OWNER=caller .venv/bin/python scrapers/linkedin_discover.py --no-ping &
+ABPOOL_OWNER=caller .venv/bin/python scrapers/indeed_discover.py --no-ping &
+wait
+```
+
+Each subprocess resolves to its own lane; each lane is reaped when its subprocess exits.
+
+With `ABPOOL_LANE=<N>` (a positive integer), auto-assignment is skipped and lane N is used
+directly — for deterministic assignment ("scraper X always gets lane 3"), not for reaching
+another agent's lane:
+
+- **Free or stale lane → take it.** A stale lease is reaped first; even a responsive orphan
+  Chrome is **not** adopted under a pin — the pin guarantees deterministic fresh state.
+- **Live lease owned by you → idempotent reuse.** Same lane, same browser, rc 0.
+- **Live foreign lease → hard error. Never a takeover.** The acquire dies immediately; there
+  is no wait (the `AGENT_BROWSER_POOL_WAIT` exhaustion path does not apply to a pin) and no
+  force-reap.
+- **Malformed value → hard error at startup**, before any lane work:
+  `agent-browser-pool: ABPOOL_LANE must be a positive integer, got: '<raw value>'`.
+
+Pinning works in **both owner modes**, and isolation holds in both: a pin can only create or
+adopt a free/stale lane, never take over a live foreign one; with no env vars set, the
+default path is unchanged.
+
+For the full semantics (parent-pid details, one-lane-per-owner invariant, error texts), see
+the *Caller-scoped lanes* and *Lane pinning* subsections of
+**[`references/configuration.md`](./.agents/skills/agent-browser-pool/references/configuration.md)**.
+
+- Orchestrator mode: `ABPOOL_OWNER=caller` per subprocess → each subprocess gets its own
+  lane and reaps it on exit.
+
 ## Commands
 
 `agent-browser-pool` is the sole command for **both** the operator-facing pool verbs **and**
@@ -270,6 +318,8 @@ Chrome, `rm`, or a log file. The table below matches `agent-browser-pool help` /
 | `AGENT_CHROME_HEADLESS` | unset = **windowed** | set to `1`/`true`/`yes`/`on` to launch Chrome with `--headless=new` |
 | `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | set to `1`/`true`/`yes`/`on` to permit a real (slow) ~4.8 GB copy per acquire |
 | `AGENT_BROWSER_POOL_HARNESSES` | `pi,claude,codex,agy,antigravity` | comma-separated `comm` values treated as valid lane owners; owner resolution matches the first ancestor whose comm is in this set. Empty/unset → default (never empty) |
+| `ABPOOL_OWNER` | unset = harness-ancestor ownership | any non-empty value (recommended: `caller`) → key lane ownership on the calling subprocess (its live parent) instead of the harness ancestor; each parallel worker gets its own lane, auto-reaped when it exits. The recognized-harness fail-fast does not apply in caller mode. See [Orchestrator mode](#orchestrator-mode-caller-scoped-lanes) |
+| `ABPOOL_LANE` | unset = auto-assign (lowest free lane) | positive integer N → pin lane N: free or stale → take it (stale lease reaped first; an orphan Chrome is never adopted under a pin); live lease owned by you → reuse; live foreign lease → hard error — **never a takeover**; malformed value → hard error at startup |
 
 Three vars shape behavior most:
 
@@ -313,7 +363,10 @@ Lane lifecycle ordering (`pool_wrapper_main`):
 2. (pool verbs were handled by `bin/agent-browser-pool` above — no lane); otherwise driving:
 3. **driving command → resolve the owning harness process**; if there is no recognized-harness ancestor,
    **fail fast** with an actionable error (by design — call `agent-browser` directly for raw
-   access);
+   access). With `ABPOOL_OWNER` set (caller mode), the owner key is instead the calling
+   subprocess (its live parent) — no harness ancestor is needed and no fail-fast applies;
+   with `ABPOOL_LANE=<N>` the lane is pinned rather than auto-assigned (see Configuration
+   reference);
 4. find my lane (`pool_lease_find_mine`) or acquire (reap-stale → reuse-orphan → boot/adopt);
 5. provisional lane (port 0) → boot it (copy + port + launch + connect); adopted orphan
    (port > 0) → reuse as-is;
@@ -367,6 +420,25 @@ non-zero.
 **Fix:** `agent-browser-pool reap` then `release all` to clear the pool, and **investigate the
 leak** — hitting the alert at all means sessions accumulated without cleanup. Tune
 `AGENT_BROWSER_POOL_WAIT` if your workload legitimately needs longer. See PRD.md §2.9.
+
+### Pinned lane conflict — `ABPOOL_LANE` names a lane held by a live foreign owner
+
+**Symptom:** a driving command with `ABPOOL_LANE=N` set dies immediately with
+*"pinned lane N is held by a live owner (pid …, comm …); a pinned lane is never a takeover —
+unset ABPOOL_LANE or choose a free lane"* (wrapped by the wrapper as
+*"agent-browser-pool: ABPOOL_LANE=N: pinned lane unavailable (see the error above)"*).
+Sibling errors: holding another live lane while pinning
+(*"… would violate the one-lane-per-owner invariant — release lane … first or unset
+ABPOOL_LANE"*) and a malformed value
+(*"agent-browser-pool: ABPOOL_LANE must be a positive integer, got: '<raw>'"*).
+
+**Cause:** by design. A pinned lane is **never a takeover**: a pin never takes over a live
+foreign lease, and it never waits — the `AGENT_BROWSER_POOL_WAIT` exhaustion path and
+force-reap do not apply to a pin. This preserves cross-agent isolation.
+
+**Fix:** unset `ABPOOL_LANE` (fall back to auto-assign), choose a free lane, or wait for that
+owner to release; if you already hold another lane, release it first or unset the pin.
+See [PRD.md §2.12](./PRD.md).
 
 ### Leaks — orphan dirs, dead Chrome, stale leases
 
