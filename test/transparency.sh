@@ -227,7 +227,8 @@ _transparency_reap_all_sim_owners() {
 
 # =============================================================================
 # _transparency_assert_driving_no_pi_fails_fast CMD... — shared verifier: assert that a driving
-# command (CMD...) with NO pi ancestor fail-fasts with the 'pi ancestor' pool_die message.
+# command (CMD...) with NO recognized-harness ancestor fail-fasts with the 'supported agent'
+# harness' pool_die message (same contract as test_driving_no_pi_ancestor_fails_fast).
 # Mirrors the proven mechanism of test_driving_no_pi_ancestor_fails_fast (item i):
 #   - `setsid --fork` ALWAYS forks → the detached child is reparented to the subreaper/init,
 #     so its ppid chain no longer contains `pi` (bare `setsid` only forks conditionally → flaky;
@@ -251,18 +252,18 @@ _transparency_assert_driving_no_pi_fails_fast() {
     msg=""
     while (( $(date +%s) < deadline )); do
         msg="$(cat "$tmp" 2>/dev/null || true)"
-        [[ "$msg" == *"pi ancestor"* ]] && break
+        [[ "$msg" == *"supported agent harness"* ]] && break
         sleep 0.2
     done
     rm -f -- "$tmp"
-    [[ "$msg" == *"pi ancestor"* ]] \
-        || { _fail "no-pi '$*' did NOT fail fast; got: ${msg:-<empty>}"; return 1; }
+    [[ "$msg" == *"supported agent harness"* ]] \
+        || { _fail "no-pi '$*' did NOT fail fast (expected 'supported agent harness' die); got: ${msg:-<empty>}"; return 1; }
 }
 
 # TEST (a) — `agent-browser-pool skills get core` with NO pi ancestor → FAIL-FAST pool_die (§2.4 step 1).
 # Post P1.M1.T1.S1 (the step-c exec-to-real-binary path deleted), `skills` is a DRIVING command: it has no
 # case arm in bin/agent-browser-pool → falls to pool_wrapper_main → step d (owner resolve) →
-# POOL_OWNER_PID==0 (no pi ancestor) → pool_die 'driving commands require a pi ancestor …'.
+# POOL_OWNER_PID==0 (no recognized harness) → pool_die 'driving commands require a supported agent harness …'.
 # Same fail-fast mechanism as test_driving_no_pi_ancestor_fails_fast (item i): detach via
 # `setsid --fork` (reparent the child away from the pi/bash chain) + `env -u` (strip owner
 # overrides) + capture to a temp file + poll for 'pi ancestor'. pool_die fires at step d,
@@ -297,7 +298,7 @@ test_help_shows_pool_help() {
 # TEST (b2) — `agent-browser-pool --version` with NO pi ancestor → FAIL-FAST pool_die (§2.4 step 1).
 # Post P1.M1.T1.S1 (the step-c exec-to-real-binary path deleted), `--version` is a DRIVING command: it has
 # no case arm in bin/agent-browser-pool → falls to pool_wrapper_main → step d (owner resolve) →
-# POOL_OWNER_PID==0 (no pi ancestor) → pool_die 'driving commands require a pi ancestor …'.
+# POOL_OWNER_PID==0 (no recognized harness) → pool_die 'driving commands require a supported agent harness …'.
 # Same fail-fast mechanism as test_driving_no_pi_ancestor_fails_fast (item i). pool_die fires
 # at step d, BEFORE any Chrome/lane work → sub-second, no orphan.
 # =============================================================================
