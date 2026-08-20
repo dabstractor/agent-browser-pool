@@ -15,6 +15,8 @@
 # functions DIRECTLY in each subshell exercises the EXACT same flock + boot code path WITHOUT
 # the terminal exec, so `wait` joins cleanly. This is the correct test boundary for a
 # concurrency/mutual-exclusion test (it tests the SUT's locking, not the upstream `open`).
+# EXCEPTION — body 3 (caller-mode E2E) DOES drive the REAL CLI, but bounds each child with
+# `timeout 60` (no bare `wait`) — see its own comment for why that is safe here.
 #
 # SOURCES the LANDED test framework (P1.M9.T1.S1) for: spawn_sim_owner (the `pi`-comm owner
 # engine — REQUIRED because pool_owner_alive reads the REAL /proc comm), setup/teardown
@@ -380,6 +382,164 @@ test_n_agents_get_n_distinct_lanes() {
         _concurrency_kill_owner_and_reap_zombie "${owner_pids[$i]}"
     done
     ABPOOL_CUR_OWNERS=()
+}
+
+# =============================================================================
+# _caller_e2e_cleanup BG_PIDS… — kill + WAIT every child this body spawned (LM-4).
+# These are REAL `timeout 60 bash -c` children of the MAIN shell (NOT registered in
+# ABPOOL_CUR_OWNERS — S1's backstop can't know them), so the body itself must reap them on
+# EVERY exit path, including early assert-fail returns. kill WITHOUT wait leaves zombies
+# whose /proc entries linger (false-alive reads) → always wait after kill. Best-effort.
+# =============================================================================
+_caller_e2e_cleanup() {
+    local p
+    for p in "$@"; do
+        [[ -n "$p" ]] || continue
+        kill "$p" 2>/dev/null || true
+        wait "$p" 2>/dev/null || true
+    done
+}
+
+# =============================================================================
+# THE CALLER-MODE E2E (PRD §2.12 / O10; §2.19 "or real subprocesses"). Proves the REAL
+# end-to-end caller-identity path that bodies 1-2 cover only via the in-process override
+# hooks: `ABPOOL_OWNER=caller` → the CLI's pool_owner_resolve keys the lease on its $PPID
+# (lib/pool.sh caller branch) → lease owner.pid == the ORCHESTRATING subprocess pid → the
+# lane goes stale + is reaped when that subprocess exits (lazy reaper, §2.10).
+#
+# WHY driving the REAL CLI is safe HERE (vs. the header's old rationale): each child is a
+# `timeout 60 bash -c '…'` — the wrapper exec's into the real agent-browser and may not
+# exit, but `timeout` hard-bounds the whole child, and we NEVER bare-`wait` without a
+# deadline: we kill+wait each child explicitly (the kill lands on `timeout` whose TERM
+# propagates) and the 60s cap is the absolute backstop. NO `exec` inside the child's bash —
+# the child must stay alive after `open` returns so we can assert the lane is HELD while
+# the caller lives; a trailing `sleep 30` provides that deterministic window (also capped
+# by the outer timeout).
+#
+# PID GEOMETRY (G2): `$!` is TIMEOUT's pid, not the caller-identity pid. The CLI's $PPID
+# is the INNER bash (timeout forks it; the inner bash exec's nothing) — that inner bash IS
+# the orchestrating subprocess whose pid must land in lease owner.pid. Each child writes
+# its own `$$` to a pid file before invoking the CLI; the parent reads it back.
+#
+# OWNERSHIP OF REAPING (G6): these children are NOT in ABPOOL_CUR_OWNERS — the body must
+# kill+wait them on ALL exit paths (via _caller_e2e_cleanup before every early return).
+# =============================================================================
+test_caller_mode_children_get_distinct_lanes() {
+    local cli="$CONCURRENCY_DIR/../bin/agent-browser-pool"
+    local results_dir="$ABPOOL_TEST_ROOT/caller-e2e"
+    mkdir -p -- "$results_dir"
+    local -a bg_pids=() child_pids=()
+    local i p fpid pidfile
+
+    # (1) Real master / btrfs ephemeral root / real agent-browser binary — same as body 1.
+    _concurrency_setup_master
+
+    # (2) Launch TWO caller-mode children — STAGGERED: child 1 only after child 0's
+    #     lease is live. WHY the stagger (deliberate deviation from body 1's no-stagger
+    #     choice): this body tests CALLER IDENTITY, not port-collision recovery (body 1
+    #     already exercises that). Observed live: two simultaneous CLI boots collide on
+    #     pool_find_free_port's TOCTOU window and the loser's re-pick only settles after
+    #     ~66s (two 30s same-port CDP-timeout attempts precede the re-pick) — which would
+    #     blow past the child's `timeout 60` cap. Staggering makes each boot see the
+    #     other's port already claimed → both boots are collision-free and fast.
+    #     ABPOOL_OWNER=caller is set INSIDE the child's bash (subshell-scoped — the main
+    #     shell is unaffected). Children inherit the hermetic env (redirected HOME/state +
+    #     the master/btrfs/real-bin overrides). `open` failure is ||true'd — the lane-lease
+    #     assertions below are the oracle.
+    #     PID GEOMETRY (G2): `$!` is TIMEOUT's pid; the CLI's $PPID is the INNER bash —
+    #     that inner bash IS the orchestrating-subprocess identity that must land in
+    #     lease owner.pid, so each child writes its own `$$` to a pid file first.
+    local -a matched_lanes=()
+    for (( i = 0; i < 2; i++ )); do
+        # SC2016 (info): the child script is intentionally single-quoted — $$ and "$0"/"$1"
+        # must expand INSIDE the child, only $i is interpolated by the parent. Silenced.
+        # shellcheck disable=SC2016
+        timeout 60 bash -c '
+            printf "%s\n" "$$" >"$1/child-'"$i"'.pid"
+            export ABPOOL_OWNER=caller
+            # CRITICAL: unset the inherited in-process override FIRST — pool_owner_resolve
+            # checks the TEST-mode override (AGENT_BROWSER_POOL_OWNER_PID) BEFORE the
+            # caller branch, and children inherit it — without this unset both children
+            # would share the setup sim-owner identity (one lane, never stale).
+            unset AGENT_BROWSER_POOL_OWNER_PID AGENT_BROWSER_POOL_OWNER_STARTTIME
+            "$0" open about:blank >/dev/null 2>&1 || true   # lane acquire+boot
+            sleep 30                                          # stay alive = lane legitimately held
+        ' "$cli" "$results_dir" &
+        bg_pids+=("$!")
+
+        # Read this child's own $$ back (file appears within milliseconds; retry briefly).
+        pidfile="$results_dir/child-$i.pid"
+        p=""
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            [[ -s "$pidfile" ]] && { p="$(<"$pidfile")"; break; }
+            sleep 0.1
+        done
+        [[ -n "$p" ]] || {
+            _fail "child $i pid file never appeared"
+            _caller_e2e_cleanup "${bg_pids[@]}"
+            return 1
+        }
+        child_pids+=("$p")
+
+        # Poll with deadline for THIS child's lease to appear (Chrome boot takes seconds;
+        # never block indefinitely — AGENTS.md §2).
+        local deadline=$(( SECONDS + 45 )) ln fpid got=0
+        while (( SECONDS < deadline )); do
+            got=0
+            for ln in $(pool_lanes_list); do
+                fpid="$(pool_lease_field "$ln" owner.pid 2>/dev/null)" || fpid=""
+                if [[ "$fpid" == "$p" ]]; then got=1; matched_lanes+=("$ln"); break; fi
+            done
+            (( got == 1 )) && break
+            sleep 1
+        done
+        if (( got != 1 )); then
+            _fail "child $i never acquired a lane (owner.pid == $p)"
+            _caller_e2e_cleanup "${bg_pids[@]}"
+            return 1
+        fi
+    done
+    if ! _assert_all_distinct_and_nonzero "${child_pids[@]}"; then
+        _fail "child pids not distinct/nonzero: ${child_pids[*]}"
+        _caller_e2e_cleanup "${bg_pids[@]}"
+        return 1
+    fi
+
+    # (5) While both children are ALIVE: the two lanes are DISTINCT, and both ports are
+    #     distinct + nonzero (real boots, not provisional leases).
+    local fport; local -a matched_ports=()
+    for ln in "${matched_lanes[@]}"; do
+        fport="$(pool_lease_field "$ln" port 2>/dev/null)" || fport=""
+        matched_ports+=("$fport")
+    done
+
+    # (6) Kill both children (simulate orchestrator-subprocess exit) + WAIT them (zombie
+    #     reap, LM-4). Kill both the timeout wrapper ($!) and the inner bash pid.
+    _caller_e2e_cleanup "${bg_pids[@]}" "${child_pids[@]}"
+
+    # (7) Both lanes must now be STALE (owner pid dead) — guarded if-form (LM-5).
+    for ln in "${matched_lanes[@]}"; do
+        if ! pool_lane_is_stale "$ln" 2>/dev/null; then
+            _fail "lane $ln not stale after child death"
+            return 1
+        fi
+    done
+
+    # (8) Run the reaper as a SUBPROCESS (like the other bodies' cleanups) and assert full
+    #     teardown: lanes gone ×2 + no Chrome scoped to the ephemeral root.
+    "$ABPOOL_ADMIN" release all >/dev/null 2>&1 || true
+    "$ABPOOL_ADMIN" reap >/dev/null 2>&1 || true
+    local ln2
+    for ln2 in "${matched_lanes[@]}"; do
+        assert_lane_gone "$ln2" || return 1
+    done
+    local -a after; mapfile -t after < <(pool_lanes_list)
+    assert_eq "0" "${#after[@]}" "no caller-mode lanes remain" || return 1
+    assert_no_chrome || return 1
+
+    # (9) Reap the btrfs ephemeral root (same as body 1's step 9b).
+    [[ -n "${_concurrency_btrfs_root:-}" ]] \
+        && rm -rf -- "$_concurrency_btrfs_root" 2>/dev/null || true
 }
 
 # =============================================================================

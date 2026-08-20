@@ -291,7 +291,7 @@
               "type": "Task",
               "id": "P4.M2.T2",
               "title": "concurrency.sh: single-setup conversion + optional caller-mode two-child E2E",
-              "status": "Ready",
+              "status": "Complete",
               "description": "concurrency.sh currently uses the per-test abpool_run_suite runner with exactly 2 test_ bodies — a third setup() call would HANG the shared sandbox (AGENTS.md §4). The real-Chrome caller-mode E2E therefore requires converting concurrency.sh to the approved release_reaper-style single-setup runner FIRST, then adding the E2E test.",
               "subtasks": [
                 {
@@ -313,7 +313,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T2.S2",
                   "title": "Caller-mode two-child E2E (real Chrome; optional-but-sanctioned)",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M2.T2.S1",
