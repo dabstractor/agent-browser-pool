@@ -1059,6 +1059,148 @@ EOF
     assert_eq "$$" "$got_hook" "TEST MODE hook outranks caller mode" || return 1
 }
 
+# --- caller-mode: parallel owners -> DISTINCT lanes; owner death -> lane reaped ------
+# PRD §2.12 / O10 end-to-end through the REAL acquire/liveness/reap machinery using
+# the TEST-MODE owner hooks (PRD §2.19 sanctioned simulation — same downstream code
+# as caller mode). Each body gets its own isolated STATE/EPHEMERAL roots under
+# $ABPOOL_TEST_ROOT; hooks are always overridden as the (PID, STARTTIME) PAIR.
+# Chrome-free: pool_acquire_locked is claim-only; the mkdir simulates the copy step
+# so lane presence is observable and find-free-lane skips it for the 2nd owner.
+# shellcheck disable=SC2016  # $1/$POOL_* in single quotes expand in the child
+# NOTE: both bodies run against ONE SHARED state/ephemeral root — distinct lanes are
+# only observable when both owners compete for the same pool (PRD §2.12 semantics;
+# separate roots would make each body trivially find lane 1 in its own tree).
+selftest_caller_mode_parallel_owners_distinct_lanes() {
+    local outdir script1 script2 pidA stA pidB stB rc out1 out2 N_A N_B opA opB
+    outdir="$ABPOOL_TEST_ROOT/caller-par-lanes"
+    mkdir -p -- "$outdir"
+    script1="$outdir/body.sh"; script2="$outdir/body2.sh"
+    cat >"$script1" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_owner_resolve
+N="$(pool_acquire_locked)"
+[[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: bad lane N=$N"; exit 1; }
+mkdir -p -- "$POOL_EPHEMERAL_ROOT/$N"          # simulate the post-lock profile copy
+opid="$(jq -r '.owner.pid' "$POOL_LANES_DIR/$N.json")"   # owner is a NESTED object
+printf 'N|%s\nOWNERPID|%s\n' "$N" "$opid"
+EOF
+    cp -- "$script1" "$script2"
+    pidA="$(spawn_sim_owner 600 pi)";     stA="$(_pool_get_starttime "$pidA" 2>/dev/null || true)"
+    pidB="$(spawn_sim_owner 600 claude)"; stB="$(_pool_get_starttime "$pidB" 2>/dev/null || true)"
+    rc=0
+    out1="$(AGENT_BROWSER_POOL_STATE="$outdir/state" AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        timeout 15 bash "$script1" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    rc=0
+    out2="$(AGENT_BROWSER_POOL_STATE="$outdir/state" AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidB" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stB" \
+        timeout 15 bash "$script2" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    # Kill+wait BOTH owners BEFORE any assert: data for asserts is already in
+    # out1/out2 + the per-body lease files, so no exit path can leak an owner.
+    kill "$pidA" "$pidB" 2>/dev/null || true
+    wait "$pidA" 2>/dev/null || true
+    wait "$pidB" 2>/dev/null || true
+    assert_eq "0" "$rc" "owner-B acquire body exit" || return 1
+    N_A="$(sed -n 's/^N|//p' <<<"$out1")"
+    N_B="$(sed -n 's/^N|//p' <<<"$out2")"
+    opA="$(sed -n 's/^OWNERPID|//p' <<<"$out1")"
+    opB="$(sed -n 's/^OWNERPID|//p' <<<"$out2")"
+    [[ "$N_A" =~ ^[1-9][0-9]*$ ]] || { _fail "lane A not numeric >=1: [$N_A]"; return 1; }
+    [[ "$N_B" =~ ^[1-9][0-9]*$ ]] || { _fail "lane B not numeric >=1: [$N_B]"; return 1; }
+    [[ "$N_A" != "$N_B" ]] || { _fail "two caller-mode owners got the SAME lane ($N_A)"; return 1; }
+    assert_eq "$pidA" "$opA" "lease A owner.pid == pidA" || return 1
+    assert_eq "$pidB" "$opB" "lease B owner.pid == pidB" || return 1
+    # Shared roots (body-local, NOT the main shell's $POOL_LANES_DIR) — explicit checks.
+    [[ -f "$outdir/state/lanes/$N_A.json" ]] || { _fail "lease A file missing at shared roots"; return 1; }
+    [[ -f "$outdir/state/lanes/$N_B.json" ]] || { _fail "lease B file missing at shared roots"; return 1; }
+    return 0
+}
+
+# --- owner death -> lane goes stale and is FULLY reaped (lease + ephemeral dir) --------
+# (a) owner A acquires lane N (isolated roots); (b) A is killed AND waited (LM-4:
+# an unreaped zombie's /proc lingers -> false-alive) -> lane N reads STALE;
+# (c) owner B's reap path removes lease AND dir, then B re-acquires a lane whose
+# owner.pid == pidB. Explicit pool_reap_stale (not acquire's internal sweep) so the
+# lease-gone/dir-gone assertions are directly attributable.
+# OLDGONE is measured BETWEEN reap and re-acquire: acquire may legitimately reuse
+# the freed lane N (N2 == N), recreating lease+dir — that is the success path.
+# shellcheck disable=SC2016  # $1/$POOL_* in single quotes expand in the child
+selftest_caller_mode_lane_reaped_after_owner_death() {
+    local outdir script pidA stA pidB stB rc out N N2 opB oldgone
+    outdir="$ABPOOL_TEST_ROOT/caller-reap-death"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    # Body 1: acquire as A. Body 2: staleness probe as A. Body 3: reap + acquire as B.
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+case "$2" in
+acquire)
+    pool_owner_resolve
+    N="$(pool_acquire_locked)"
+    [[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: bad lane N=$N"; exit 1; }
+    mkdir -p -- "$POOL_EPHEMERAL_ROOT/$N"
+    printf 'N|%s\n' "$N"
+    ;;
+stale-check)
+    pool_state_init
+    if pool_lane_is_stale "$3"; then echo "STALE"; else echo "LIVE"; fi
+    ;;
+reap-acquire)
+    pool_owner_resolve
+    if pool_lane_is_stale "$3"; then pool_reap_stale >/dev/null; echo "REAPED"; fi
+    if [[ ! -f "$POOL_LANES_DIR/$3.json" && ! -e "$POOL_EPHEMERAL_ROOT/$3" ]]; then
+        echo "OLDGONE|yes"
+    else
+        echo "OLDGONE|no"
+    fi
+    N2="$(pool_acquire_locked)"
+    [[ "$N2" =~ ^[1-9][0-9]*$ ]] || { echo "FAIL: bad lane N2=$N2"; exit 1; }
+    mkdir -p -- "$POOL_EPHEMERAL_ROOT/$N2"
+    printf 'N2|%s\nOWNERPID|%s\n' "$N2" "$(jq -r '.owner.pid' "$POOL_LANES_DIR/$N2.json")"
+    ;;
+*) echo "FAIL: unknown mode '$2'"; exit 1 ;;
+esac
+EOF
+    pidA="$(spawn_sim_owner 600 pi)"; stA="$(_pool_get_starttime "$pidA" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        timeout 15 bash "$script" "$ABPOOL_REPO" acquire 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "owner-A acquire body exit" || { kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    N="$(sed -n 's/^N|//p' <<<"$out")"
+    [[ "$N" =~ ^[1-9][0-9]*$ ]] || { _fail "lane N not numeric >=1: [$N]"; kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    [[ -f "$outdir/state/lanes/$N.json" ]] || { _fail "lease for lane $N missing"; kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    [[ -d "$outdir/active/$N" ]] || { _fail "ephemeral dir for lane $N missing"; kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    # LM-4: kill THEN wait BEFORE any staleness assert (zombie /proc = false-alive).
+    kill "$pidA" 2>/dev/null || true
+    wait "$pidA" 2>/dev/null || true
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        timeout 15 bash "$script" "$ABPOOL_REPO" stale-check "$N" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "stale-check body exit" || return 1
+    assert_eq "STALE" "$(grep -m1 '^STALE$' <<<"$out" || true)" "lane $N reads STALE after owner death" || return 1
+    pidB="$(spawn_sim_owner 600 claude)"; stB="$(_pool_get_starttime "$pidB" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$outdir/state" AGENT_CHROME_EPHEMERAL_ROOT="$outdir/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidB" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stB" \
+        timeout 15 bash "$script" "$ABPOOL_REPO" reap-acquire "$N" 2>&1)" || rc=$?
+    kill "$pidB" 2>/dev/null || true
+    wait "$pidB" 2>/dev/null || true
+    assert_eq "0" "$rc" "owner-B reap+acquire body exit" || return 1
+    N2="$(sed -n 's/^N2|//p' <<<"$out")"
+    opB="$(sed -n 's/^OWNERPID|//p' <<<"$out")"
+    oldgone="$(sed -n 's/^OLDGONE|//p' <<<"$out")"
+    assert_eq "yes" "$oldgone" "lane $N lease AND ephemeral dir gone after reap" || return 1
+    [[ "$N2" =~ ^[1-9][0-9]*$ ]] || { _fail "lane N2 not numeric >=1: [$N2]"; return 1; }
+    assert_eq "$pidB" "$opB" "re-acquired lane owner.pid == pidB" || return 1
+    return 0
+}
+
 # --- pool_reap_orphan_dirs removes unleased orphan dirs + skips leased (F1) ---------
 # Pure-function body against the shared temp pool: (1) an unleased orphan dir is removed
 # and counted; (2) a leased dir is skipped; (3) a 2nd call finds nothing (idempotent).
