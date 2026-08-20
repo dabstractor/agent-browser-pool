@@ -26,7 +26,7 @@ passed to Chrome, `rm`, or a log. "Truthy" means `1`/`true`/`yes`/`on` (case-ins
 | `AGENT_CHROME_HEADLESS` | unset = **windowed** | truthy → launch Chrome with `--headless=new` |
 | `AGENT_CHROME_ALLOW_SLOW_COPY` | unset = **refuse** on non-btrfs | truthy → permit a real (slow) ~4.8 GB copy per acquire |
 | `AGENT_BROWSER_POOL_HARNESSES` | `pi,claude,codex,agy,antigravity` | comma-separated `comm` values treated as valid lane owners; owner resolution matches the first ancestor whose comm is in this set. Empty/unset → default (never empty) |
-| `ABPOOL_OWNER` | unset = harness-ancestor ownership | any non-empty value (recommended: `caller`) → key lane ownership on the calling process itself (`$$`) instead of the harness ancestor → each parallel subprocess gets its own lane, reaped when it exits. See the "Caller-scoped lanes" subsection. The recognized-harness fail-fast does not apply in caller mode |
+| `ABPOOL_OWNER` | unset = harness-ancestor ownership | any non-empty value (recommended: `caller`) → key lane ownership on the calling subprocess (its live parent) instead of the harness ancestor → each parallel subprocess gets its own lane, auto-reaped when it exits. See the "Caller-scoped lanes" subsection. The recognized-harness fail-fast does not apply in caller mode |
 | `ABPOOL_LANE` | unset = auto-assign (lowest free lane) | positive integer N → pin lane N: adopt it if free or stale (reaping a stale lease first); a live lease owned by another process → hard error — **never a takeover**. Malformed value (not a positive integer) → hard error at startup, before any lane work. For deterministic assignment ("scraper X always gets lane 3"), not for reaching another agent's lane |
 
 The three that most affect behavior:
