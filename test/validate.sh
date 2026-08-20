@@ -1201,6 +1201,146 @@ EOF
     return 0
 }
 
+# --- ABPOOL_LANE pin matrix: FREE / STALE / LIVE-MINE / LIVE-FOREIGN / OTHER-LANE --------
+# Exercises ALL five cases of the pinned-acquire critical section (lib/pool.sh pin branch,
+# PRD §2.12 mode 2 + §2.8 ≤1-lane-per-owner + §2.19 pin conflict coverage) Chrome-free:
+# pins write provisional port=0 leases; boot never runs. Each scenario gets its OWN roots
+# under $ABPOOL_TEST_ROOT/pinmatrix-<case>/{state,active} and its OWN sim owners via the
+# AGENT_BROWSER_POOL_OWNER_PID + _STARTTIME hook PAIR. Malformed ABPOOL_LANE is config-level
+# and owned by selftest_config_owner_mode_and_lane_pin (P4.M2.T1.S1) — not retested here.
+# Body: pool_config_init + pool_owner_resolve + pool_acquire_locked; ABPOOL_LANE comes from
+# the env (absent => auto acquire). MARKDIR=1 simulates the post-lock ephemeral-dir copy so
+# the STALE reap (case 2) has an observable dir to remove.
+# shellcheck disable=SC2016  # $1/$POOL_* in single quotes expand in the child
+selftest_lane_pin_matrix() {
+    local base script pidA stA pidB stB d rc out out2 p N M
+    base="$ABPOOL_TEST_ROOT/pinmatrix"
+    mkdir -p -- "$base"
+    script="$base/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$1/lib/pool.sh"
+pool_config_init
+pool_owner_resolve
+N="$(pool_acquire_locked)"
+[[ "$N" =~ ^[1-9][0-9]*$ ]] || { echo "BADN:$N"; exit 1; }
+if [[ "${MARKDIR:-}" == "1" ]]; then mkdir -p -- "$POOL_EPHEMERAL_ROOT/$N"; fi
+echo "N|$N"
+echo "OWNERPID|$(jq -r '.owner.pid' "$POOL_LANES_DIR/$N.json")"
+echo "STARTTIME|$(jq -r '.owner.starttime' "$POOL_LANES_DIR/$N.json")"
+EOF
+
+    # --- (1) FREE: lane 7 unleased -> pin claims it, provisional port=0 -------------------
+    d="$base/free"; mkdir -p -- "$d"
+    pidA="$(spawn_sim_owner 600 pi)"; stA="$(_pool_get_starttime "$pidA" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true
+    assert_eq "0" "$rc" "free: pin body exit" || return 1
+    assert_eq "7" "$(sed -n 's/^N|//p' <<<"$out")" "free: pinned lane echoed" || return 1
+    [[ -f "$d/state/lanes/7.json" ]] || { _fail "free: lease file missing"; return 1; }
+    p="$(jq -r '.port' "$d/state/lanes/7.json" 2>/dev/null)" || p=""
+    assert_eq "0" "$p" "free: pin claim is provisional port=0" || return 1
+
+    # --- (2) STALE: A's dead lease on 7 -> B's pin reaps (dir gone) + rewrites -------------
+    d="$base/stale"; mkdir -p -- "$d"
+    pidA="$(spawn_sim_owner 600 pi)"; stA="$(_pool_get_starttime "$pidA" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        MARKDIR=1 ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "stale: owner-A pin body exit" \
+        || { kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    # LM-4: kill THEN wait BEFORE B runs (unreaped zombie /proc = false-alive owner).
+    kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true
+    pidB="$(spawn_sim_owner 600 claude)"; stB="$(_pool_get_starttime "$pidB" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidB" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stB" \
+        ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    kill "$pidB" 2>/dev/null || true; wait "$pidB" 2>/dev/null || true
+    assert_eq "0" "$rc" "stale: owner-B pin body exit" || return 1
+    assert_eq "7" "$(sed -n 's/^N|//p' <<<"$out")" "stale: lane 7 adopted" || return 1
+    assert_eq "$pidB" "$(sed -n 's/^OWNERPID|//p' <<<"$out")" "stale: lease rewritten to pidB" || return 1
+    assert_eq "$pidB" "$(jq -r '.owner.pid' "$d/state/lanes/7.json" 2>/dev/null)" "stale: on-disk lease owner.pid == pidB" || return 1
+    [[ ! -e "$d/active/7" ]] || { _fail "stale: A's ephemeral dir 7 not reaped"; return 1; }
+
+    # --- (3) LIVE-MINE: A pins 7 twice -> idempotent reuse, owner triple unchanged --------
+    d="$base/livemine"; mkdir -p -- "$d"
+    pidA="$(spawn_sim_owner 600 pi)"; stA="$(_pool_get_starttime "$pidA" 2>/dev/null || true)"
+    rc=0; out=""; out2=""
+    out="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        MARKDIR=1 ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "live-mine: first pin body exit" \
+        || { kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    rc=0
+    out2="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true
+    assert_eq "0" "$rc" "live-mine: second pin body exit" || return 1
+    assert_eq "7" "$(sed -n 's/^N|//p' <<<"$out2")" "live-mine: lane 7 reused" || return 1
+    assert_eq "$(sed -n 's/^OWNERPID|//p' <<<"$out")" "$(sed -n 's/^OWNERPID|//p' <<<"$out2")" \
+        "live-mine: owner.pid unchanged" || return 1
+    assert_eq "$(sed -n 's/^STARTTIME|//p' <<<"$out")" "$(sed -n 's/^STARTTIME|//p' <<<"$out2")" \
+        "live-mine: owner.starttime unchanged" || return 1
+
+    # --- (4) LIVE-FOREIGN: A (alive) holds 7 -> B's pin is a HARD error, no takeover -------
+    d="$base/liveforeign"; mkdir -p -- "$d"
+    pidA="$(spawn_sim_owner 600 pi)"; stA="$(_pool_get_starttime "$pidA" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidA" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stA" \
+        MARKDIR=1 ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "live-foreign: owner-A pin body exit" \
+        || { kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true; return 1; }
+    pidB="$(spawn_sim_owner 600 claude)"; stB="$(_pool_get_starttime "$pidB" 2>/dev/null || true)"
+    rc=0
+    out2="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidB" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stB" \
+        ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    kill "$pidB" 2>/dev/null || true; wait "$pidB" 2>/dev/null || true
+    kill "$pidA" 2>/dev/null || true; wait "$pidA" 2>/dev/null || true
+    [[ "$rc" -ne 0 ]] || { _fail "live-foreign: B's pin must fail"; return 1; }
+    grep -q 'is held by a live owner' <<<"$out2" || { _fail "live-foreign: missing live-owner diagnostic"; return 1; }
+    grep -q 'never a takeover' <<<"$out2" || { _fail "live-foreign: missing never-a-takeover wording"; return 1; }
+    grep -q "pid $pidA" <<<"$out2" || { _fail "live-foreign: diagnostic must name owner pid $pidA"; return 1; }
+    assert_eq "$pidA" "$(jq -r '.owner.pid' "$d/state/lanes/7.json" 2>/dev/null)" \
+        "live-foreign: A's lease untouched (owner.pid still pidA)" || return 1
+
+    # --- (5) ALREADY-HOLDS-ANOTHER-LANE: B holds AUTO lane M -> pin 7 is invariant error --
+    d="$base/otherlane"; mkdir -p -- "$d"
+    pidB="$(spawn_sim_owner 600 claude)"; stB="$(_pool_get_starttime "$pidB" 2>/dev/null || true)"
+    rc=0
+    out="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidB" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stB" \
+        MARKDIR=1 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    assert_eq "0" "$rc" "other-lane: auto-acquire body exit" \
+        || { kill "$pidB" 2>/dev/null || true; wait "$pidB" 2>/dev/null || true; return 1; }
+    M="$(sed -n 's/^N|//p' <<<"$out")"
+    [[ "$M" =~ ^[1-9][0-9]*$ && "$M" != "7" ]] \
+        || { _fail "other-lane: auto lane M must be numeric and != 7: [$M]"; \
+             kill "$pidB" 2>/dev/null || true; wait "$pidB" 2>/dev/null || true; return 1; }
+    rc=0
+    out2="$(AGENT_BROWSER_POOL_STATE="$d/state" AGENT_CHROME_EPHEMERAL_ROOT="$d/active" \
+        AGENT_BROWSER_POOL_OWNER_PID="$pidB" AGENT_BROWSER_POOL_OWNER_STARTTIME="$stB" \
+        ABPOOL_LANE=7 timeout 15 bash "$script" "$ABPOOL_REPO" 2>&1)" || rc=$?
+    kill "$pidB" 2>/dev/null || true; wait "$pidB" 2>/dev/null || true
+    [[ "$rc" -ne 0 ]] || { _fail "other-lane: pin while holding lane $M must fail"; return 1; }
+    grep -q "already holds live lane $M" <<<"$out2" \
+        || { _fail "other-lane: missing already-holds-lane-$M diagnostic"; return 1; }
+    grep -q 'one-lane-per-owner invariant' <<<"$out2" \
+        || { _fail "other-lane: missing one-lane-per-owner invariant wording"; return 1; }
+    assert_eq "$pidB" "$(jq -r '.owner.pid' "$d/state/lanes/$M.json" 2>/dev/null)" \
+        "other-lane: B still holds lane $M" || return 1
+    [[ ! -e "$d/state/lanes/7.json" ]] || { _fail "other-lane: lane 7 must remain unleased"; return 1; }
+
+    return 0
+}
+
 # --- pool_reap_orphan_dirs removes unleased orphan dirs + skips leased (F1) ---------
 # Pure-function body against the shared temp pool: (1) an unleased orphan dir is removed
 # and counted; (2) a leased dir is skipped; (3) a 2nd call finds nothing (idempotent).
