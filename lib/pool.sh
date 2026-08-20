@@ -108,6 +108,8 @@ _pool_config_bool() {
 #   AGENT_CHROME_ALLOW_SLOW_COPY   (unset = refuse non-btrfs)                      POOL_ALLOW_SLOW_COPY  bool (1=allow real copy)
 #   AGENT_CHROME_PROFILE           (unset = derive from Local State last_used)     POOL_PROFILE_DIR      profile-dir name (e.g. "Profile 8"/"Default")
 #   AGENT_BROWSER_POOL_HARNESSES   pi,claude,codex,agy,antigravity                 POOL_HARNESSES        comma-set (lowercased; empty→default)
+#   ABPOOL_OWNER                   (unset = ancestor ownership)                  POOL_OWNER_MODE       mode ("caller" if non-empty)
+#   ABPOOL_LANE                    (unset = auto-assign lane)                    POOL_LANE_PIN         uint-or-empty (malformed → die)
 #
 # Derived (no env var):
 #   POOL_HOME_DIR    = realpath($HOME)                       (fatal if unset/unresolvable)
@@ -122,6 +124,7 @@ _pool_config_bool() {
 #   - $HOME unset/empty or unresolvable
 #   - a numeric var is non-numeric
 #   - POOL_PORT_RANGE <= 0
+#   - ABPOOL_LANE is non-empty but not a positive integer
 #
 # Globals are MUTABLE (not readonly) so this function is RE-RUNNABLE: the test harness
 # (P1.M9.T1.S1) sources lib/pool.sh once and calls pool_config_init repeatedly with
@@ -211,6 +214,23 @@ pool_config_init() {
     harnesses="${harnesses#,}"; harnesses="${harnesses%,}"
     [[ -n "$harnesses" ]] || harnesses="pi,claude,codex,agy,antigravity"
     POOL_HARNESSES="$harnesses"; declare -g POOL_HARNESSES
+
+    # 6b. Caller-scoped owner mode + lane pin (PRD §2.11/§2.12, O10/O11). ABPOOL_OWNER
+    #     is a RAW-STRING check (NOT _pool_config_bool): ANY non-empty value — including
+    #     "false" or "0" — means caller mode. ABPOOL_LANE is validated strictly (positive
+    #     integer, no leading zero/sign/whitespace): malformed values die HERE, in config
+    #     init, which runs pre-flock on every invocation regardless of verb (PRD §2.20).
+    #     Frozen into globals here; later code reads ONLY the globals, never the env vars.
+    #     Consumers: pool_owner_resolve reads POOL_OWNER_MODE (M1.T3.S1); the acquire path
+    #     reads POOL_LANE_PIN to pin lane N (M1.T4.S1/S2).
+    local owner_mode lane_pin
+    if [[ -n "${ABPOOL_OWNER:-}" ]]; then owner_mode="caller"; else owner_mode="ancestor"; fi
+    lane_pin="${ABPOOL_LANE:-}"
+    if [[ -n "$lane_pin" ]] && [[ ! "$lane_pin" =~ ^[1-9][0-9]*$ ]]; then
+        pool_die "agent-browser-pool: ABPOOL_LANE must be a positive integer, got: '$lane_pin'"
+    fi
+    POOL_OWNER_MODE="$owner_mode"; declare -g POOL_OWNER_MODE
+    POOL_LANE_PIN="$lane_pin"; declare -g POOL_LANE_PIN
 
     # 7. Derived paths (after POOL_STATE_DIR is final).
     local lanes_dir lock_file
