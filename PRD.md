@@ -289,10 +289,58 @@ If no free/reusable lane at acquire:
 - **Exhaustion wait:** `$AGENT_BROWSER_POOL_WAIT`=**600** (10 min).
 - **Headless:** `$AGENT_CHROME_HEADLESS` (unset = windowed).
 - **Slow-copy escape hatch:** `$AGENT_CHROME_ALLOW_SLOW_COPY` (unset = refuse on non-btrfs).
+- **Caller-scoped owner:** `ABPOOL_OWNER=caller` (any value = key ownership on the calling
+  process `$$` instead of the harness ancestor; see §2.12).
+- **Explicit lane pin:** `ABPOOL_LANE=<N>` (positive integer; adopt free/stale lane N or
+  hard-error on a live foreign lease; see §2.12).
 - **(removed)** `AGENT_BROWSER_POOL_DISABLE` and the `~/scripts` PATH-shadow are gone
-  — there is no interception to bypass (see §2.17).
+  — there is no interception to bypass (see §2.18).
 
-### 2.12 CLI — `agent-browser-pool` (pool verbs + driving router)
+### 2.12 Caller-scoped lane selection  **[see O10/O11 — caller mode + lane pin]**
+
+Default ownership keys on the **harness ancestor** (ppid walk in `pool_owner_resolve`), so one
+session = one lane and parallel browser-driving subprocesses from a single harness would clobber
+each other in the same Chrome. Two env vars add caller-scoped selection **without changing the
+default path**:
+
+**1. `ABPOOL_OWNER=caller` — caller-scoped auto-assignment.**
+- When set (any value), owner resolution keys on the **calling process itself** (`$$`)
+  (starttime still read from `/proc/$$/stat`). No ppid walk.
+- Everything downstream (`pool_lease_find_mine`, liveness, stale-reaping, teardown-on-owner-exit)
+  works unchanged — the owner is simply the caller now. When a caller-mode subprocess exits, its
+  lane is reaped by the existing lazy reaper (§2.10): correct teardown semantics for free.
+- The recognized-harness fail-fast (§2.4 step 1) does **NOT** apply in caller mode: a caller-mode
+  process under a harness counts, and caller mode with no harness ancestor is also fine.
+
+**2. `ABPOOL_LANE=<N>` — optional explicit lane pin.**
+- When set, skip `pool_lease_find_mine` / `pool_find_free_lane` and use lane N directly:
+  - N free or stale → reap-if-stale (same as acquire step 3a) and take it.
+  - N has a **live lease owned by another process** → hard error with a clear message.
+    **Never a takeover.**
+- Ownership rules still apply (caller mode or ancestor mode), so a pinned lane is still reaped
+  when its owner dies.
+- Purpose: deterministic assignment ("scraper X always gets lane 3"), **not** reaching another
+  live agent's lane — the live-foreign-lease error preserves the §2.14 isolation guarantee.
+
+**3. Compatibility.**
+- Default behavior (no env vars) must be **byte-identical to today**.
+- `--session` stripping, `connect <port>` normalization, and close-scoping (§2.4 step 5) keep
+  working in both new modes.
+
+**Intended usage** (parallel browser-driving scrapers from one orchestrator session):
+```bash
+ABPOOL_OWNER=caller .venv/bin/python scrapers/linkedin_discover.py --no-ping &
+ABPOOL_OWNER=caller .venv/bin/python scrapers/indeed_discover.py --no-ping &
+wait
+```
+Each subprocess resolves to its own lane automatically; each lane is reaped when its subprocess
+exits.
+
+Docs impact: `SKILL.md` (and `references/` dispatch/config tables) must document both modes,
+including the orchestrate-style use case above; PRD section references in code comments must be
+updated if they cite renumbered sections.
+
+### 2.13 CLI — `agent-browser-pool` (pool verbs + driving router)
 ```
 status                 # lane | port | session | owner pid+cwd | chrome pid | age | state   (read-only)
 reap                   # kill+delete dead-owner lanes                                        (operator)
@@ -302,9 +350,10 @@ doctor                 # reconcile leases vs live Chromes vs dirs; report leaks 
 ```
 `release` is the sole lane-naming command and it *tears down* (it cannot join a lane);
 agents are not taught it. Every other token is a driving command routed to the caller's
-own lane (§2.4).
+own lane (§2.4). `ABPOOL_LANE=<N>` (§2.12) is the controlled exception: an env-var pin
+that can only *create/adopt a free or stale* lane, never take over a live foreign lease.
 
-### 2.13 Safety & identity rules (carried from the prior skill, non-negotiable)
+### 2.14 Safety & identity rules (carried from the prior skill, non-negotiable)
 Each ephemeral profile starts as a clone of the master identity:
 - **Never enter credentials; never unlock Bitwarden.** Existing SSO/Google login is
   fine to *use*; never type a password.
@@ -320,8 +369,13 @@ Each ephemeral profile starts as a clone of the master identity:
   `release <N>` (teardown, not join). Forging another owner's identity or tampering with
   the lease store directly is out of scope (accepted) — through normal tool use, an agent
   physically cannot reach another agent's lane.
+- **Caller-scoped exception (§2.12).** `ABPOOL_OWNER=caller` re-keys ownership on the calling
+process (still an identity key — the caller's own `(pid, starttime)`; it cannot name or reach
+someone else's lane). `ABPOOL_LANE=<N>` pins a lane number but **hard-errors on a live foreign
+lease** — it can adopt only free/stale lanes, so cross-agent isolation still holds. The default
+path (no env vars) remains byte-identical.
 
-### 2.14 Failure modes & recovery
+### 2.15 Failure modes & recovery
 | failure | detection | recovery |
 |---|---|---|
 | agent harness crash/kill | owner pid dead | REAP-STALE → kill pgroup, rm dir, drop lease |
@@ -333,8 +387,9 @@ Each ephemeral profile starts as a clone of the master identity:
 | FS not btrfs | acquire precheck | refuse unless `AGENT_CHROME_ALLOW_SLOW_COPY=1` |
 | Pool exhausted (accumulation) | no free lane | block→force-reap→alert (§2.9) |
 | `npm -g` upgrades agent-browser | wrapper uses absolute path | unaffected |
+| Pinned lane held by live foreign owner (`ABPOOL_LANE`) | lease live + owner alive | fail fast with clear error; never take over (§2.12) |
 
-### 2.15 Invocation checklist (the contract the skill teaches)
+### 2.16 Invocation checklist (the contract the skill teaches)
 - [ ] `agent-browser-pool open <url>` with zero prep → opens in MY locked ephemeral lane (lane selected by my identity, not an arg).
 - [ ] The command is identical no matter which lane I'm on; I never pass a lane/port/session.
 - [ ] Same browser for all my commands across many stateless bash calls (reuse by owner identity).
@@ -343,8 +398,10 @@ Each ephemeral profile starts as a clone of the master identity:
 - [ ] I cannot reach another agent's lane through any normal command.
 - [ ] Next agent → next free lane; never collides.
 - [ ] My crash → my Chrome dies, my ephemeral dir is deleted, no manual cleanup.
+- [ ] (Orchestrator mode) `ABPOOL_OWNER=caller` per subprocess → each subprocess gets its own
+      lane and reaps it on exit (§2.12).
 
-### 2.16 Dependencies (all verified present on this host)
+### 2.17 Dependencies (all verified present on this host)
 - `agent-browser` ≥ 0.28 — the REAL Vercel CLI; a **hard runtime dependency**. The
   pool calls it by absolute path (`$AGENT_BROWSER_REAL`, default
   `~/.local/bin/agent-browser`) on every driving command — it need **not** be on the
@@ -360,9 +417,9 @@ Each ephemeral profile starts as a clone of the master identity:
 - util-linux: `flock`, `setsid`; procps-ng: `pgrep`, `pkill`; coreutils: `cp`
   (with `--reflink`); `curl` (CDP probing); `jq` (lease JSON); `notify-send`
   (libnotify — exhaustion alerts; optional). `/proc` filesystem (Linux only).
-- `agent-browser-pool doctor` (§2.12) should verify all of the above at runtime.
+- `agent-browser-pool doctor` (§2.13) should verify all of the above at runtime.
 
-### 2.17 Install (no cutover danger)
+### 2.18 Install (no cutover danger)
 There is **no PATH shadowing** — the real `agent-browser` is never intercepted, so
 installing the pool cannot disrupt running agents or other `agent-browser` users.
 `install.sh` does three benign things:
@@ -390,7 +447,7 @@ teach each harness natively, install into its own skills dir:
 > For Codex, install the skill as a real directory copy into `~/.codex/skills/` (or wait for
 > the upstream fix). pi and Claude Code follow symlinks, so `--global-skill` suffices for them.
 
-### 2.18 Testing & validation
+### 2.19 Testing & validation
 - **Owner resolution needs a recognized-harness ancestor.** A command run from a
   plain interactive shell has none → driving commands can't key a lane (§2.4 step 1).
   Remedies: (a) run the command **under a supported harness** (`pi`/`claude`/`codex`/
@@ -402,6 +459,13 @@ teach each harness natively, install into its own skills dir:
   window. For unattended harness runs set `AGENT_CHROME_HEADLESS=1` (plumbing tests
   only; headless trips some anti-bot walls, so it's not valid for trusted-profile
   wall-passing validation).
+- **Caller-scoped lanes (§2.12):**
+  - Parallel acquires from two simulated caller-mode owners (via the owner-override hooks or
+    real subprocesses) land on **distinct lanes**.
+  - A caller-mode owner's lane is reaped after its death (simulate via existing starttime test
+    hooks).
+  - Pinned-lane conflicts (`ABPOOL_LANE=N` with a live foreign lease) **error cleanly**.
+  - Default path unchanged with no env vars set (golden tests if any exist).
 - **A long-lived interactive harness** (e.g. the main `pi`, or a persistent
   `claude`/`codex`/`agy` session) keeps its lease until explicit release — every test
   must call `agent-browser-pool release`/`reap` and assert the ephemeral dir + Chrome
@@ -410,7 +474,7 @@ teach each harness natively, install into its own skills dir:
   override) must each get a distinct lane; assert no two share a lane and all
   release cleanly with no leftover dirs/processes.
 
-### 2.19 Implementation notes (gotchas for the implementer)
+### 2.20 Implementation notes (gotchas for the implementer)
 - **`/proc/<pid>/stat` parsing:** `comm` is field 2 but wrapped in parens and may
   contain spaces, shifting everything after it. Read `starttime` **from the right**
   (it's field 22 from the start → index `NF-19` after `awk` split on space), not by
@@ -428,6 +492,10 @@ teach each harness natively, install into its own skills dir:
   footgun).
 - **No bare `~` anywhere** (§2.2): resolve `$HOME` to absolute up front for every
   path handed to Chrome, `rm`, logs, or any subprocess.
+- **Caller mode reads `/proc/$$` early:** `ABPOOL_OWNER=caller` must read `/proc/$$/stat`
+  (starttime) at owner-resolve time, before any exec — after exec the pid may be reused.
+- **`ABPOOL_LANE` validation:** N must be a positive integer; validate before the flock section
+  and hard-error (no silent fallback to auto-assignment) on malformed values.
 
 ---
 
@@ -481,11 +549,22 @@ agent-browser-pool/
   configurable via `$AGENT_BROWSER_POOL_HARNESSES`, §2.11). The lease records the *actual*
   matched `comm`, so identity, reuse, and stale-detection work identically for every
   harness. Driving commands fail fast only when NO recognized harness is an ancestor;
-  the skill is installed per-harness (§2.17, incl. the Codex symlink caveat). ✅ (Resolves
+  the skill is installed per-harness (§2.18, incl. the Codex symlink caveat). ✅ (Resolves
   the earlier "[DEFAULT: pi-required; … future option]" note in §2.4.)
+- **O10 — Caller-scoped auto-assignment (`ABPOOL_OWNER=caller`).** Owner resolution keys on
+  the calling process itself (`$$` + `/proc/$$/stat` starttime) instead of the ppid walk to the
+  harness ancestor; recognized-harness fail-fast is bypassed in caller mode. All downstream
+  lease logic (find-mine, liveness, stale-reap, teardown-on-owner-exit) works unchanged. Enables
+  parallel browser-driving subprocesses from one orchestrator session; each subprocess's lane is
+  reaped automatically when it exits. Default path unchanged. ✅
+- **O11 — Optional explicit lane pin (`ABPOOL_LANE=<N>`).** Skips auto lane selection and uses
+  lane N directly: free/stale → reap-if-stale and take it; **live foreign lease → hard error,
+  never a takeover**. Ownership/reaping rules still apply. Purpose is deterministic assignment
+  ("scraper X always gets lane 3"), not cross-agent access. Default path unchanged. ✅
 
 Everything is locked: btrfs/reflink copies, delete-on-release, block-with-timeout
 + alert, reuse-orphan-if-responsive, explicit invariant invocation, identity-keyed
 isolation, `agent-browser-pool` binary, port base 53420, `$HOME`/absolute-path
-resolution, and multi-harness owner resolution (pi/Claude Code/Codex/AGY, O9).
+resolution, multi-harness owner resolution (pi/Claude Code/Codex/AGY, O9), caller-scoped
+lanes and lane pinning (O10/O11).
 Ready to build.
