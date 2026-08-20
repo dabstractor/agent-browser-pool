@@ -18,7 +18,8 @@
 #
 # SOURCES the LANDED test framework (P1.M9.T1.S1) for: spawn_sim_owner (the `pi`-comm owner
 # engine — REQUIRED because pool_owner_alive reads the REAL /proc comm), setup/teardown
-# (hermetic mktemp isolation), the 5 assertion helpers, run_test/abpool_run_suite.
+# (hermetic mktemp isolation), and the 5 assertion helpers. It does NOT use the
+# framework's run_test/abpool_run_suite — see the ★★★ SINGLE-SETUP note below.
 set -euo pipefail
 
 # --- repo + framework resolution (mirror test/validate.sh's symlink-safe bootstrap) ------
@@ -146,6 +147,25 @@ _concurrency_setup_master() {
     pool_state_init
 }
 
+# File-global owner tracking for the single-setup runner's inter-body backstop: each body
+# appends every sim-owner pid it spawns here (setup's own owner is NOT tracked — teardown
+# kills it), so the runner can kill+reap them even on a FAIL-exit mid-body (LM-4: unwaited
+# kills leave zombies whose /proc entry lingers → false-alive reads).
+declare -a ABPOOL_CUR_OWNERS=()
+
+# =============================================================================
+# _concurrency_kill_owner_and_reap_zombie PID — kill PID and REAP its zombie so /proc/PID
+# vanishes. Bodies now run in the MAIN shell → spawned sim-owners are the MAIN shell's
+# children; a killed-but-unwaited child stays a ZOMBIE whose /proc/PID + comm may still read
+# "pi" → pool_owner_alive FALSE-ALIVE. `wait` reaps it. PID MUST be a child of this shell.
+# Best-effort (every command guarded; wait on a non-child returns 127 → guarded).
+# =============================================================================
+_concurrency_kill_owner_and_reap_zombie() {
+    local pid="$1"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 # =============================================================================
 # _concurrency_run_one_lane OWNER_PID OWNER_ST RESULT_FILE
 #
@@ -234,6 +254,7 @@ test_n_agents_get_n_distinct_lanes() {
         st="$(_pool_get_starttime "$pid")"   # split capture (SC2155); settles inside spawn
         owner_pids+=("$pid")
         owner_sts+=("$st")
+        ABPOOL_CUR_OWNERS+=("$pid")
     done
 
     # (3) Sanity: the N owner PIDs are themselves distinct (defensive — proves spawn worked).
@@ -352,10 +373,13 @@ test_n_agents_get_n_distinct_lanes() {
         && rm -rf -- "$_concurrency_btrfs_root" 2>/dev/null || true
 
     # (10) Kill the N-1 EXTRA sim owners spawned in this body (setup's one is killed by
-    #      teardown). Best-effort (|| true); they'd otherwise linger until their 600s sleep.
+    #      teardown). kill+wait via the reap helper (LM-4: bodies now run in the MAIN shell,
+    #      so these are the MAIN shell's children — unwaited kills leave zombies whose
+    #      /proc entries linger and can read false-alive). Best-effort (guarded inside).
     for (( i = 1; i < N; i++ )); do
-        kill "${owner_pids[$i]}" 2>/dev/null || true
+        _concurrency_kill_owner_and_reap_zombie "${owner_pids[$i]}"
     done
+    ABPOOL_CUR_OWNERS=()
 }
 
 # =============================================================================
@@ -383,6 +407,7 @@ test_n_provisional_lanes_are_distinct() {
         pid="$(spawn_sim_owner)"
         st="$(_pool_get_starttime "$pid")"
         owner_pids+=("$pid"); owner_sts+=("$st")
+        ABPOOL_CUR_OWNERS+=("$pid")
     done
 
     # Parallel PROVISIONAL acquires (NO boot — fast; exercises ONLY the flock + claim).
@@ -432,13 +457,67 @@ test_n_provisional_lanes_are_distinct() {
     assert_eq "0" "${#after[@]}" "no provisional lanes remain" || return 1
     for pl in "${lane_nums[@]}"; do assert_lane_gone "$pl" || return 1; done
 
-    for (( i = 1; i < N; i++ )); do kill "${owner_pids[$i]}" 2>/dev/null || true; done
+    for (( i = 1; i < N; i++ )); do
+        _concurrency_kill_owner_and_reap_zombie "${owner_pids[$i]}"
+    done
+    ABPOOL_CUR_OWNERS=()
+}
+
+# =============================================================================
+# _abpool_run_concurrency_suite — the SINGLE-SETUP runner (mirrors
+# _abpool_run_release_reaper_suite, release_reaper.sh:440–467, with concurrency deltas).
+#
+# ★ setup() is called EXACTLY ONCE for the whole file. The framework's
+#   run_test/abpool_run_suite call setup() per body and the 3rd call HANGS this shared
+#   sandbox (LM-1 / AGENTS.md §4) — never restore them.
+# ★ Bodies run via `if "$fn"` in the MAIN shell (LM-2: a `( … )` subshell inherits the
+#   EXIT trap and would rm -rf the shared temp root mid-suite). Under `if`, errexit is
+#   disabled inside the body — every body assert already ends in `|| return 1`.
+# ★ UNLIKE release_reaper, setup's sim-owner is KEPT ALIVE: both bodies consume it as
+#   owner #0 ($AGENT_BROWSER_POOL_OWNER_PID set by the ONE setup call persists in the main
+#   shell across bodies). teardown kills it. The inter-body backstop therefore does NOT
+#   touch $AGENT_BROWSER_POOL_OWNER_PID — it only releases all lanes + kills+reaps the
+#   pids the body registered in ABPOOL_CUR_OWNERS (G4/LM-4: main-shell kills must be
+#   waited or zombies linger → false-alive /proc reads).
+# ★ ONE teardown() at the end; returns rc 1 iff any body failed.
+# =============================================================================
+_abpool_run_concurrency_suite() {
+    local fn p
+    ABPOOL_PASS=0; ABPOOL_FAIL=0; ABPOOL_FAILED=()
+    ABPOOL_CUR_OWNERS=()
+    setup                                  # ★ the ONE AND ONLY setup() call
+    # NOTE: setup's sim-owner stays ALIVE — both bodies use it as owner #0 (G3); teardown
+    # kills it. Do NOT kill it here (body 2 would break).
+    for fn in $(compgen -A function | grep '^test_' | sort); do
+        printf '== %s\n' "$fn"
+        if "$fn"; then
+            ABPOOL_PASS=$((ABPOOL_PASS+1)); printf '   PASS\n'
+        else
+            ABPOOL_FAIL=$((ABPOOL_FAIL+1)); ABPOOL_FAILED+=("$fn"); printf '   FAIL\n' >&2
+        fi
+        # Inter-body backstop: release any leftover lanes (covers a FAILED body) +
+        # kill+reap any owners the body spawned and registered in ABPOOL_CUR_OWNERS.
+        "$ABPOOL_ADMIN" release all >/dev/null 2>&1 || true
+        for p in "${ABPOOL_CUR_OWNERS[@]:-}"; do
+            [[ -n "$p" ]] && _concurrency_kill_owner_and_reap_zombie "$p"
+        done
+        ABPOOL_CUR_OWNERS=()
+    done
+    teardown
+    printf '\n%d passed, %d failed\n' "$ABPOOL_PASS" "$ABPOOL_FAIL"
+    if (( ABPOOL_FAIL > 0 )); then
+        printf 'FAILED: %s\n' "${ABPOOL_FAILED[*]}" >&2
+        return 1
+    fi
+    return 0
 }
 
 # --- source-vs-execute gate: run the suite ONLY when executed directly. -----------------
 # (When sourced by a future aggregator, define the test_* functions without running.)
+# Runs via the LOCAL single-setup runner — NOT the framework's abpool_run_suite (LM-1:
+# its per-test setup() hangs the sandbox on the 3rd call; AGENTS.md §4).
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    if ! abpool_run_suite test_; then
+    if ! _abpool_run_concurrency_suite; then
         exit 1
     fi
 fi
