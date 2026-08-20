@@ -16,6 +16,10 @@ down.
 - **Pitfalls:** driving commands fail fast without a supported-harness ancestor (use `agent-browser`
   directly for raw access), pool exhaustion hangs, ephemeral profiles, and why to never
   launch Chrome directly.
+- **Orchestrator mode + lane pinning:** set `ABPOOL_OWNER=caller` per subprocess for one
+  lane per parallel worker (auto-reaped on exit), and optionally `ABPOOL_LANE=<N>` for
+  deterministic assignment — a pinned lane adopts only free/stale lanes and hard-errors on
+  a live foreign lease (never a takeover).
 
 ## Files
 

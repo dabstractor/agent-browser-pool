@@ -158,10 +158,14 @@ Each ephemeral profile starts as a clone of the master identity:
   other agents' working lanes).
 - **Don't confuse `close` with release.** `close` keeps your browser alive for reuse; release
   (which happens automatically when your session ends) destroys it.
+- **"ABPOOL_LANE is set but the pool errors: the pinned lane is in use."** By design — a
+  pinned lane is never a takeover: a live foreign lease on lane N fails fast (no wait, no
+  force-reap). Unset ABPOOL_LANE, choose a free lane, or wait for that owner to release.
 
 ## 5. Reference
 
 For the full environment-variable table, the complete pool-verbs-vs-driving dispatch
 classification, the acquire lifecycle, and a symptom→cause→fix troubleshooting matrix, read
 **`references/configuration.md`** — including the **caller-scoped lanes (orchestrator mode)**
-subsection for parallel-worker usage.
+subsection for parallel-worker usage, and the **lane pinning (ABPOOL_LANE)** subsection for
+deterministic lane assignment.

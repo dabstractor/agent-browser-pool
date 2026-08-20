@@ -73,6 +73,46 @@ wait
 
 Each subprocess resolves to its own lane; each lane is reaped when its subprocess exits.
 
+### Lane pinning (ABPOOL_LANE)
+
+With `ABPOOL_LANE=<N>` set (a positive integer), auto-assignment is skipped and lane N is
+used directly. This is the narrative expansion of the `ABPOOL_LANE` row in the env-var
+table above — the two env-table rows are the summary; this subsection is the full semantics.
+
+- **Free or stale lane → take it.** A free lane is claimed normally. A stale lease is
+  reaped first, then the lane is claimed — even a responsive orphan Chrome is **not**
+  adopted under a pin; the pin guarantees deterministic fresh state.
+- **Live lease owned by you → idempotent reuse.** Same lane, same browser; the call echoes
+  lane N and succeeds (rc 0) like any reuse.
+- **Live lease owned by another process → hard error. Never a takeover.** The acquire dies
+  inside the critical section with:
+  `pinned lane $POOL_LANE_PIN is held by a live owner (pid $o_pid, comm $o_comm); a pinned lane is never a takeover — unset ABPOOL_LANE or choose a free lane`
+  and the wrapper terminates with:
+  `agent-browser-pool: ABPOOL_LANE=$POOL_LANE_PIN: pinned lane unavailable (see the error above)`
+  There is no wait (the `AGENT_BROWSER_POOL_WAIT` exhaustion path does not apply to a pin)
+  and no force-reap — a pinned lane is **never** a takeover.
+- **You already hold a different live lane → hard error.** Quoting verbatim:
+  `owner pid=$POOL_OWNER_PID already holds live lane $held; ABPOOL_LANE=$POOL_LANE_PIN would violate the one-lane-per-owner invariant — release lane $held first or unset ABPOOL_LANE`
+- **Malformed value → hard error at startup.** Anything that is not a positive integer
+  (`03`, `abc`, `0`, `-2`) dies in `pool_config_init`, before any lane work (pre-flock,
+  every verb):
+  `agent-browser-pool: ABPOOL_LANE must be a positive integer, got: '<raw value>'`
+  Empty/unset means auto-assign as usual.
+
+Pinning works in **both owner modes** — the default harness-ancestor ownership and
+`ABPOOL_OWNER=caller` (see the *Caller-scoped lanes* subsection above) — and pinned lanes
+obey the same reaping rules as any lane: when the owner dies, the lease goes stale and is
+reaped by the next acquire or an explicit `reap`.
+
+The purpose is deterministic assignment ("scraper X always gets lane 3"), **not** reaching
+another live agent's lane — the live-foreign hard error preserves cross-agent isolation.
+
+Typical usage — a worker pinned to a specific lane in caller mode:
+
+```bash
+ABPOOL_LANE=3 ABPOOL_OWNER=caller ./scrape.sh   # worker pinned to lane 3
+```
+
 ## Command dispatch: pool verbs vs. driving
 
 The entry-point dispatcher (`bin/agent-browser-pool`) splits each invocation **before** any
@@ -163,6 +203,9 @@ dir survive for reuse within the session.
 | `status` shows my lane as `disconnected` | Daemon dropped but Chrome alive | Your next driving command re-binds automatically |
 | `status` shows my lane as `STALE` / field `?` | Owner process died or lease is corrupt | The reaper will reclaim it; the operator can run `reap` |
 | `doctor` reports WARN lines | Cruft from crashed agents (orphan dirs, dead Chrome, stale leases, disconnected daemon) | Operator-only: `agent-browser-pool reap` clears stale lanes **and** orphan dirs; `release <N>` / `release all` for explicit teardown |
+| Pinned-lane call dies: "pinned lane N is held by a live owner (pid …, comm …); a pinned lane is never a takeover — unset ABPOOL_LANE or choose a free lane" | `ABPOOL_LANE=N` but lane N has a live lease owned by another process | By design — a pinned lane is never a takeover and never waits; unset `ABPOOL_LANE`, pick a free lane, or wait for that owner to release |
+| Pool dies at startup: "agent-browser-pool: ABPOOL_LANE must be a positive integer, got: '<raw>'" | `ABPOOL_LANE` is malformed (non-numeric, `0`, negative, leading zeros) | Fix the value to a positive integer or unset it (auto-assign) |
+| Caller-mode call dies: "agent-browser-pool: ABPOOL_OWNER=caller requires a live parent process (got ppid …); invoke agent-browser-pool as a child of the long-lived orchestrator process" | The invoking subprocess's parent is dead/reparented (an instantly-stale owner) | Invoke `agent-browser-pool` as a child of the long-lived orchestrator process |
 
 ## Admin CLI (operator-facing)
 
