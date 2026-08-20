@@ -3751,13 +3751,20 @@ _pool_preflight_real_bin() {
 #   `agent-browser --session abpool-<N> connect` is a harmless no-op connect.
 # GOTCHA — close --all interception: pool_normalize_close sets POOL_CLOSE_ALL_SEEN=1 iff it
 #   stripped ≥1 --all from a close cmd. Log it for observability (PRD §2.16).
+# PIN MODE (PRD §2.12/§2.13, O11): when ABPOOL_LANE=<N> is set (→ POOL_LANE_PIN,
+# pool_config_init), the wrapper SKIPS pool_lease_find_mine (the acquire-level pin branch
+# already reuses a live-mine pin idempotently — a different live lane must not shadow the
+# pin) and NEVER falls back to pool_wait_for_lane ("never wait, never force", §2.15):
+# a live-foreign pin dies inside the acquire critical section (detailed diagnostic on
+# stderr) and the wrapper adds pin context and exits. Pin combines with ABPOOL_OWNER=caller
+# with no special-casing (POOL_OWNER_* globals are mode-agnostic).
 # PRECONDITION: none (pool_config_init + pool_state_init are step a — the first thing run).
 # CONSUMES: POOL_REAL_BIN, POOL_OWNER_PID, POOL_WAIT, POOL_NORM_ARGS,
 #   POOL_CLOSE_ALL_SEEN, POOL_CLEAN_ARGS (all set by the helpers above).
 # EXPORTS (via pool_force_session): AGENT_BROWSER_SESSION=abpool-<N> (inherited by the step-k exec).
 pool_wrapper_main() {
     # Declare ALL locals up front (SC2155: never `local x="$(…)"` — declare then assign).
-    local N port _has_json _a
+    local N port _has_json _a _lane_fresh
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
     # config freezes POOL_REAL_BIN, POOL_WAIT, POOL_LANES_DIR, POOL_LOCK_FILE.
@@ -3779,9 +3786,20 @@ pool_wrapper_main() {
     # --- e→g. find-or-acquire my lane (steps 2→3) --------------------------------
     # Lane is STDOUT-only. Split capture (`local N` above; `N="$(…)"` here) inside an `if` keeps
     # rc 1 set -e-safe (the condition is just false). NEVER `local N="$(…)"` (SC2155 masks rc 1).
-    if N="$(pool_lease_find_mine)"; then
+    _lane_fresh=1
+    if [[ -n "${POOL_LANE_PIN:-}" ]]; then
+        # PIN MODE (PRD §2.12): skip find-mine (case 3 of the acquire pin branch already
+        # reuses a live-mine pin idempotently) and NEVER fall back to wait-for-lane —
+        # a live-foreign pin must die fast ("never wait, never force", §2.15).
+        # The S1 critical section already printed the detailed diagnostic on stderr.
+        N="$POOL_LANE_PIN"
+        pool_acquire_locked >/dev/null || \
+            pool_die "agent-browser-pool: ABPOOL_LANE=$POOL_LANE_PIN: pinned lane unavailable (see the error above)"
+        _pool_log "pool_wrapper_main: pinned lane $N acquired"
+    elif N="$(pool_lease_find_mine)"; then
         # Found my LIVE lane → reuse it (skip acquire + boot). Go to step h (ensure connected).
         _pool_log "pool_wrapper_main: reusing lane $N"
+        _lane_fresh=""
     else
         # Not found → acquire (step 3). Fallback to wait-for-lane on exhaustion.
         if ! N="$(pool_acquire_locked)"; then
@@ -3790,7 +3808,9 @@ pool_wrapper_main() {
                 pool_die "agent-browser-pool: no lane available after ${POOL_WAIT:-600}s + force-reap"
             fi
         fi
+    fi
 
+    if [[ -n "$_lane_fresh" ]]; then
         # --- g. boot-vs-adopt ------------------------------------------------
         # pool_lease_field is rc 0/1 (returns 1 on missing/corrupt) → guard with `|| port=""`
         # (||-list is errexit-exempt). A PROVISIONAL lease has port=0; an ADOPTED orphan has port>0.

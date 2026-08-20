@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P4.M1",
           "title": "Core: lib/pool.sh implementation (R1–R4), static checks only",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Renumber sweep FIRST, then config parsing/validation (R2), caller-mode owner resolution (R3), and the lane-pin acquire path (R4). Verify each step with bash -n + shellcheck -s bash only — boot NO Chrome during this milestone (AGENTS.md §1). All new code cites the NEW PRD numbering.",
           "tasks": [
             {
@@ -136,7 +136,7 @@
               "type": "Task",
               "id": "P4.M1.T4",
               "title": "Lane pin acquire path (R4, PRD §2.12 mode 2, §2.13 note, O11)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "When POOL_LANE_PIN is set: skip find-mine in the wrapper, never fall back to the exhaustion wait, and replace the reap/adopt/choose-N flow in the flock'd critical section with a lane-N-specific claim matrix (free→claim, stale→reap-then-claim, live-mine→reuse, live-foreign→hard error, already-holds-another-lane→hard error). Boot/ensure-connected/arg-cleaning untouched; ownership/reaping rules apply in both modes.",
               "subtasks": [
                 {
@@ -164,7 +164,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T4.S2",
                   "title": "Wrapper integration: skip find-mine when pinned; NO exhaustion fallback",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T4.S1"
@@ -182,7 +182,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T4.S3",
                   "title": "configuration.md pin subsection + troubleshooting rows; SKILL.md pitfalls/reference; skill README",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T4.S1",
