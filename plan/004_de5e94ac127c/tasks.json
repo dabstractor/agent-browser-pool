@@ -91,7 +91,7 @@
               "type": "Task",
               "id": "P4.M1.T3",
               "title": "Caller-mode owner resolution (R3, PRD §2.12 mode 1, O10)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Insert the caller-mode branch into pool_owner_resolve — owner = the invoking process ($PPID from the wrapper's view), validated (readable /proc + not reparented), keyed into the existing four POOL_OWNER_* globals with zero downstream changes — plus its Mode A docs.",
               "subtasks": [
                 {
@@ -117,7 +117,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T3.S2",
                   "title": "configuration.md caller subsection + SKILL.md orchestrator note",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T3.S1"
@@ -143,7 +143,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T4.S1",
                   "title": "Pin branch in _pool_acquire_critical_section",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T2.S1"

@@ -52,6 +52,16 @@ You do not reconnect between calls.
 - These overrides are intentional: the pool owns connection + session + lifecycle so the
   command is the same regardless of which lane you're on.
 
+### Orchestrator mode (parallel workers from one session)
+
+- If you are one of several browser-driving subprocesses spawned by one orchestrator
+  session, have the orchestrator set `ABPOOL_OWNER=caller` **per subprocess** → each
+  worker gets its own lane automatically.
+- Your lane is reaped when your subprocess exits → just end normally, no manual cleanup.
+- The env var is orchestrator-set, never an agent argument — the command itself still
+  never names a lane. See the full example (parallel scrapers) in
+  `references/configuration.md` → *Caller-scoped lanes*.
+
 ### Which commands trigger a lane
 
 Every command except pool verbs (status/reap/release/doctor/help) is a driving command — it
@@ -153,4 +163,5 @@ Each ephemeral profile starts as a clone of the master identity:
 
 For the full environment-variable table, the complete pool-verbs-vs-driving dispatch
 classification, the acquire lifecycle, and a symptom→cause→fix troubleshooting matrix, read
-**`references/configuration.md`**.
+**`references/configuration.md`** — including the **caller-scoped lanes (orchestrator mode)**
+subsection for parallel-worker usage.

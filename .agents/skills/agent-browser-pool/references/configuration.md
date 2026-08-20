@@ -44,6 +44,35 @@ The three that most affect behavior:
 > `AGENT_BROWSER_POOL_OWNER_STARTTIME` simulate distinct agent owners without a real `pi`
 > ancestor. Never set these in normal use.
 
+### Caller-scoped lanes (orchestrator mode)
+
+With `ABPOOL_OWNER` set to any non-empty value (recommended: `caller`), lane ownership keys
+on the **calling process** — the subprocess that invoked `agent-browser-pool` — instead of the
+recognized-harness ancestor. One orchestrator session can run many parallel browser-driving
+subprocesses, each transparently getting its own lane.
+
+- **Parent-pid semantics.** The owner is the process that invoked the pool command; the pool
+  records its pid + starttime. If that parent is already dead or reparented, the command
+  fails fast: `pool_die`: "agent-browser-pool: ABPOOL_OWNER=caller requires a live parent
+  process (got ppid $PPID); invoke agent-browser-pool as a child of the long-lived
+  orchestrator process" — an owner that died on arrival would claim an instantly-stale lane.
+- **Auto-reap.** When the subprocess exits, its lane is reaped by the existing lazy reaper
+  (on the next acquire or `reap`) → no manual cleanup needed.
+- **Fail-fast exemption.** The recognized-harness fail-fast does **not** apply in caller mode
+  → caller mode with no harness ancestor is fine.
+- **Default path unchanged.** With `ABPOOL_OWNER` unset, ownership keys on the harness
+  ancestor exactly as before.
+
+Typical usage — parallel scrapers from one orchestrator session:
+
+```bash
+ABPOOL_OWNER=caller .venv/bin/python scrapers/linkedin_discover.py --no-ping &
+ABPOOL_OWNER=caller .venv/bin/python scrapers/indeed_discover.py --no-ping &
+wait
+```
+
+Each subprocess resolves to its own lane; each lane is reaped when its subprocess exits.
+
 ## Command dispatch: pool verbs vs. driving
 
 The entry-point dispatcher (`bin/agent-browser-pool`) splits each invocation **before** any
@@ -56,7 +85,9 @@ lane work. Decisions (in order, first match wins):
 2. **Everything else → DRIVING** → `pool_wrapper_main`: resolve the owning recognized-harness PID; if
    there is no recognized-harness ancestor, **fail-fast** (`pool_die`: "agent-browser-pool: driving
    commands require a supported agent harness (pi/claude/codex/agy)... For raw browser use without pooling, call
-   'agent-browser' directly."). Otherwise acquire/reuse the caller's lane, strip any
+   'agent-browser' directly."). With `ABPOOL_OWNER` set (caller mode), ownership keys on the calling
+   process instead — no harness ancestor is required (see *Caller-scoped lanes* above). Otherwise
+   acquire/reuse the caller's lane, strip any
    `--session`, force `AGENT_BROWSER_SESSION=abpool-<N>`, and exec the real binary with
    the cleaned args.
 
@@ -98,7 +129,9 @@ agent-browser-pool open <url>
 
 Lane identity is keyed on the owning harness **PID + starttime** (not PID alone — PID recycling
 is real). That triple is what guarantees a crashed agent's lane is detected as stale and
-reclaimed, and that a recycled PID can never hijack your lane.
+reclaimed, and that a recycled PID can never hijack your lane. In caller mode (`ABPOOL_OWNER` set) the same
+**PID + starttime** identity keys on the invoking subprocess instead of the harness ancestor —
+the same staleness/reuse guarantees apply.
 
 ## Release lifecycle (teardown)
 
