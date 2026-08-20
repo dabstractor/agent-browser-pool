@@ -238,7 +238,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S2",
                   "title": "Caller-mode resolve selftest (in-process, $PPID)",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T3.S1"
@@ -254,7 +254,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S3",
                   "title": "Parallel caller-mode owners → distinct lanes; owner death → lane reaped",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T3.S1"

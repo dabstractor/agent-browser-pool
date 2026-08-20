@@ -986,6 +986,79 @@ selftest_config_owner_mode_and_lane_pin() {
     assert_eq "ancestor" "$mode" "ABPOOL_LANE=3 leaves owner mode at ancestor" || return 1
 }
 
+# --- P4.M2.T1.S2: pool_owner_resolve CALLER MODE (PRD §2.12 mode 1 / O10) ---------
+# With ABPOOL_OWNER frozen to 'caller' at config time and BOTH TEST-MODE hook vars
+# unset, resolve must key the owner on the child's own $PPID (PID != 0 → the
+# recognized-harness fail-fast is bypassed) with correct comm/starttime/cwd.
+# Also proves the TEST-MODE hook (PRD §2.19) OUTRANKS caller mode. All resolution
+# happens in a short-lived synchronous bash child (body.sh) so the harness's own
+# POOL_OWNER_* globals are never clobbered (resolve RESETS them every call).
+# Pure logic: zero Chrome, zero leases, zero daemons.
+# shellcheck disable=SC2016  # $1/$PPID/$POOL_* in single quotes expand in the child
+selftest_owner_resolves_caller_mode() {
+    local outdir script rc got_pid got_ppid got_comm want_comm got_st want_st got_cwd want_cwd got_hook
+    outdir="$ABPOOL_TEST_ROOT/caller-resolve"
+    mkdir -p -- "$outdir"
+    script="$outdir/body.sh"
+    cat >"$script" <<'EOF'
+set -euo pipefail
+source "$2/lib/pool.sh"
+case "$3" in
+identity)
+    # Caller-mode identity: BOTH hook vars must be unset (TEST MODE is checked
+    # first and would silently win otherwise — setup() exports them for the suite).
+    unset AGENT_BROWSER_POOL_OWNER_PID AGENT_BROWSER_POOL_OWNER_STARTTIME
+    ABPOOL_OWNER=caller pool_config_init          # env present AT CONFIG time
+    ppid="$PPID"                                  # capture FIRST; parent lives for the child's lifetime
+    want_comm="$(cat /proc/$ppid/comm 2>/dev/null || true)"
+    want_st="$(_pool_get_starttime "$ppid" 2>/dev/null || true)"
+    want_cwd="$(readlink /proc/$ppid/cwd 2>/dev/null || true)"
+    pool_owner_resolve
+    printf 'PPID|%s\nPID|%s\nCOMM|%s\nST|%s\nCWD|%s\n' \
+        "$ppid" "$POOL_OWNER_PID" "$POOL_OWNER_COMM" "$POOL_OWNER_STARTTIME" "$POOL_OWNER_CWD"
+    printf 'WANT_COMM|%s\nWANT_ST|%s\nWANT_CWD|%s\n' "$want_comm" "$want_st" "$want_cwd"
+    [[ "$POOL_OWNER_PID" == "$ppid" ]] || { echo "FAIL: PID != PPID"; exit 1; }
+    [[ "$POOL_OWNER_PID" != "0" ]] || { echo "FAIL: PID == 0"; exit 1; }
+    [[ -n "$POOL_OWNER_STARTTIME" ]] || { echo "FAIL: empty starttime"; exit 1; }
+    ;;
+precedence)
+    # TEST-MODE hook must outrank caller mode: hook pid passed as $4 (the live
+    # selftest main shell $$).
+    unset AGENT_BROWSER_POOL_OWNER_STARTTIME
+    ABPOOL_OWNER=caller pool_config_init
+    AGENT_BROWSER_POOL_OWNER_PID="$4" pool_owner_resolve   # hook read at resolve time
+    printf 'HOOKPID|%s\n' "$POOL_OWNER_PID"
+    [[ "$POOL_OWNER_PID" == "$4" ]] || { echo "FAIL: hook pid not used"; exit 1; }
+    ;;
+*) echo "FAIL: unknown mode '$3'"; exit 1 ;;
+esac
+EOF
+    rc=0; bash "$script" _ "$ABPOOL_REPO" identity "$$" >"$outdir/out" 2>&1 || rc=$?
+    assert_eq "0" "$rc" "caller-mode resolve body exit" || return 1
+    rc=0; bash "$script" _ "$ABPOOL_REPO" precedence "$$" >"$outdir/out2" 2>&1 || rc=$?
+    assert_eq "0" "$rc" "precedence body exit" || return 1
+    # Parse the pipe-delimited KV lines and assert in the MAIN shell.
+    got_ppid="$(grep '^PPID|' "$outdir/out" | cut -d'|' -f2-)"
+    got_pid="$(grep '^PID|' "$outdir/out" | cut -d'|' -f2-)"
+    got_comm="$(grep '^COMM|' "$outdir/out" | cut -d'|' -f2-)"
+    want_comm="$(grep '^WANT_COMM|' "$outdir/out" | cut -d'|' -f2-)"
+    got_st="$(grep '^ST|' "$outdir/out" | cut -d'|' -f2-)"
+    want_st="$(grep '^WANT_ST|' "$outdir/out" | cut -d'|' -f2-)"
+    got_cwd="$(grep '^CWD|' "$outdir/out" | cut -d'|' -f2-)"
+    want_cwd="$(grep '^WANT_CWD|' "$outdir/out" | cut -d'|' -f2-)"
+    got_hook="$(grep '^HOOKPID|' "$outdir/out2" | cut -d'|' -f2-)"
+    assert_eq "$got_ppid" "$got_pid" "caller-mode owner is the child's \$PPID" || return 1
+    [[ "$got_pid" != "0" ]] || { _fail "caller-mode owner PID must not be 0"; return 1; }
+    assert_eq "$want_comm" "$got_comm" "comm matches /proc/\$PPID/comm" || return 1
+    [[ -n "$got_st" ]] || { _fail "caller-mode starttime must be non-empty"; return 1; }
+    assert_eq "$want_st" "$got_st" "starttime matches _pool_get_starttime" || return 1
+    # cwd: compare like-for-like; both empty (unreadable) counts as a pass.
+    if [[ -n "$want_cwd" || -n "$got_cwd" ]]; then
+        assert_eq "$want_cwd" "$got_cwd" "cwd matches readlink /proc/\$PPID/cwd" || return 1
+    fi
+    assert_eq "$$" "$got_hook" "TEST MODE hook outranks caller mode" || return 1
+}
+
 # --- pool_reap_orphan_dirs removes unleased orphan dirs + skips leased (F1) ---------
 # Pure-function body against the shared temp pool: (1) an unleased orphan dir is removed
 # and counted; (2) a leased dir is skipped; (3) a 2nd call finds nothing (idempotent).
