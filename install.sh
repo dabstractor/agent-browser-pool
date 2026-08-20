@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# install.sh — install agent-browser-pool (PRD §2.1, §2.17).
+# install.sh — install agent-browser-pool (PRD §2.1, §2.18).
 #
 # Three benign things — NO PATH interception, so installing CANNOT disrupt running
 # agents or other agent-browser users (lane selection is by caller identity, never
@@ -12,7 +12,7 @@
 # sessions in ANY project discover it (default: the skill stays project-scoped, discovered
 # only when working inside this repo).
 #
-# Mode A (PRD §2.15): this script's success output IS the install documentation.
+# Mode A (PRD §2.16): this script's success output IS the install documentation.
 set -euo pipefail
 
 # --- resolve REPO dir (symlink-safe; same pattern as the prior installer) ---

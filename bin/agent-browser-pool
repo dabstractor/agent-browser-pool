@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # bin/agent-browser-pool — SOLE entry point for the agent-browser-pool: pool verbs + driving
-# router (PRD §2.1, §2.4, §2.12). Resolves its own real path (symlink-safe) so it can source
+# router (PRD §2.1, §2.4, §2.13). Resolves its own real path (symlink-safe) so it can source
 # the shared lib regardless of where it is symlinked (~/.local/bin/agent-browser-pool
 # → repo/bin/agent-browser-pool at install time). Pool verbs (status|reap|release|doctor|help)
 # dispatch to pool_admin_*; every other token is a DRIVING command routed to pool_wrapper_main,

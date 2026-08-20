@@ -245,7 +245,7 @@ pool_state_init() {
 
 # pool_check_btrfs — refuse a non-btrfs ephemeral root unless the escape hatch is set.
 #
-# Enforces PRD §2.7 and §2.14: a non-btrfs filesystem at POOL_EPHEMERAL_ROOT would
+# Enforces PRD §2.7 and §2.15: a non-btrfs filesystem at POOL_EPHEMERAL_ROOT would
 # silently trigger a catastrophic 4.8 GB real copy per acquire (the CoW `cp
 # --reflink=always` would fall back to a full copy). Refuse loudly unless
 # POOL_ALLOW_SLOW_COPY=1 (normalized from AGENT_CHROME_ALLOW_SLOW_COPY by S2).
@@ -290,7 +290,7 @@ pool_check_btrfs() {
 # pool_check_master — verify the master template exists and is populated.
 #
 # Enforces PRD §2.7 (the master is read-only, created once, never launched/mutated)
-# and §2.14 (a missing master must fail with the EXACT cp command to bootstrap it).
+# and §2.15 (a missing master must fail with the EXACT cp command to bootstrap it).
 #
 # Tests existence (-d) and non-emptiness (ls -A) ONLY — do NOT stat/du the 4.8 GB
 # master (slow). "Non-empty" is sufficient to catch a stray `mkdir` that created
@@ -317,7 +317,7 @@ pool_check_master() {
 # _pool_atomic_write FILEPATH [CONTENT]
 #   Write CONTENT to FILEPATH atomically: write to FILEPATH.tmp (same directory
 #   → same filesystem → atomic rename) then `mv` it over FILEPATH. A concurrent
-#   reader sees old-or-new, never a half-written file (PRD §2.19, key_findings
+#   reader sees old-or-new, never a half-written file (PRD §2.20, key_findings
 #   FINDING 7).
 #
 #   GOTCHA (same-FS atomicity): rename(2) is atomic ONLY when src and dst are on
@@ -394,7 +394,7 @@ _pool_now() {
 # _pool_age_str TIMESTAMP
 #   Echo a human-readable age for TIMESTAMP (epoch seconds): largest whole unit
 #   — Ns (<60), Nm (<3600), Nh (<86400), Nd (else). A future/negative diff
-#   (clock skew, bogus ts) clamps to "0s". Used by admin `status` (PRD §2.12,
+#   (clock skew, bogus ts) clamps to "0s". Used by admin `status` (PRD §2.13,
 #   M7.T1.S1).
 #
 #   GOTCHA (set -e + arithmetic): a bare `(( expr ))` as a STATEMENT returns
@@ -431,7 +431,7 @@ _pool_age_str() {
 # (PRD §1.1 / §2.4 step 1). Populates the four POOL_OWNER_* globals consumed by
 # every downstream lease query (M3.T2.S1 find_my_lease) and the wrapper
 # lifecycle (M6.T3 passthrough gate). Also implements the TEST-HOOK overrides
-# of PRD §2.18 / key_findings FINDING 8 (AGENT_BROWSER_POOL_OWNER_PID +
+# of PRD §2.19 / key_findings FINDING 8 (AGENT_BROWSER_POOL_OWNER_PID +
 # _OWNER_STARTTIME) so the test harness (M9.T1.S1) can simulate distinct agents
 # from distinct subshell PIDs WITHOUT real pi ancestor processes.
 #
@@ -453,9 +453,9 @@ _pool_get_starttime() {
     #     via the _pool_owner_starttime() wrapper below.
     #   - is_owner_alive() (P1.M2.T2.S1) → reads a lease owner's CURRENT starttime
     #     and compares to the stored value; a mismatch means the PID was recycled
-    #     (PRD §2.8, §2.19). The (pid, starttime) pair is the anti-recycling key.
+    #     (PRD §2.8, §2.20). The (pid, starttime) pair is the anti-recycling key.
     #
-    # WHY THE PRD §2.19 "NF-19" FORMULA IS WRONG (key_findings FINDING 1,
+    # WHY THE PRD §2.20 "NF-19" FORMULA IS WRONG (key_findings FINDING 1,
     # system_context §6.1, host-verified 2026-07-12):
     #   /proc/<pid>/stat field 2 is comm, wrapped in parens:  "<pid> (<comm>) <state> ..."
     #   comm MAY contain spaces (e.g. "(Chrome Helper)"), shifting every later field,
@@ -516,9 +516,9 @@ _pool_owner_starttime() {
 pool_owner_resolve() {
     # Resolve the owning harness process and populate POOL_OWNER_* globals.
     # Implements PRD §2.4 step 1 (resolve OWNER), §1.1 (walk ppid to first ancestor whose comm is a recognized harness),
-    # and the test-hook overrides of PRD §2.18 / key_findings FINDING 8.
+    # and the test-hook overrides of PRD §2.19 / key_findings FINDING 8.
     #
-    # TEST-HOOK env vars (TEST-ONLY, PRD §2.18 / key_findings FINDING 8 — narrowly
+    # TEST-HOOK env vars (TEST-ONLY, PRD §2.19 / key_findings FINDING 8 — narrowly
     # scoped, NOT exposed in user-facing docs):
     #   AGENT_BROWSER_POOL_OWNER_PID        — simulate a specific owner PID.
     #   AGENT_BROWSER_POOL_OWNER_STARTTIME  — simulate the owner starttime.
@@ -624,7 +624,7 @@ pool_owner_resolve() {
 # unverifiable). NEVER fatal — never calls pool_die, never writes, never logs
 # (leaf predicate; callers log the decision).
 #
-# WHY THREE CHECKS (PRD §2.5 owner-liveness-driven release, §2.14 failure modes,
+# WHY THREE CHECKS (PRD §2.5 owner-liveness-driven release, §2.15 failure modes,
 # key_findings FINDING 1, research note §2/§4):
 #   PID recycling is real: after a pi crash, the kernel hands that PID number to
 #   an UNRELATED process. pid alone is NOT identity. The (pid, comm, starttime)
@@ -1032,7 +1032,7 @@ pool_lanes_list() {
 # returns 1 on missing/corrupt (S2 contract); `|| continue` keeps the scan alive
 # under set -e (one bad lane must never break the hot wrapper path).
 # GOTCHA — pool_owner_alive is passed the LEASE's stored starttime + comm so it can
-# compare them against the LIVE process → defeats PID recycling (PRD §2.8/§2.14).
+# compare them against the LIVE process → defeats PID recycling (PRD §2.8/§2.15).
 # GOTCHA — POOL_OWNER_PID == "0" (passthrough) passes the guard; the loop finds no
 # real pid==0 lease → return 1 (correct). Unset/empty/non-numeric → return 1 fast.
 # GOTCHA — CALLERS under set -e MUST guard: `if n="$(pool_lease_find_mine)"; then …`.
@@ -1126,7 +1126,7 @@ pool_find_free_lane() {
 # Lease management — query operations (P1.M3.T2.S3)
 # =============================================================================
 # Per-lane staleness verdict for the lazy reaper. Implements PRD §2.5 (release is
-# owner-liveness-driven) + §2.14 (the three stale failure modes: pid dead / comm!=pi
+# owner-liveness-driven) + §2.15 (the three stale failure modes: pid dead / comm!=pi
 # / starttime mismatch) + §2.10 (reaper is lazy, on acquire). Reads a lane's lease,
 # extracts its owner.{pid,starttime,comm} triple, and delegates the identity check to
 # pool_owner_alive (M2.T2.S1). Consumed by the reaper (M5.T3.S1) and the acquire flock
@@ -1214,7 +1214,7 @@ pool_lane_is_stale() {
 # Lane lifecycle — master copy & profile hygiene (P1.M4.T1.S1)
 # =============================================================================
 # Materialize one ephemeral Chrome profile from the read-only master template.
-# Implements PRD §2.7 (Copy / master hygiene) + §2.19 (reflink detection: cp
+# Implements PRD §2.7 (Copy / master hygiene) + §2.20 (reflink detection: cp
 # --reflink=always; on failure refuse unless AGENT_CHROME_ALLOW_SLOW_COPY=1) and
 # removes the three stale Chrome single-instance locks the template carries. Consumed
 # by the acquire POST-LOCK boot (M5.T1.S2: copy → port → launch → connect → update
@@ -1275,7 +1275,7 @@ pool_copy_master() {
     [[ "$target_dir" == /* ]] \
         || pool_die "pool_copy_master: target_dir must be absolute: $target_dir"
 
-    # Pre-check the master (PRD §2.14: die with the exact bootstrap cp command if
+    # Pre-check the master (PRD §2.15: die with the exact bootstrap cp command if
     # missing/empty). pool_check_master is M1.T1.S3 (LANDED @266): rc 0 or pool_die.
     pool_check_master
 
@@ -1742,7 +1742,7 @@ pool_cdp_is_ours() {
 # Poll Chrome's CDP HTTP endpoint (http://127.0.0.1:<PORT>/json/version) until it answers
 # (HTTP 200 → curl -sf exits 0) or the budget is exhausted. Returns 0 if CDP is ready;
 # returns 1 on timeout AFTER killing the Chrome process group (so a half-booted Chrome
-# does not leak). NON-FATAL: never pool_die — the caller (M5.T1.S2) owns the PRD §2.14
+# does not leak). NON-FATAL: never pool_die — the caller (M5.T1.S2) owns the PRD §2.15
 # "retry launch once; then fail, drop lane" policy.
 #
 # IDENTITY VERIFICATION (BUG-1 fix): when USER_DATA_DIR + EXPECTED_PID are BOTH supplied,
@@ -1767,7 +1767,7 @@ pool_cdp_is_ours() {
 #   Caller MUST guard under set -e: `if pool_wait_cdp "$port"; then …; else <retry path>; fi`.
 #
 # GOTCHA — 60×0.5s=30s (research §7): CONTRACT 3b ("Loop up to 60 times (30s total)") +
-#   external_deps §2.2 (`seq 1 60`) agree; PRD §2.4 step 3h / §2.14 "15s" is a stale
+#   external_deps §2.2 (`seq 1 60`) agree; PRD §2.4 step 3h / §2.15 "15s" is a stale
 #   summary. We use a bash (( )) counter (no seq fork). The budget is ONE named constant.
 # GOTCHA — curl -sf exit codes: connection-refused (Chrome still booting) = rc 7 → keep
 #   looping; HTTP 200 = rc 0 → ready. No --max-time needed (refused is instant); the bare
@@ -1833,7 +1833,7 @@ pool_wait_cdp() {
 # to a pooled Chrome (connect), check that binding SIDE-EFFECT-FREE (connected), and tear
 # down a Chrome's whole process tree idempotently (kill). Implements PRD §2.4 step 3i
 # (CONNECT), step 4 (ENSURE CONNECTED — stray-free), §2.5/§2.10 (release = kill pgroup),
-# §2.19 (kill -- -<pgid>), key_findings FINDING 6. Consumed by the acquire post-lock boot
+# §2.20 (kill -- -<pgid>), key_findings FINDING 6. Consumed by the acquire post-lock boot
 # (M5.T1.S2), ensure_connected (M5.T1.S3), release (M5.T2.S1), and the reaper (M5.T3.*).
 
 # pool_daemon_connect SESSION PORT
@@ -1900,7 +1900,7 @@ pool_daemon_connect() {
 #   1. SESSION known to the daemon? `--json session list` is READ-ONLY (never launches);
 #      absent ⇒ fresh/restarted daemon ⇒ return 1.
 #   2. pooled Chrome on PORT alive? `curl -sf /json/version` never launches; dead ⇒ return 1
-#      (PRD §2.14 Chrome crash — the primary failure).
+#      (PRD §2.15 Chrome crash — the primary failure).
 #   3. both pass ⇒ return 0.
 #
 # WHY THE SIGNATURE ADDS PORT: the only reliable, stray-free signal for "connected" is the
@@ -1976,7 +1976,7 @@ pool_daemon_connected() {
 #   This IS the idempotency mechanism (no kill -0 pre-check). HOST-VERIFIED (research §5).
 # GOTCHA — `kill -- -<pgid>` needs the `--` (pgid is positive but the arg starts with '-').
 #   The negative-pid form signals the whole process group (renderer/GPU/utility children).
-#   PRD §2.19 + key_findings FINDING 6.
+#   PRD §2.20 + key_findings FINDING 6.
 # GOTCHA — numeric guards: a PROVISIONAL lease writes chrome_pid=0, chrome_pgid=0 (PRD §2.4
 #   step 3d). Guard `[[ =~ ^[0-9]+$ && -gt 0 ]]` so pool_chrome_kill 0 0 is a safe no-op.
 # GOTCHA — SIGTERM → sleep 0.5 → SIGKILL escalation is sound (research §5): Chrome responds
@@ -2018,7 +2018,7 @@ pool_chrome_kill() {
 # The flock-guarded acquire critical section: REAP-STALE + REUSE-ORPHAN + CHOOSE-N +
 # CLAIM (PRD §2.4 step 3a–3d). Implements key_findings FINDING 2 (claim under the SHORT
 # flock, boot Chrome AFTER releasing — no launch/copy/wait inside the lock) + §2.9
-# (rc 1 ⇒ exhaustion → M5.T4) + §2.10 (lazy reaper on acquire) + §2.19 (atomic lease
+# (rc 1 ⇒ exhaustion → M5.T4) + §2.10 (lazy reaper on acquire) + §2.20 (atomic lease
 # writes). Consumed by the acquire post-lock boot (M5.T1.S2) and the exhaustion loop
 # (M5.T4). The private release kernel (_pool_release_lane_internals) is ALSO composed by
 # M5.T2.S1's public pool_release_lane and M5.T3.S1's reap (shared teardown path).
@@ -2297,7 +2297,7 @@ pool_acquire_locked() {
 # Turn a PROVISIONALLY-claimed lane (port=0, from pool_acquire_locked / M5.T1.S1) into a
 # FULLY-provisioned lane: copy master → pick port → launch Chrome → wait CDP → bind daemon
 # → finalize lease. PRD §2.4 step 3e–3j, run OUTSIDE the flock (key_findings FINDING 2:
-# concurrent boots). PRD §2.14 failure handling: CDP-timeout → retry launch once → drop
+# concurrent boots). PRD §2.15 failure handling: CDP-timeout → retry launch once → drop
 # lane. Every recoverable failure cleans up via _pool_release_lane_internals (M5.T1.S1)
 # and returns 1. Consumed by the wrapper lifecycle (M6.T3.S1) after pool_acquire_locked
 # returns a provisional lane. The launch+wait sub-flow (_pool_launch_and_verify) is ALSO
@@ -2332,7 +2332,7 @@ _pool_boot_write_chrome_ids() {
 # The launch + CDP-wait + RETRY-ONCE sub-flow with PORT RE-PICK (Issue 2 / S2). Returns 0
 # if Chrome's CDP endpoint answers — possibly after re-picking a DIFFERENT port on a launch
 # or CDP failure; returns 1 if all retries (2 same-port + 1 re-picked-port) are exhausted.
-# PRD §2.14 "Chrome slow to boot → retry launch once; then fail, drop lane", generalized by
+# PRD §2.15 "Chrome slow to boot → retry launch once; then fail, drop lane", generalized by
 # Issue 2 to re-pick a port then retry once. Composed by pool_boot_lane (step c+d); pool_boot_lane
 # re-reads the lease port after a successful call so a re-picked port flows to the daemon connect.
 #
@@ -2340,7 +2340,7 @@ _pool_boot_write_chrome_ids() {
 #   1. Attempt 1 (same port): `if pool_chrome_launch "$port" …; then` — rc 1 (EADDRINUSE,
 #      detected by S1) → fall through to the re-pick (step 5). rc 0 → write_chrome_ids +
 #      pool_wait_cdp "$port": rc 0 → return 0; rc 1 (Chrome pgroup already killed) → attempt 2.
-#   2. Attempt 2 (same-port retry — PRD §2.14): `if pool_chrome_launch "$port" …; then` —
+#   2. Attempt 2 (same-port retry — PRD §2.15): `if pool_chrome_launch "$port" …; then` —
 #      rc 1 → fall through to the re-pick. rc 0 → write_chrome_ids + pool_wait_cdp "$port":
 #      rc 0 → return 0; rc 1 → fall through to the re-pick (both same-port attempts failed).
 #   3. (Re-pick trigger paths: attempt-1 launch rc 1, attempt-2 launch rc 1, OR both CDP
@@ -2389,7 +2389,7 @@ _pool_launch_and_verify() {
             return 0
         fi
         # pool_wait_cdp rc 1 ⇒ Chrome pgroup ALREADY KILLED (research §1.3). Retry once on
-        # the SAME port (PRD §2.14) before re-picking a different port.
+        # the SAME port (PRD §2.15) before re-picking a different port.
         # PRESERVE attempt 1's diagnostic log (Issue #6): pool_chrome_launch opens
         # $POOL_STATE_DIR/chrome-<lane>.log with `>` (truncate). On retry that would DESTROY
         # the first Chrome's stderr — exactly the output most useful for diagnosing why the
@@ -2401,7 +2401,7 @@ _pool_launch_and_verify() {
                     "$POOL_STATE_DIR/chrome-$lane.attempt1.log" 2>/dev/null || true
             _pool_log "_pool_launch_and_verify: preserved attempt-1 log: $POOL_STATE_DIR/chrome-$lane.attempt1.log"
         fi
-        # --- Attempt 2 (same-port retry — PRD §2.14) ---
+        # --- Attempt 2 (same-port retry — PRD §2.15) ---
         if pool_chrome_launch "$port" "$ephemeral_dir" "$lane"; then
             _pool_boot_write_chrome_ids "$lane"                # 2nd chrome-ids → lease
             if pool_wait_cdp "$port" "$ephemeral_dir" "${POOL_CHROME_PID:-}"; then
@@ -2503,7 +2503,7 @@ pool_boot_lane() {
     # calls see it claimed (research §4). pool_lease_update splices the value as raw JSON.
     pool_lease_update "$lane" port "$port"
 
-    # --- c+d. LAUNCH + WAIT (retry once on CDP timeout) (PRD §2.4 step 3g/3h / §2.14). ---
+    # --- c+d. LAUNCH + WAIT (retry once on CDP timeout) (PRD §2.4 step 3g/3h / §2.15). ---
     #     _pool_launch_and_verify returns 0 (CDP ready — possibly after a port re-pick — Issue 2/S2)
     #     or 1 (all retries exhausted; Chrome killed). On failure, clean up + return 1.
     if ! _pool_launch_and_verify "$port" "$ephemeral_dir" "$lane"; then
@@ -2547,7 +2547,7 @@ pool_boot_lane() {
 # PRD §2.4 step 4 (ENSURE CONNECTED) — the per-invocation self-heal. Given an
 # ALREADY-BOOTED lane (port>0, from pool_boot_lane / S2 or a reuse-orphan adoption / S1),
 # verify it is STILL drivable; if not, RECONNECT (re-bind the daemon) or RELAUNCH (restart
-# Chrome on the SAME dir+port, keeping the profile — PRD §2.14 "Chrome crash mid-task").
+# Chrome on the SAME dir+port, keeping the profile — PRD §2.15 "Chrome crash mid-task").
 # Consumed by the wrapper lifecycle step 4 (M6.T3.S1) on EVERY DRIVING call.
 #
 # Returns 0 if connected (was-already OR reconnected OR relaunched); 1 on failure. NEVER
@@ -2678,7 +2678,7 @@ pool_ensure_connected() {
         fi
     fi
 
-    # --- c. Chrome DEAD → RELAUNCH on the SAME dir+port (PRD §2.14 "Chrome crash mid-task"). ---
+    # --- c. Chrome DEAD → RELAUNCH on the SAME dir+port (PRD §2.15 "Chrome crash mid-task"). ---
     # Singleton cleanup BEFORE launch (research §3 / pool_copy_master pattern): defeats the
     # PID-recycle false-alive that would make Chrome exit without binding. Safe: curl just
     # proved the chrome is dead. SingletonSocket is AF_UNIX — rm -f handles all three.
@@ -2718,7 +2718,7 @@ pool_ensure_connected() {
         return 1
     fi
 
-    # Relaunch succeeded: a fresh chrome on the same port + dir, profile kept (PRD §2.14).
+    # Relaunch succeeded: a fresh chrome on the same port + dir, profile kept (PRD §2.15).
     pool_lease_update "$lane" connected true
     pool_lease_update "$lane" last_seen_at "$now"
     _pool_log "pool_ensure_connected: lane $lane relaunched (new pid=${POOL_CHROME_PID:-0}, port=$port)"
@@ -2733,7 +2733,7 @@ pool_ensure_connected() {
 # the ephemeral dir, delete the lease. Consumed by the reaper (M5.T3 reap_stale), the admin
 # CLI (M7.T3 release [<N>|all]), and exhaustion force-reap (M5.T4). NOT used by acquire's
 # in-lock REAP-STALE (that calls the private kernel directly — the close subprocess is
-# forbidden under the short acquire flock, PRD §2.19).
+# forbidden under the short acquire flock, PRD §2.20).
 #
 # DESIGN — DELEGATE (M5.T1.S1 contract): the completed acquire PRP states verbatim:
 #   "M5.T2.S1's public pool_release_lane() will COMPOSE _pool_release_lane_internals
@@ -2836,11 +2836,11 @@ pool_release_lane() {
 # DESIGN — the acquire-vs-reaper SPLIT (research §1): the LANDED acquire critical section
 # (_pool_acquire_critical_section @ ~line 1966) inlines its OWN reap loop that calls the
 # PRIVATE _pool_release_lane_internals directly — because the daemon close subprocess is
-# FORBIDDEN under the short acquire flock (PRD §2.19 / key_findings FINDING 2). This
+# FORBIDDEN under the short acquire flock (PRD §2.20 / key_findings FINDING 2). This
 # standalone reaper runs OUTSIDE any flock and uses the PUBLIC pool_release_lane (which
 # DOES run close). The CONTRACT's "Consumed by acquire step 3a" is legacy design intent;
 # the REAL consumer is the on-demand admin reap command (M7.T2 `agent-browser-pool reap`,
-# PRD §2.10/§2.12), with exhaustion force-reap (M5.T4) as a possible future caller.
+# PRD §2.10/§2.13), with exhaustion force-reap (M5.T4) as a possible future caller.
 #
 # DELEGATE (do NOT duplicate — research §2/§4): the staleness verdict comes from
 # pool_lane_is_stale (M3.T2.S3); the teardown from pool_release_lane (M5.T2.S1). Do NOT
@@ -3234,7 +3234,7 @@ pool_wait_for_lane() {
 # =============================================================================
 # Wrapper shim — arg normalization (P1.M6.T1.S2)
 # =============================================================================
-# PRD §2.4 / §2.15 transparency normalizers. Rewrite an agent's DRIVING argv so the
+# PRD §2.4 / §2.16 transparency normalizers. Rewrite an agent's DRIVING argv so the
 # pool — not the agent — controls connection & teardown scope. Called by the wrapper
 # lifecycle (M6.T3.S1) AFTER the bin dispatcher routed a non-pool-verb token to driving, and the lane is
 # acquired, BEFORE M6.T2.S1 strips --session / forces AGENT_BROWSER_SESSION.
@@ -3247,7 +3247,7 @@ pool_wait_for_lane() {
 # pool_normalize_close [--] ARGS...
 #
 # If the command is 'close', strip EVERY standalone '--all' token (a raw --all would nuke
-# ALL daemon sessions incl. other agents' lanes — PRD §2.4/§2.15). All other tokens
+# ALL daemon sessions incl. other agents' lanes — PRD §2.4/§2.16). All other tokens
 # (--json, --session <X>, the literal 'close', extra args) are PRESERVED in order. If the
 # command is NOT 'close', POOL_NORM_ARGS = args UNCHANGED (--all is left alone: it may be a
 # legitimate token for another command, e.g. `find role x --all`).
@@ -3342,7 +3342,7 @@ pool_normalize_close() {
 # GOTCHA — bare `connect` (no positional) is a RUNTIME ERROR in the real binary (exit 1,
 #   "<port|url> required"). After this strip the result is bare `connect`. PRD §2.4 step 4
 #   (pool_ensure_connected) ALREADY binds the lane's daemon — so pool_wrapper_main (M6.T3.S1)
-#   must NOT naively exec a bare connect (the agent would see the error → breaks §2.15
+#   must NOT naively exec a bare connect (the agent would see the error → breaks §2.16
 #   transparency). RESOLVED (Issue #1): pool_wrapper_main detects the bare connect (via
 #   _pool_clean_args_is_bare_connect) and short-circuits to a success no-op. This function
 #   strips the arg per contract; the bare-result handling is pool_wrapper_main step k.
@@ -3411,7 +3411,7 @@ pool_normalize_connect() {
 # =============================================================================
 # Wrapper shim — session override (P1.M6.T2.S1)
 # =============================================================================
-# PRD §2.4 step 5 / §2.15 transparency. Neutralize an agent's attempt to bypass its
+# PRD §2.4 step 5 / §2.16 transparency. Neutralize an agent's attempt to bypass its
 # lane via the upstream-skill-taught --session <X> flag or an inherited
 # AGENT_BROWSER_SESSION=<X> env var. Called by the wrapper lifecycle (M6.T3.S1) AFTER
 # the bin dispatcher routed a non-pool-verb token to driving, AFTER M6.T1.S2's close/connect normalize,
@@ -3540,11 +3540,11 @@ pool_force_session() {
 
 # _pool_preflight_real_bin
 #
-# PRD §2.16 enforcement (b): the real agent-browser binary ($POOL_REAL_BIN, frozen by
+# PRD §2.17 enforcement (b): the real agent-browser binary ($POOL_REAL_BIN, frozen by
 # pool_config_init) is a HARD runtime dependency — every driving call exec's it. Fail FAST
 # with an actionable message if it is
 # missing or non-executable, instead of booting a lane we can't drive (or exec'ing a bad
-# path). The per-invocation counterpart to `doctor`'s [binary] check (§2.16 (a)).
+# path). The per-invocation counterpart to `doctor`'s [binary] check (§2.17 (a)).
 #
 # PRECONDITION: pool_config_init has frozen $POOL_REAL_BIN (called as the tail of step a in
 #   pool_wrapper_main, BEFORE owner/lane work — so it guards the driving path).
@@ -3619,7 +3619,7 @@ _pool_preflight_real_bin() {
 #   (step h) already bound the daemon, so exec'ing
 #   `agent-browser --session abpool-<N> connect` is a harmless no-op connect.
 # GOTCHA — close --all interception: pool_normalize_close sets POOL_CLOSE_ALL_SEEN=1 iff it
-#   stripped ≥1 --all from a close cmd. Log it for observability (PRD §2.15).
+#   stripped ≥1 --all from a close cmd. Log it for observability (PRD §2.16).
 # PRECONDITION: none (pool_config_init + pool_state_init are step a — the first thing run).
 # CONSUMES: POOL_REAL_BIN, POOL_OWNER_PID, POOL_WAIT, POOL_NORM_ARGS,
 #   POOL_CLOSE_ALL_SEEN, POOL_CLEAN_ARGS (all set by the helpers above).
@@ -3633,7 +3633,7 @@ pool_wrapper_main() {
     # state idempotently mkdirs lanes/ + touches acquire.lock.
     pool_config_init
     pool_state_init
-    # preflight (PRD §2.16b): real agent-browser binary must exist + be executable, else
+    # preflight (PRD §2.17b): real agent-browser binary must exist + be executable, else
     # fail fast on EVERY invocation (driving) before any lane/owner work.
     _pool_preflight_real_bin
 
@@ -3692,7 +3692,7 @@ pool_wrapper_main() {
     pool_strip_session_args "${POOL_NORM_ARGS[@]}"
     pool_force_session "$N" || pool_die "agent-browser-pool: bad lane '$N' for session force"
 
-    # Observability: log if we scoped a close --all (PRD §2.15: "close --all → cannot harm peers").
+    # Observability: log if we scoped a close --all (PRD §2.16: "close --all → cannot harm peers").
     if [[ "${POOL_CLOSE_ALL_SEEN:-0}" == "1" ]]; then
         _pool_log "pool_wrapper_main: intercepted close --all → scoped to lane $N"
     fi
@@ -3700,7 +3700,7 @@ pool_wrapper_main() {
     # --- (close) mark the lease disconnected so the NEXT call rebinds (Issue #3) ----
     # close detaches the daemon↔Chrome binding, but the session LINGERS in `session list`
     # and Chrome stays alive → pool_daemon_connected would return 0 and the next
-    # pool_ensure_connected would SKIP the rebind (PRD §2.15 transparency risk). Flipping
+    # pool_ensure_connected would SKIP the rebind (PRD §2.16 transparency risk). Flipping
     # the lease connected=false here records the detach durably (across the two separate
     # agent-browser invocations) so S2's pool_ensure_connected takes the reconnect branch.
     # MUST run before exec (exec replaces the process — nothing runs after).
@@ -3708,7 +3708,7 @@ pool_wrapper_main() {
         # Defensive SUBSHELL: pool_lease_update pool_die()'s on a corrupt/missing lease.
         # `|| true` does NOT catch pool_die (it `exit 1`s, not `return 1`) — a subshell
         # contains the exit so a (very unlikely — the lease was read at step h) corruption
-        # cannot abort the close (PRD §2.15: close must always run). 2>/dev/null keeps the
+        # cannot abort the close (PRD §2.16: close must always run). 2>/dev/null keeps the
         # agent's output clean; _pool_log records the rare miss.
         if ! ( pool_lease_update "$N" connected false ) 2>/dev/null; then
             _pool_log "pool_wrapper_main: close: could not mark lane $N connected=false (non-fatal; proceeding to exec)"
@@ -3723,13 +3723,13 @@ pool_wrapper_main() {
     # Process replacement (PID stays; exported AGENT_BROWSER_SESSION inherited). UNREACHABLE code
     # after this line. The agent's command now runs against its locked, booted, connected lane.
     #
-    # GOTCHA — BARE-CONNECT SHORT-CIRCUIT (Issue #1 / PRD §2.15 transparency):
+    # GOTCHA — BARE-CONNECT SHORT-CIRCUIT (Issue #1 / PRD §2.16 transparency):
     #   pool_normalize_connect (step i) strips the agent's `<port|url>` positional because the
     #   pool owns the real connection (pool_ensure_connected, step h, already bound the lane's
     #   daemon). That leaves a BARE `connect` (plus any flags like --json) in POOL_CLEAN_ARGS.
     #   A bare `connect` is a RUNTIME ERROR in the real binary ("<port|url> required", exit 1)
     #   — the agent typed a skill-taught `connect <port>` and would see a spurious failure even
-    #   though the lane IS connected. PRD §2.15: the agent must never see a no-idea failure.
+    #   though the lane IS connected. PRD §2.16: the agent must never see a no-idea failure.
     #   So when the cleaned argv is a bare connect (command `connect`, no positional remaining),
     #   short-circuit to a SUCCESSFUL no-op (the lane's daemon is already bound): confirm on
     #   stderr, exit 0. We do NOT exec the erroring bare connect.
@@ -3765,7 +3765,7 @@ pool_wrapper_main() {
 # Why this exists: pool_normalize_connect strips the agent's `<port|url>` positional (the
 # pool owns the connection). That leaves a bare `connect`, which the real binary rejects
 # ("<port|url> required", exit 1). This predicate lets pool_wrapper_main short-circuit that
-# erroring exec into a successful no-op (PRD §2.15 transparency; Issue #1).
+# erroring exec into a successful no-op (PRD §2.16 transparency; Issue #1).
 #
 # LOGIC (mirrors pool_normalize_connect / the shared flag-vs-command scan pattern):
 #   a. Walk $@; the first NON-flag token (skipping --session/--session=/--*/-*) is the COMMAND.
@@ -3824,7 +3824,7 @@ _pool_clean_args_is_bare_connect() {
 # pool_ensure_connected, S2, rebinds the daemon instead of trusting the lingering
 # session-list entry). close detaches the binding but the session lingers in `session
 # list` + Chrome stays alive → pool_daemon_connected would otherwise return 0 and skip
-# the rebind (PRD §2.15 transparency risk).
+# the rebind (PRD §2.16 transparency risk).
 #
 # LOGIC: walk $@; the first NON-flag token is the COMMAND. Return 0 iff it is `close`.
 # (Unlike _pool_clean_args_is_bare_connect we do NOT scan PAST the command — close
@@ -3864,11 +3864,11 @@ _pool_clean_args_is_close() {
 # pool_admin_status
 #
 # Print a READ-ONLY lane table to stdout for `agent-browser-pool status`
-# (PRD §1.5 / §2.12). No input. Iterates EVERY lane (pool_lanes_list), reads each
+# (PRD §1.5 / §2.13). No input. Iterates EVERY lane (pool_lanes_list), reads each
 # lease (pool_lease_read), computes a human age from acquired_at (_pool_age_str),
 # and derives a STATE verdict (pool_lane_is_stale + the `connected` field).
 #
-# OUTPUT COLUMNS (PRD §2.12 order), one space-separated aligned row per lane:
+# OUTPUT COLUMNS (PRD §2.13 order), one space-separated aligned row per lane:
 #   LANE       lane number (int)                 — from pool_lanes_list
 #   PORT       Chrome DevTools port (int)        — .port
 #   SESSION    AGENT_BROWSER_SESSION string      — .session   (truncated 16)
@@ -4009,7 +4009,7 @@ pool_admin_status() {
 # ============================================================================
 # pool_admin_reap
 #
-# PRD §2.12 `reap` / §2.10 — the USER-FACING reap report for
+# PRD §2.13 `reap` / §2.10 — the USER-FACING reap report for
 # `agent-browser-pool reap`. No input. Calls the LANDED pool_reap_stale
 # (M5.T3.S1 — the lazy reaper: scans every lane, releases every stale one,
 # echoes the reaped count), CAPTURES that count, and prints a human report to
@@ -4098,7 +4098,7 @@ pool_admin_reap() {
 # ============================================================================
 # pool_admin_release [TARGET]
 #
-# PRD §2.12 `release [<N>|all]` / §2.5 "Explicit release" — the USER-FACING
+# PRD §2.13 `release [<N>|all]` / §2.5 "Explicit release" — the USER-FACING
 # release command. Takes ONE optional argument TARGET (the string "all", a lane
 # number N, or empty/invalid), CLASSIFIES it, and explicitly tears down the named
 # lane(s) by delegating to the LANDED pool_release_lane (M5.T2.S1 — kill pgroup +
@@ -4252,8 +4252,8 @@ pool_admin_release() {
 # ============================================================================
 # pool_admin_doctor
 #
-# PRD §2.12 `doctor` ("reconcile leases vs live Chromes vs dirs; report leaks") +
-# §2.16 ("verify all dependencies present at runtime"). The USER-FACING diagnostic
+# PRD §2.13 `doctor` ("reconcile leases vs live Chromes vs dirs; report leaks") +
+# §2.17 ("verify all dependencies present at runtime"). The USER-FACING diagnostic
 # for `agent-browser-pool doctor`. NO input. READ-ONLY: probes six subsystems, prints
 # a sectioned report, returns rc 0/1. Changes NOTHING on disk (unlike reap/release).
 #
@@ -4405,7 +4405,7 @@ pool_admin_doctor() {
         printf '  %-22s MISSING\n' "chrome ($chrome_label)"
         fail=$((fail+1))
     fi
-    # notify-send — OPTIONAL (PRD §2.16; _pool_alert guards it lib/pool.sh:2824).
+    # notify-send — OPTIONAL (PRD §2.17; _pool_alert guards it lib/pool.sh:2824).
     # Absence is NOT a FAIL (and NOT a WARN) — it is genuinely fine to lack it.
     if command -v notify-send >/dev/null 2>&1; then
         printf '  %-22s OK\n' "notify-send"
@@ -4618,7 +4618,7 @@ pool_admin_doctor() {
 # ============================================================================
 # pool_admin_help
 #
-# The USER-FACING help for `agent-browser-pool --help|-h|help` (PRD §2.12 / §2.15
+# The USER-FACING help for `agent-browser-pool --help|-h|help` (PRD §2.13 / §2.16
 # transparency — Mode A: this output IS the documentation for the admin tool). NO
 # input. Prints usage for every subcommand + the configuration env vars to STDOUT,
 # then returns 0. Read by the bin/agent-browser-pool dispatcher's

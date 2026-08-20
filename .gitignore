@@ -35,3 +35,6 @@ __pycache__/
 # --- intentionally tracked (do NOT ignore; never add an entry for these) ---
 # Source:   README.md PRD.md AGENTS.md install.sh bin/ lib/ test/
 # History:  plan/  (project history tree — tracked; AGENTS.md §5)
+*.tmp
+*.bak
+*.swp

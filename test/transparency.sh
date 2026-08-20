@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# test/transparency.sh — transparency checklist (PRD §2.15 "the no-idea contract")
+# test/transparency.sh — transparency checklist (PRD §2.16 "the no-idea contract")
 #
 # Proves that an agent issuing the EXACT commands the agent-browser-pool skill teaches
 # (`skills get core`, `open`, `connect <port>`, `--session <X>`, `close --all`, …) is routed
 # to its own locked ephemeral lane via the SOLE entry point bin/agent-browser-pool (explicit
 # invocation — NO PATH shadowing) and CAN NEITHER DETECT NOR ESCAPE the pool. One test_* body
-# per §2.15 clause (+ invocation-surface + fail-fast contracts):
+# per §2.16 clause (+ invocation-surface + fail-fast contracts):
 #   (a)  agent-browser-pool skills get core → FAIL-FAST (driving, no pi ancestor; §2.4 step 1)
 #   (b1) agent-browser-pool --help          → POOL help (bin dispatch → pool_admin_help; NOT real help)
 #   (b2) agent-browser-pool --version       → FAIL-FAST (driving, no pi ancestor; §2.4 step 1)
@@ -94,7 +94,7 @@ _transparency_setup_real_env() {
 
     # btrfs ephemeral root (HOST-SPECIFIC): setup's AGENT_CHROME_EPHEMERAL_ROOT points under
     # /tmp, which is tmpfs on this host. pool_copy_master does `cp --reflink=always master →
-    # ephemeral`, which FAILS on tmpfs and pool_die's (PRD §2.19) → Chrome can't boot. Re-point
+    # ephemeral`, which FAILS on tmpfs and pool_die's (PRD §2.20) → Chrome can't boot. Re-point
     # the ephemeral root at a btrfs temp dir under the real home (btrfs here): the reflink CoW
     # copy from the read-only real master is instant + ~0 space, the dir is test-specific, and
     # it is reaped by the EXIT trap (ABPOOL_SIM_BINS is the framework's rm list; this runs in
@@ -276,7 +276,7 @@ test_skills_fail_fast_no_pi() {
 
 # =============================================================================
 # TEST (b1) — `agent-browser-pool --help` → POOL help (NOT passthrough).
-# PRD §2.15 / §2.4 step 0: `--help` is a POOL VERB caught by bin/agent-browser-pool's dispatch
+# PRD §2.16 / §2.4 step 0: `--help` is a POOL VERB caught by bin/agent-browser-pool's dispatch
 # case (`--help|-h|help) → pool_admin_help`) BEFORE the pool's driving-command dispatcher +
 # meta classifier run.
 # So the output is the POOL's help text — NOT the real agent-browser's help. The byte-equal
@@ -308,7 +308,7 @@ test_version_fail_fast_no_pi() {
 
 # =============================================================================
 # TEST (c) — `open <url>` zero-prep → lands MY lane (acquired+booted+connected+leased).
-# PRD §2.15: an agent issuing a zero-prep open is silently routed to its own lane.
+# PRD §2.16: an agent issuing a zero-prep open is silently routed to its own lane.
 # Backgrounds the driving open (may not exit), polls for the lane, asserts it exists + is live,
 # then reaps the bg job (Chrome survives; release all reaps it). Uses about:blank (local, no
 # network, fastest nav, least flake).
@@ -326,7 +326,7 @@ test_open_zero_prep_lands_lane() {
 
 # =============================================================================
 # TEST (d) — 2nd `open` same owner → reuses the SAME lane N (find_mine, not re-acquire).
-# PRD §2.15: the pool is stateless from the agent's view — repeated commands reuse the lane.
+# PRD §2.16: the pool is stateless from the agent's view — repeated commands reuse the lane.
 # Boots lane N via a 1st open; reaps it; a 2nd open (same owner) must return N again
 # (pool_lease_find_mine finds the existing live lease). Asserts N1 == N2.
 # =============================================================================
@@ -347,7 +347,7 @@ test_second_open_reuses_lane() {
 
 # =============================================================================
 # TEST (e) — `connect <random>` → routed to MY lane; the <port|url> arg is STRIPPED.
-# PRD §2.15: the upstream skill teaches `connect <port>`; the pool owns the real connection
+# PRD §2.16: the upstream skill teaches `connect <port>`; the pool owns the real connection
 # (pool_ensure_connected), so the agent's arg is ignored. TWO LAYERS:
 #   LAYER 1 (deterministic unit of the pure normalizer — NO Chrome): pool_normalize_connect
 #     strips the FIRST non-flag positional after connect. Verify 98765 is gone from POOL_NORM_ARGS.
@@ -380,7 +380,7 @@ test_connect_random_ignored() {
 
 # =============================================================================
 # TEST (f) — `--session <X> open <url>` → forced to abpool-<N> (X is STRIPPED + env forced).
-# PRD §2.15: the agent cannot bypass its lane via the upstream --session flag. The pool
+# PRD §2.16: the agent cannot bypass its lane via the upstream --session flag. The pool
 # strips every --session (pool_strip_session_args) AND forces AGENT_BROWSER_SESSION=abpool-<N>
 # (pool_force_session). Verify the lease's .session == abpool-<N> and ≠ <X>. The lease .session
 # is written as abpool-<N> during acquire (lib/pool.sh:2004) — so the forced env + lease agree.
@@ -401,7 +401,7 @@ test_session_override_forced() {
 
 # =============================================================================
 # TEST (g) — `close --all` → only MY lane's daemon closed; PEER lane+Chrome unaffected.
-# PRD §2.15: "close --all → cannot harm other agents' lanes." This is the MULTI-owner scope
+# PRD §2.16: "close --all → cannot harm other agents' lanes." This is the MULTI-owner scope
 # test (NOT a dup of release_reaper's test_close_is_disconnect_only, which is single-owner +
 # bare close). TWO LAYERS:
 #   LAYER 1 (unit): pool_normalize_close strips --all + sets POOL_CLOSE_ALL_SEEN=1.
@@ -463,7 +463,7 @@ test_close_all_scoped_no_peer_harm() {
 
 # =============================================================================
 # TEST (h) — next agent (distinct PID) → a DIFFERENT lane; no collision.
-# PRD §2.15: each agent gets its own locked lane. Two distinct owners (distinct
+# PRD §2.16: each agent gets its own locked lane. Two distinct owners (distinct
 # spawn_sim_owner PIDs+starttimes) acquire lanes N and M; assert N != M (no collision), each
 # lane owned by its respective owner. SEQUENTIAL (no parallel subshells ⇒ no wait-hang risk).
 # =============================================================================

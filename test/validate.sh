@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# test/validate.sh — test framework for agent-browser-pool (PRD §2.18, §3).
+# test/validate.sh — test framework for agent-browser-pool (PRD §2.19, §3).
 #
 # A hand-rolled, dependency-free bash test harness (NO bats/shunit2). Sources
 # lib/pool.sh for the LANDED primitives (lease I/O, lanes_list, owner liveness,
@@ -223,7 +223,7 @@ setup() {
 }
 
 # teardown — SAFETY NET. The per-test CLEANUP ASSERTIONS (release + assert_no_chrome +
-# assert_no_dir) live in EACH test body (PRD §2.18: "every test must release/reap and
+# assert_no_dir) live in EACH test body (PRD §2.19: "every test must release/reap and
 # assert cleanup"). teardown is the backstop so a CRASHED body cannot contaminate the next
 # test: best-effort `release all` AS A SUBPROCESS (a pool_die inside the admin tool would
 # otherwise exit the harness shell) + kill this test's sim-owner.
@@ -332,7 +332,7 @@ selftest_sim_owner_is_alive_pi() {
 # resolves via pool_owner_resolve's TEST MODE (which records the ACTUAL /proc comm, not a hardcoded
 # "pi"), is marked resolved (POOL_OWNER_PID!=0), AND pool_owner_alive accepts it; NEGATIVE: a
 # non-harness comm ('xterm') is REJECTED by pool_owner_alive (a lease expecting comm 'claude' must
-# not adopt an xterm process — identity isolation, PRD §2.13). Exercises the generalized
+# not adopt an xterm process — identity isolation, PRD §2.14). Exercises the generalized
 # spawn_sim_owner [COMM] (P3.M2.T1.S1) + pool_owner_resolve's actual-comm TEST MODE (P3.M1.T1.S2).
 #
 # Runs under the single-setup runner (_run_selftest_suite): NO setup() re-call; the body runs via
@@ -373,7 +373,7 @@ selftest_owner_resolves_non_pi_harness() {
     [[ "$resolve_pid" != "0" ]] || { _fail "resolve set POOL_OWNER_PID=0 (did not resolve)"; return 1; }
     [[ "$alive_rc" -eq 0 ]] || { _fail "pool_owner_alive rejected the live claude owner (rc=$alive_rc)"; return 1; }
 
-    # --- NEGATIVE: non-harness comm 'xterm' is rejected (identity isolation, PRD §2.13) ---
+    # --- NEGATIVE: non-harness comm 'xterm' is rejected (identity isolation, PRD §2.14) ---
     pid="$(spawn_sim_owner 600 xterm)"
     st="$(_pool_get_starttime "$pid")"
     real_comm="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
@@ -391,7 +391,7 @@ selftest_owner_resolves_non_pi_harness() {
 
 selftest_admin_is_executable() {
     # Pre-flight the sole entry point (bin/agent-browser-pool) downstream tests invoke by
-    # ABSOLUTE PATH — the explicit-invocation model (PRD §2.17: no PATH shadowing, one entry
+    # ABSOLUTE PATH — the explicit-invocation model (PRD §2.18: no PATH shadowing, one entry
     # point). Also consumes ABPOOL_ADMIN so it isn't shellcheck-SC2034-unused.
     [[ -x "$ABPOOL_ADMIN" ]] || { _fail "admin not executable: $ABPOOL_ADMIN"; return 1; }
 }
@@ -524,7 +524,7 @@ EOF
 # --- close survives a corrupt lease (defensive subshell contains pool_die) ---
 # A corrupt (non-JSON) lease makes pool_lease_update pool_die (exit 1). The close block runs
 # pool_lease_update in a SUBSHELL so the exit is contained; the wrapper still reaches exec
-# (PRD §2.15: close must always run). Hermetic, timeout-bounded subshell. AGENTS.md §3/§4.
+# (PRD §2.16: close must always run). Hermetic, timeout-bounded subshell. AGENTS.md §3/§4.
 selftest_close_survives_corrupt_lease() {
     local outdir noop script rc out
     outdir="$ABPOOL_TEST_ROOT/close-corrupt"

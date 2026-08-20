@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # test/release_reaper.sh — release + stale reaper + crash simulation tests
-# (PRD §2.18; §2.5/§2.9/§2.10/§2.14).
+# (PRD §2.19; §2.5/§2.9/§2.10/§2.15).
 #
 # Validates the CLEANUP + RELEASE-SEMANTICS contract:
 #   (a) explicit `agent-browser-pool release N` → lane gone (dir + Chrome pgroup + lease).
@@ -33,7 +33,7 @@
 #   - test (b) "X != Y → X dead" is imprecise: pool_owner_alive reads the REAL /proc. X must
 #     be GENUINELY dead (kill X + `wait` to reap the zombie so /proc/X vanishes — a zombie's
 #     comm/starttime may still read "pi" → false-alive).
-#   - test (c) "kill Chrome then reap" is inconsistent with PRD §2.14 (Chrome crash w/ owner
+#   - test (c) "kill Chrome then reap" is inconsistent with PRD §2.15 (Chrome crash w/ owner
 #     alive → relaunch+reconnect, NOT reap). The simulated crash is the OWNER; reap then kills
 #     the orphan Chrome. Killing Chrome alone (owner alive) leaves the lane NOT stale → reap
 #     would do nothing.
@@ -94,7 +94,7 @@ _release_setup_real_env() {
 
     # btrfs ephemeral root (HOST-SPECIFIC): setup's AGENT_CHROME_EPHEMERAL_ROOT points under
     # /tmp, which is tmpfs on this host. pool_copy_master does `cp --reflink=always master →
-    # ephemeral`, which FAILS on tmpfs and pool_die's (PRD §2.19) → Chrome can't boot. Re-point
+    # ephemeral`, which FAILS on tmpfs and pool_die's (PRD §2.20) → Chrome can't boot. Re-point
     # the ephemeral root at a btrfs temp dir under the real home (btrfs here): the reflink CoW
     # copy from the read-only real master is instant + ~0 space, the dir is test-specific, and
     # it is reaped by the EXIT trap (ABPOOL_SIM_BINS is the framework's rm list; this runs in
@@ -172,7 +172,7 @@ _test_spawn_owner() {
 }
 
 # =============================================================================
-# TEST (a) — explicit `agent-browser-pool release N` tears the lane fully down (PRD §2.5/§2.18).
+# TEST (a) — explicit `agent-browser-pool release N` tears the lane fully down (PRD §2.5/§2.19).
 # =============================================================================
 test_explicit_release_tears_down_lane() {
     _release_setup_real_env || return 1
@@ -191,14 +191,14 @@ test_explicit_release_tears_down_lane() {
     #     release, rc 1 only on not-found — but we just booted N so it exists).
     "$ABPOOL_ADMIN" release "$N" >/dev/null 2>&1 || true
 
-    # (3) Assert: ephemeral dir gone, Chrome process group dead, lease gone (PRD §2.18).
+    # (3) Assert: ephemeral dir gone, Chrome process group dead, lease gone (PRD §2.19).
     assert_lane_gone "$N" || return 1     # lease file AND ephemeral dir gone
     assert_no_chrome || return 1          # scoped: no pool Chrome under the temp ephemeral root
 }
 
 # =============================================================================
 # TEST (b) — stale reaper during acquire: a dead-owner + non-responsive-Chrome lane is REAPED
-# (not reused); the next agent gets a FRESH provisional lane (PRD §2.9/§2.10/§2.18).
+# (not reused); the next agent gets a FRESH provisional lane (PRD §2.9/§2.10/§2.19).
 # =============================================================================
 test_stale_reaper_reaps_dead_owner_lane() {
     _release_setup_real_env || return 1
@@ -277,10 +277,10 @@ test_stale_reaper_reaps_dead_owner_lane() {
 
 # =============================================================================
 # TEST (c) — crash simulation: the owning agent dies → `agent-browser-pool reap` tears down the
-# orphan Chrome + dir + lease (reliable cleanup on crash) (PRD §2.9/§2.10/§2.14/§2.18).
+# orphan Chrome + dir + lease (reliable cleanup on crash) (PRD §2.9/§2.10/§2.15/§2.19).
 #
 # CONTRACT RESOLUTION: the item says "kill the Chrome process manually then reap". But per PRD
-# §2.14, a Chrome crash with the owner ALIVE → relaunch+reconnect (KEEP lease), NOT reap;
+# §2.15, a Chrome crash with the owner ALIVE → relaunch+reconnect (KEEP lease), NOT reap;
 # pool_reap_stale only reaps DEAD-OWNER lanes. So the simulated crash is the OWNER (agent pi)
 # crashing (kill X); Chrome is left ALIVE (the orphan a real crash leaves). `reap` then kills the
 # orphan Chrome pgroup + rm dir + drop lease — the strong cleanup-on-crash claim.
@@ -315,7 +315,7 @@ test_reap_clears_crashed_owner_lane() {
 
 # =============================================================================
 # TEST (d) — `close` is DISCONNECT-ONLY: Chrome + dir + lease survive; the next command reuses
-# the SAME lane (PRD §2.5 "close != release" / §2.18).
+# the SAME lane (PRD §2.5 "close != release" / §2.19).
 # =============================================================================
 test_close_is_disconnect_only() {
     _release_setup_real_env || return 1
@@ -360,7 +360,7 @@ test_close_is_disconnect_only() {
 # TEST (e) — `close` (via pool_wrapper_main) marks the lease connected=false, and the NEXT
 # pool_ensure_connected RE-BINDS the daemon (connected false→true) instead of trusting the
 # lingering pool_daemon_connected probe (P1.M3.T1.S1+S2 / Issue #3 / PRD §2.4 step 4 /
-# §2.5 / §2.15).
+# §2.5 / §2.16).
 #
 # WHY THIS IS DISTINCT FROM test_close_is_disconnect_only (test d): test d invokes close
 # DIRECTLY on $POOL_REAL_BIN → BYPASSES pool_wrapper_main → S1's connected=false block

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# test/concurrency.sh — concurrency & mutual-exclusion test (PRD §2.18; goals §1.3.2/§1.3.3).
+# test/concurrency.sh — concurrency & mutual-exclusion test (PRD §2.19; goals §1.3.2/§1.3.3).
 #
 # Validates: "N parallel agents (distinct owner PIDs via the override) must each get a
 # distinct lane; assert no two share a lane and all release cleanly with no leftover
@@ -209,7 +209,7 @@ _assert_all_distinct_and_nonzero() {
 }
 
 # =============================================================================
-# THE CONCURRENCY TEST (PRD §2.18). N=3 (item §3a says 3-5; 3 is the minimum that proves
+# THE CONCURRENCY TEST (PRD §2.19). N=3 (item §3a says 3-5; 3 is the minimum that proves
 # mutual exclusion beyond a pair while keeping the parallel-boot window + Chrome resource
 # cost modest). Each of N agents: distinct sim-owner PID → distinct lease owner.pid →
 # distinct lane (under flock) → distinct port + chrome_pid (after boot).
@@ -328,7 +328,7 @@ test_n_agents_get_n_distinct_lanes() {
         _fail "chrome_pid not all distinct/nonzero: ${held_cpids[*]}"; return 1
     fi
 
-    # (9) CLEANUP ASSERTIONS (PRD §2.18: "every test must release/reap and assert cleanup").
+    # (9) CLEANUP ASSERTIONS (PRD §2.19: "every test must release/reap and assert cleanup").
     #     release all AS A SUBPROCESS (pool_die inside the admin tool can't kill the harness).
     "$ABPOOL_ADMIN" release all >/dev/null 2>&1 || true
     # No lanes remain.
@@ -344,7 +344,7 @@ test_n_agents_get_n_distinct_lanes() {
     assert_no_chrome || return 1
 
     # (9b) Reap the btrfs ephemeral root dir itself (release all removed the lane SUBDIRS +
-    #      killed Chrome; the root dir persists). Hermeticity (PRD §2.18 / AGENTS.md §3): the
+    #      killed Chrome; the root dir persists). Hermeticity (PRD §2.19 / AGENTS.md §3): the
     #      framework's EXIT trap runs in the MAIN shell + can't see this subshell's btrfs
     #      root, so reap it explicitly here. Best-effort; _concurrency_setup_master ALSO
     #      pre-emptively reaps stale roots on the next run (failure-path backstop).

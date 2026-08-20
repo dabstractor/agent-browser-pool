@@ -78,7 +78,7 @@ while working inside this repo. Pass `--global-skill` to also expose it to pi se
 rm -f ~/.local/bin/agent-browser-pool ~/.agents/skills/agent-browser-pool
 ```
 
-See [PRD.md §2.17](./PRD.md) for why installation is non-disruptive (no PATH interception).
+See [PRD.md §2.18](./PRD.md) for why installation is non-disruptive (no PATH interception).
 
 ### Cross-harness skill installation
 
@@ -247,7 +247,7 @@ read-only to the pool. A healthy summary:
   Healthy.
 ```
 
-See [PRD.md §2.12](./PRD.md) for the command list and §2.14 for the failure modes each
+See [PRD.md §2.13](./PRD.md) for the command list and §2.15 for the failure modes each
 command fixes.
 
 ## Configuration reference
@@ -283,7 +283,7 @@ Three vars shape behavior most:
 
 > **Test-only hooks** (not for users): `AGENT_BROWSER_POOL_OWNER_PID` and
 > `AGENT_BROWSER_POOL_OWNER_STARTTIME` let the test harness simulate distinct agent owners
-> without a real `pi` ancestor (PRD.md §2.18). Do not set these in normal use.
+> without a real `pi` ancestor (PRD.md §2.19). Do not set these in normal use.
 
 For the full dispatch table, acquire lifecycle, and a troubleshooting matrix, see
 **[`.agents/skills/agent-browser-pool/references/configuration.md`](./.agents/skills/agent-browser-pool/references/configuration.md)**.
@@ -381,7 +381,7 @@ agents.
 `agent-browser-pool reap` (tears down stale-owner lanes **and** removes orphan dirs), or
 `release <N>` / `release all` (explicit teardown of leased lanes). `doctor` exits `1` only on
 a blocking `FAIL` (missing deps / binary / btrfs / master); `WARN`s are advisory cruft that
-`reap`/`release` clear and do not change the exit code. See PRD.md §2.14.
+`reap`/`release` clear and do not change the exit code. See PRD.md §2.15.
 
 ## Repository layout
 
