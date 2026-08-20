@@ -143,7 +143,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T4.S1",
                   "title": "Pin branch in _pool_acquire_critical_section",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T2.S1"
@@ -164,7 +164,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T4.S2",
                   "title": "Wrapper integration: skip find-mine when pinned; NO exhaustion fallback",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T4.S1"

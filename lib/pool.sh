@@ -2244,6 +2244,22 @@ _pool_adopt_lane() {
 #   has no Chrome yet → always reaped, never adopted).
 # GOTCHA — POOL_OWNER_PID==0 ⇒ return 1 (a passthrough owner must not claim; defense-in-depth).
 # GOTCHA — _pool_adopt_lane return 1 (Chrome died mid-adopt) ⇒ fall through to REAP that lane.
+#
+# PINNED PATH (POOL_LANE_PIN non-empty; PRD §2.12 mode 2, O11; §2.15 fail-fast row):
+#   When ABPOOL_LANE=<N> is set (validated/normalized into POOL_LANE_PIN by pool_config_init
+#   pre-flock — NEVER re-validated here), the critical section acquires lane N deterministically:
+#     (5) FIRST, the one-lane-per-owner invariant (§2.8): if I hold a LIVE lease on a DIFFERENT
+#         lane → pool_die (hard error — the pin never silently migrates me).
+#     (1) no lease + no ephemeral dir → FREE → CLAIM (provisional, port=0).
+#         rc 2 + leaseless ephemeral dir → orphaned debris → rm (guarded) → CLAIM.
+#     (2) STALE → _pool_release_lane_internals (NO adoption — unlike the auto path's
+#         REUSE-ORPHAN, a pin prefers a clean lane; stale ⇒ reap ⇒ fresh claim) → CLAIM.
+#     (3) LIVE + lease owner is ME → idempotent reuse: echo N, return 0, NO lease rewrite.
+#     (4) LIVE + FOREIGN owner → pool_die (a pin NEVER takes over a live lane — §2.14
+#         isolation; no pool_find_free_lane fallback, ever).
+# GOTCHA — pool_die is SAFE inside this flock subshell: it exits the subshell → kernel
+#   closes fd 9 → flock auto-releases → exit 1 propagates to pool_acquire_locked's caller.
+#   Boot is untouched: a pinned provisional lease (port=0) boots exactly like an auto one.
 # Reads POOL_OWNER_*, POOL_EPHEMERAL_ROOT, POOL_LANES_DIR. Non-fatal on exhaustion (rc 1).
 # PRECONDITION: pool_config_init + pool_owner_resolve (+ pool_state_init by the wrapper).
 _pool_acquire_critical_section() {
@@ -2253,6 +2269,75 @@ _pool_acquire_critical_section() {
     # lane (it would be immediately stale to everyone). The wrapper gates passthrough BEFORE
     # acquire in M6; this is defense-in-depth. `[[ ]] || return 1` is errexit-exempt.
     [[ "$POOL_OWNER_PID" =~ ^[0-9]+$ && "$POOL_OWNER_PID" != "0" ]] || return 1
+
+    # ============================ PINNED PATH (ABPOOL_LANE) ============================
+    # Deterministic lane assignment (PRD §2.12 mode 2, O11). POOL_LANE_PIN's format was
+    # already validated by pool_config_init pre-flock — here we only branch on non-emptiness.
+    # A pin NEVER consults pool_find_free_lane and NEVER adopts a responsive orphan.
+    if [[ -n "$POOL_LANE_PIN" ]]; then
+        local st_rc json o_pid o_comm o_start dir held
+        local -a _o
+        N="$POOL_LANE_PIN"
+
+        # (5) INVARIANT FIRST (§2.8, ≤1 lane per owner): scan for a LIVE lease owned by ME
+        #     on a DIFFERENT lane (template: pool_lease_find_mine L1088–L1108; skip lane N).
+        #     All pool_lease_field calls `|| continue` (rc 1 on missing/corrupt — set -e safe).
+        for n in $(pool_lanes_list); do
+            [[ "$n" == "$N" ]] && continue
+            o_pid="$(pool_lease_field "$n" owner.pid 2>/dev/null)" || continue
+            [[ "$o_pid" == "$POOL_OWNER_PID" ]] || continue
+            o_start="$(pool_lease_field "$n" owner.starttime 2>/dev/null)" || continue
+            o_comm="$(pool_lease_field "$n" owner.comm 2>/dev/null)" || continue
+            if pool_owner_alive "$o_pid" "$o_start" "$o_comm" \
+               && [[ "$o_comm" == "$POOL_OWNER_COMM" && "$o_start" == "${POOL_OWNER_STARTTIME:-0}" ]]; then
+                held="$n"
+                pool_die "owner pid=$POOL_OWNER_PID already holds live lane $held; ABPOOL_LANE=$POOL_LANE_PIN would violate the one-lane-per-owner invariant — release lane $held first or unset ABPOOL_LANE"
+            fi
+        done
+
+        # TRI-STATE capture (set -e safe): 0=stale / 1=live / 2=no-lease.
+        pool_lane_is_stale "$N" && st_rc=0 || st_rc=$?
+
+        if (( st_rc == 0 )); then
+            # (2) STALE → reap + claim fresh (deliberately NO orphan adoption).
+            _pool_release_lane_internals "$N"
+        elif (( st_rc == 1 )); then
+            # LIVE — whose? Extract the owner triple ONCE (one jq fork, in-memory JSON).
+            json="$(pool_lease_read "$N")"
+            mapfile -t _o < <(jq -r '.owner.pid, .owner.comm, .owner.starttime' <<<"$json")
+            o_pid="${_o[0]:-}"
+            o_comm="${_o[1]:-}"
+            o_start="${_o[2]:-}"
+            if [[ "$o_pid" == "$POOL_OWNER_PID" && "$o_comm" == "$POOL_OWNER_COMM" \
+                  && "$o_start" == "${POOL_OWNER_STARTTIME:-0}" ]]; then
+                # (3) LIVE + MINE → idempotent reuse. NO lease rewrite.
+                printf '%s\n' "$N"
+                return 0
+            fi
+            # (4) LIVE + FOREIGN → hard error (isolation, §2.14). No fallback.
+            pool_die "pinned lane $POOL_LANE_PIN is held by a live owner (pid $o_pid, comm $o_comm); a pinned lane is never a takeover — unset ABPOOL_LANE or choose a free lane"
+        else
+            # (1) rc 2 — NO lease. If a leaseless $POOL_EPHEMERAL_ROOT/$N dir survives, it is
+            #     stale debris internals won't remove (it bails at the missing lease): rm it
+            #     with the same prefix-guard so the pin lands on a clean lane, then claim.
+            dir="$POOL_EPHEMERAL_ROOT/$N"
+            if [[ -n "$dir" && "$dir" == "$POOL_EPHEMERAL_ROOT"/* && "$dir" != "$POOL_EPHEMERAL_ROOT/" ]]; then
+                rm -rf -- "$dir" 2>/dev/null || true
+            fi
+        fi
+
+        # CLAIM (cases 1/2) — same provisional lease as the auto path's claim (port=0,
+        # connected=false → the post-lock S2 boot path boots it exactly like an auto claim).
+        ephemeral_dir="$POOL_EPHEMERAL_ROOT/$N"
+        pool_lease_write "$N" "$ephemeral_dir" 0 "abpool-$N" \
+            "$POOL_OWNER_PID" "$POOL_OWNER_COMM" "${POOL_OWNER_STARTTIME:-0}" \
+            "${POOL_OWNER_CWD:-}" 0 0 "false"
+
+        _pool_log "pool_acquire(pin): provisional lane $N for owner pid=$POOL_OWNER_PID"
+        printf '%s\n' "$N"
+        return 0
+    fi
+    # ============================ AUTO PATH (unchanged) ============================
 
     # (a/b) REAP-STALE + REUSE-ORPHAN, interleaved per lane in ascending order.
     for n in $(pool_lanes_list); do
