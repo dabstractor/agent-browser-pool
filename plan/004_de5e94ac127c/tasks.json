@@ -49,7 +49,7 @@
               "type": "Task",
               "id": "P4.M1.T2",
               "title": "Config: parse + validate ABPOOL_OWNER and ABPOOL_LANE (R2)",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Freeze two new config globals in pool_config_init — POOL_OWNER_MODE (caller|ancestor) from ABPOOL_OWNER (any non-empty value) and POOL_LANE_PIN (positive-integer string or empty) from ABPOOL_LANE — with a pre-flock hard error on malformed ABPOOL_LANE, plus the Mode A doc rows.",
               "subtasks": [
                 {
@@ -73,7 +73,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T2.S2",
                   "title": "configuration.md: ABPOOL_OWNER + ABPOOL_LANE env-table rows",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T2.S1"
@@ -98,7 +98,7 @@
                   "type": "Subtask",
                   "id": "P4.M1.T3.S1",
                   "title": "Insert caller-mode branch in pool_owner_resolve",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 2,
                   "dependencies": [
                     "P4.M1.T2.S1"
