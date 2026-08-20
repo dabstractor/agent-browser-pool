@@ -219,7 +219,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S1",
                   "title": "Config selftests: default-path identity + ABPOOL_OWNER any-value + ABPOOL_LANE validation",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T2.S1"
@@ -238,7 +238,7 @@
                   "type": "Subtask",
                   "id": "P4.M2.T1.S2",
                   "title": "Caller-mode resolve selftest (in-process, $PPID)",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P4.M1.T3.S1"

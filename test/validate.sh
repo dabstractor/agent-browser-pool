@@ -912,6 +912,80 @@ selftest_preflight_accepts_bare_name_on_path() {
     [[ "$rc" -ne 0 ]] || { _fail "preflight should fail for a missing bare name (rc=0)"; return 1; }
 }
 
+# --- config: POOL_OWNER_MODE / POOL_LANE_PIN contract (P4.M2.T1.S1) ---------------
+# Locks the step-6b contract: (1) default path (both ABPOOL_* unset) is identity —
+# owner mode "ancestor", lane pin empty; (2) ABPOOL_OWNER is any-value (raw-string,
+# NOT _pool_config_bool — "1" still means caller mode); (3) ABPOOL_LANE is strictly
+# validated: malformed values die with 'ABPOOL_LANE must be a positive integer';
+# explicitly-empty is unset-equivalent (no die, empty pin); valid uint pins the lane.
+# Pure logic: every pool_config_init run happens in a bash -c child (a pool_die there
+# exits the child, never this harness); zero processes spawned, zero leases written.
+# shellcheck disable=SC2016  # $1/$POOL_* in single quotes are expanded by the bash -c child
+selftest_config_owner_mode_and_lane_pin() {
+    local mode pin err rc v
+    # (a) DEFAULT path: both unset -> identity (ancestor + empty pin)
+    mode="$(env -u ABPOOL_OWNER -u ABPOOL_LANE bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_OWNER_MODE"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "ancestor" "$mode" "default: POOL_OWNER_MODE=ancestor" || return 1
+    pin="$(env -u ABPOOL_OWNER -u ABPOOL_LANE bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_LANE_PIN"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "" "$pin" "default: POOL_LANE_PIN empty" || return 1
+    # (b) ANY-VALUE: any non-empty ABPOOL_OWNER (raw string, no truthy filtering) -> caller
+    mode="$(env -u ABPOOL_LANE ABPOOL_OWNER=caller bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_OWNER_MODE"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "caller" "$mode" "ABPOOL_OWNER=caller -> caller mode" || return 1
+    mode="$(env -u ABPOOL_LANE ABPOOL_OWNER=1 bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_OWNER_MODE"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "caller" "$mode" "ABPOOL_OWNER=1 (raw string) -> caller mode" || return 1
+    # (c) MALFORMED ABPOOL_LANE: must die (rc != 0) + stderr mentions ABPOOL_LANE /
+    #     'positive integer'. err-file lives under setup()'s redirected $HOME; removed
+    #     unconditionally after each capture.
+    err="$HOME/abpool-cfgtest-err.$$"
+    for v in 0 -1 abc 2.5; do
+        rc=0
+        env -u ABPOOL_OWNER ABPOOL_LANE="$v" bash -c '
+            set -e; source "$1/lib/pool.sh"; pool_config_init
+        ' _ "$ABPOOL_REPO" 2>"$err" || rc=$?
+        if [[ "$rc" -eq 0 ]]; then
+            rm -f -- "$err"
+            _fail "ABPOOL_LANE='$v' should die (rc=0)"; return 1
+        fi
+        if ! grep -q 'ABPOOL_LANE' "$err"; then
+            rm -f -- "$err"
+            _fail "ABPOOL_LANE='$v' die message mentions ABPOOL_LANE"; return 1
+        fi
+        if ! grep -q 'positive integer' "$err"; then
+            rm -f -- "$err"
+            _fail "ABPOOL_LANE='$v' die message mentions 'positive integer'"; return 1
+        fi
+        rm -f -- "$err"
+    done
+    # EMPTY ABPOOL_LANE: unset-equivalent — NO die, empty pin
+    rc=0
+    env -u ABPOOL_OWNER ABPOOL_LANE="" bash -c '
+        set -e; source "$1/lib/pool.sh"; pool_config_init
+    ' _ "$ABPOOL_REPO" 2>"$err" || rc=$?
+    rm -f -- "$err"
+    [[ "$rc" -eq 0 ]] || { _fail "empty ABPOOL_LANE must not die (rc=$rc)"; return 1; }
+    pin="$(env -u ABPOOL_OWNER ABPOOL_LANE="" bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_LANE_PIN"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "" "$pin" "empty ABPOOL_LANE -> POOL_LANE_PIN empty" || return 1
+    # VALID ABPOOL_LANE=3 -> pin "3" (owner mode unaffected: ancestor w/o ABPOOL_OWNER)
+    pin="$(env -u ABPOOL_OWNER ABPOOL_LANE=3 bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_LANE_PIN"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "3" "$pin" "ABPOOL_LANE=3 -> POOL_LANE_PIN=3" || return 1
+    mode="$(env -u ABPOOL_OWNER ABPOOL_LANE=3 bash -c '
+        source "$1/lib/pool.sh"; pool_config_init; printf "%s" "$POOL_OWNER_MODE"
+    ' _ "$ABPOOL_REPO")"
+    assert_eq "ancestor" "$mode" "ABPOOL_LANE=3 leaves owner mode at ancestor" || return 1
+}
+
 # --- pool_reap_orphan_dirs removes unleased orphan dirs + skips leased (F1) ---------
 # Pure-function body against the shared temp pool: (1) an unleased orphan dir is removed
 # and counted; (2) a leased dir is skipped; (3) a 2nd call finds nothing (idempotent).
