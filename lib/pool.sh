@@ -97,7 +97,7 @@ _pool_config_bool() {
 # Configuration reference (env var → POOL_* global):
 #   ENV VAR                        DEFAULT                                         GLOBAL                CATEGORY
 #   AGENT_BROWSER_POOL_STATE       $HOME/.local/state/agent-browser-pool           POOL_STATE_DIR        path (may not exist)
-#   AGENT_CHROME_MASTER            ~/.agent-chrome-profiles/master-profile         POOL_MASTER_DIR       path (dedicated agent master; may not exist)
+#   AGENT_CHROME_MASTER            ~/.config/google-chrome (real Chrome udd)      POOL_MASTER_DIR       path (read-only CoW source; may not exist)
 #   AGENT_CHROME_EPHEMERAL_ROOT    $HOME/.agent-chrome-profiles/active             POOL_EPHEMERAL_ROOT   path (may not exist)
 #   AGENT_BROWSER_REAL             $HOME/.local/bin/agent-browser                  POOL_REAL_BIN         path (may not exist)
 #   AGENT_CHROME_BIN               google-chrome-stable                            POOL_CHROME_BIN       name-or-path
@@ -141,15 +141,16 @@ pool_config_init() {
     POOL_HOME_DIR="$home_resolved"; declare -g POOL_HOME_DIR
 
     # 2. Path globals (defaults anchored on POOL_HOME_DIR; realpath -m via the helper).
-    local state_dir master_dir ephemeral_root real_bin
+    local state_dir master_dir ephemeral_root real_bin _master_default
     state_dir="$(_pool_config_canon_path \
         "${AGENT_BROWSER_POOL_STATE:-$POOL_HOME_DIR/.local/state/agent-browser-pool}")"
-    # CoW SOURCE: a DEDICATED master template the operator curates (the "Google Chrome for
-    # Agents" identity), NOT the human's personal ~/.config/google-chrome (which the pool
-    # must never read or write). Override AGENT_CHROME_MASTER to point elsewhere. Day-1
-    # spec / PRD §2.7: $POOL_HOME_DIR/.agent-chrome-profiles/master-profile.
-    master_dir="$(_pool_config_canon_path \
-        "${AGENT_CHROME_MASTER:-$POOL_HOME_DIR/.agent-chrome-profiles/master-profile}")"
+    # CoW SOURCE: the operator's REAL Chrome user-data-dir (PRD §2.7/§2.11, README,
+    # SKILL reference, and `help` all document this default). Agents clone the CURRENT
+    # identity on each acquire (new logins propagate); the pool NEVER launches, writes,
+    # or deletes it (read-only source, PRD §2.7). Override AGENT_CHROME_MASTER to point
+    # at a dedicated master template instead.
+    _master_default="${XDG_CONFIG_HOME:-$POOL_HOME_DIR/.config}/google-chrome"
+    master_dir="$(_pool_config_canon_path "${AGENT_CHROME_MASTER:-$_master_default}")"
     ephemeral_root="$(_pool_config_canon_path \
         "${AGENT_CHROME_EPHEMERAL_ROOT:-$POOL_HOME_DIR/.agent-chrome-profiles/active}")"
     # AGENT_BROWSER_REAL name-or-path (mirrors the CHROME_BIN branch below): a bare name
@@ -263,49 +264,12 @@ pool_state_init() {
     return 0
 }
 
-# pool_check_btrfs — refuse a non-btrfs ephemeral root unless the escape hatch is set.
-#
-# Enforces PRD §2.7 and §2.15: a non-btrfs filesystem at POOL_EPHEMERAL_ROOT would
-# silently trigger a catastrophic 4.8 GB real copy per acquire (the CoW `cp
-# --reflink=always` would fall back to a full copy). Refuse loudly unless
-# POOL_ALLOW_SLOW_COPY=1 (normalized from AGENT_CHROME_ALLOW_SLOW_COPY by S2).
-#
-# CRITICAL GOTCHA: uses `findmnt -T` (the --target flag is MANDATORY). A bare
-# `findmnt -nno FSTYPE "$dir"` (NO -T) matches the positional arg against SOURCE
-# (a device), not the mount tree, and exits 1 on this host EVEN ON BTRFS — verified
-# 2026-07-12. The architecture doc external_deps.md §3.2 example omits -T and is
-# BROKEN; do not copy it. Always: `findmnt -nno FSTYPE -T "$POOL_EPHEMERAL_ROOT"`.
-#
-# findmnt legitimately exits 1 when the path is missing or not on a btrfs mount; the
-# `|| true` neutralizes that so set -e (propagated by S1) does not abort the capture.
-# An empty FSTYPE (missing path / findmnt failure) is treated as "not btrfs".
-#
-# Reads POOL_EPHEMERAL_ROOT and POOL_ALLOW_SLOW_COPY (frozen by pool_config_init).
-# Echoes the detected FSTYPE on success (handy for callers + tests). Returns 0 when
-# btrfs OR slow-copy allowed; calls pool_die otherwise.
-pool_check_btrfs() {
-    local fstype
-    # `|| true` makes the command-substitution always succeed; fstype becomes "" on
-    # failure (missing path / not found), which the [[ ]] test below handles.
-    fstype="$(findmnt -nno FSTYPE -T "$POOL_EPHEMERAL_ROOT" 2>/dev/null || true)"
-
-    if [[ "$fstype" == "btrfs" ]]; then
-        printf '%s\n' "$fstype"
-        return 0
-    fi
-
-    # Not btrfs — including the empty case (path missing or findmnt failed).
-    if [[ "$POOL_ALLOW_SLOW_COPY" == "1" ]]; then
-        printf '%s\n' "${fstype:-unknown}"
-        return 0
-    fi
-
-    pool_die "pool_check_btrfs: $POOL_EPHEMERAL_ROOT is not on btrfs" \
-             "(detected: '${fstype:-<empty/missing>}')." \
-             "A real copy of the 4.8 GB master per acquire would be catastrophic." \
-             "Set AGENT_CHROME_ALLOW_SLOW_COPY=1 to allow it, or point" \
-             "AGENT_CHROME_EPHEMERAL_ROOT at a btrfs mount (the path may not exist)."
-}
+# pool_check_btrfs has been REMOVED (dead code — zero call sites; validation issue #5).
+# The non-btrfs refusal happens de facto via `cp --reflink=always` failing in
+# pool_copy_master (steps b/c), plus doctor's own findmnt probe — PRD §2.15 behavior is
+# preserved. POOL_ALLOW_SLOW_COPY (from AGENT_CHROME_ALLOW_SLOW_COPY) remains live and
+# is consumed by pool_copy_master + doctor. Do NOT reintroduce a pre-emptive findmnt
+# gate unless you also wire it into acquire and cover it with a test.
 
 # pool_check_master — verify the master template exists and is populated.
 #
@@ -327,9 +291,10 @@ pool_check_master() {
 
     pool_die "pool_check_master: source profile missing or empty:" \
              "$POOL_MASTER_DIR" \
-             "This is the CoW SOURCE agents copy from (default: your agent master" \
-             "template). Bootstrap it once from a logged-in Chrome, or set" \
-             "AGENT_CHROME_MASTER to an existing Chrome user-data-dir, e.g.:" \
+             "This is the CoW SOURCE agents copy from (default: your real Chrome" \
+             "user-data-dir, ${XDG_CONFIG_HOME:-~/.config}/google-chrome). Set" \
+             "AGENT_CHROME_MASTER to an existing Chrome user-data-dir, or bootstrap a" \
+             "template once from a logged-in Chrome, e.g.:" \
              "  cp -a --reflink=always <your-chrome-profile> \"$POOL_MASTER_DIR\"" \
              "(see PRD §2.7 — the source is read-only to the pool; never launched/written/deleted.)"
 }
@@ -1832,7 +1797,7 @@ pool_wait_cdp() {
     local user_data_dir="${2:-}"
     local expected_pid="${3:-}"
     local i
-    local -ri POOL_CDP_TRIES=60    # ×0.5s sleep = 30s budget (research §7; tunable)
+    local -ri POOL_CDP_TRIES=30    # ×0.5s sleep = 15s budget (PRD §2.4 step 3h / §2.15; tunable)
     local check_identity=0
 
     [[ "$port" =~ ^[0-9]+$ ]] || return 1   # bad port → non-fatal rc 1 (defensive)
@@ -2118,6 +2083,25 @@ _pool_release_lane_internals() {
     # (3) Kill the Chrome process group (idempotent; handles 0/0 provisional lease).
     pool_chrome_kill "$chrome_pid" "$chrome_pgid"
 
+    # (3b) MID-BOOT KILL RACE fallback (validation issue #3): the lease's chrome ids are
+    #      written only AFTER launch returns (_pool_boot_write_chrome_ids), so a wrapper
+    #      killed inside that window holds chrome_pid=0/pgid=0 — pool_chrome_kill is a
+    #      no-op and the rm -rf below leaves a LIVE Chrome that recreates its
+    #      user-data-dir. When the lease has no trusted ids, sweep by cmdline (mirrors
+    #      pool_reap_orphan_dirs: pattern anchored at the lane-dir boundary with `( |$)`
+    #      so prefix-colliding lanes are never hit; pgrep rc 1 → no kill; best-effort).
+    dir="$POOL_EPHEMERAL_ROOT/$lane"
+    if [[ ! ( "$chrome_pid"  =~ ^[0-9]+$ && "$chrome_pid"  -gt 0 )
+          && ! ( "$chrome_pgid" =~ ^[0-9]+$ && "$chrome_pgid" -gt 0 ) ]]; then
+        local pat="user-data-dir=$dir( |\$)"
+        if pgrep -f -- "$pat" >/dev/null 2>&1; then
+            _pool_log "pool_acquire(reap): lane $lane chrome ids untrusted → cmdline sweep"
+            pkill    -f -- "$pat" 2>/dev/null || true
+            sleep 0.2                        # let renderer/GPU/utility children exit
+            pkill    -9 -f -- "$pat" 2>/dev/null || true
+        fi
+    fi
+
     # (4) rm -rf the ephemeral dir — RECONSTRUCT from lane + POOL_EPHEMERAL_ROOT (do NOT
     #     trust the lease's ephemeral_dir), AND prefix-guard. Defense-in-depth: even a
     #     corrupt/hostile lease cannot make us rm an arbitrary path. `|| true` for safety.
@@ -2337,7 +2321,28 @@ _pool_acquire_critical_section() {
         printf '%s\n' "$N"
         return 0
     fi
-    # ============================ AUTO PATH (unchanged) ============================
+    # ============================ AUTO PATH ============================
+
+    # (0) ONE-LANE-PER-OWNER INVARIANT inside the lock (§2.8; validation issue #7):
+    #     the wrapper's pool_lease_find_mine runs BEFORE the lock, so two concurrent
+    #     driving commands from the same harness could both miss and each claim a lane.
+    #     Re-check HERE (mirrors the pinned path's step (5) guard): if I already hold a
+    #     LIVE lease on any lane → return it (idempotent reuse — an auto claim has no
+    #     lane preference, unlike a pin, so reuse beats a hard error). All
+    #     pool_lease_field calls `|| continue` (rc 1 on missing/corrupt — set -e safe).
+    local a_pid a_comm a_start
+    for n in $(pool_lanes_list); do
+        a_pid="$(pool_lease_field "$n" owner.pid 2>/dev/null)" || continue
+        [[ "$a_pid" == "$POOL_OWNER_PID" ]] || continue
+        a_start="$(pool_lease_field "$n" owner.starttime 2>/dev/null)" || continue
+        a_comm="$(pool_lease_field "$n" owner.comm 2>/dev/null)" || continue
+        if pool_owner_alive "$a_pid" "$a_start" "$a_comm" \
+           && [[ "$a_comm" == "$POOL_OWNER_COMM" && "$a_start" == "${POOL_OWNER_STARTTIME:-0}" ]]; then
+            _pool_log "pool_acquire(auto): owner pid=$POOL_OWNER_PID already holds live lane $n → idempotent reuse"
+            printf '%s\n' "$n"
+            return 0
+        fi
+    done
 
     # (a/b) REAP-STALE + REUSE-ORPHAN, interleaved per lane in ascending order.
     for n in $(pool_lanes_list); do
@@ -2623,13 +2628,27 @@ pool_boot_lane() {
     pool_copy_master "$ephemeral_dir"
 
     # --- b. PORT: lowest free TCP port (PRD §2.4 step 3f). ---
-    #     rc 1 = range exhausted (NON-FATAL). Split the capture (BashFAQ 105). On failure,
-    #     clean up (the dir was just copied) + return 1.
-    if ! port="$(pool_find_free_port)"; then
-        _pool_log "pool_boot_lane: port range exhausted for lane $lane; dropping lane"
-        _pool_release_lane_internals "$lane"
-        return 1
-    fi
+    #     rc 1 = range exhausted (NON-FATAL). Split the capture (BashFAQ 105). The TCP
+    #     port range is the genuinely exhaustible resource (lanes are unbounded, §1.3),
+    #     so exhaustion gets PRD §2.9 semantics: BLOCK up to POOL_WAIT (peers releasing
+    #     lanes free their ports — pool_reap_stale below also reaps dead owners), then
+    #     ALERT + drop the lane + return 1 (validation issue #6 — no silent hard fail).
+    local _port_start _now_t
+    _port_start="$(_pool_now)"
+    while ! port="$(pool_find_free_port)"; do
+        _now_t="$(_pool_now)"
+        if (( _now_t - _port_start >= POOL_WAIT )); then
+            _pool_log "pool_boot_lane: port range exhausted for lane $lane after ${POOL_WAIT}s; dropping lane"
+            _pool_alert 'agent-browser-pool' \
+                "Port range exhausted — no free port after ${POOL_WAIT}s. Possible leak." \
+                >/dev/null 2>&1 || true
+            _pool_release_lane_internals "$lane"
+            return 1
+        fi
+        # Reap dead owners (lock-free, idempotent) — a reaped lane releases its port.
+        pool_reap_stale >/dev/null 2>&1 || true
+        sleep 2
+    done
     # Anti-collision: write port to the lease BEFORE launch so concurrent pool_find_free_port
     # calls see it claimed (research §4). pool_lease_update splices the value as raw JSON.
     pool_lease_update "$lane" port "$port"
@@ -3799,7 +3818,24 @@ pool_wrapper_main() {
     elif N="$(pool_lease_find_mine)"; then
         # Found my LIVE lane → reuse it (skip acquire + boot). Go to step h (ensure connected).
         _pool_log "pool_wrapper_main: reusing lane $N"
-        _lane_fresh=""
+        # BUT: a live lease with port==0 is a PROVISIONAL lane whose boot died fatally
+        # (pool_die mid-boot leaves the port=0 lease behind — validation e2e16). Such a
+        # lease is NOT a booted lane (PRD §2.4 step 2 requires port>0 to reuse), so treat
+        # it exactly like a fresh claim: boot it below instead of failing forever in
+        # pool_ensure_connected ("not booted (port='0')"). An UNREADABLE lease
+        # (pool_lease_field rc 1 — corrupt/missing) keeps the LEGACY reuse behavior
+        # (fall through to pool_ensure_connected, which returns 1 on a bad lease).
+        if port="$(pool_lease_field "$N" port)"; then
+            if [[ "$port" == "0" || "$port" == "null" ]]; then
+                _pool_log "pool_wrapper_main: lane $N live but un-booted (port='$port') → booting"
+                _lane_fresh=1
+            else
+                _lane_fresh=""
+            fi
+        else
+            port=""
+            _lane_fresh=""
+        fi
     else
         # Not found → acquire (step 3). Fallback to wait-for-lane on exhaustion.
         if ! N="$(pool_acquire_locked)"; then
@@ -4837,9 +4873,16 @@ pool_admin_help() {
     printf '  AGENT_CHROME_BIN                Chrome binary (default: google-chrome-stable)\n'
     printf '  AGENT_CHROME_PORT_BASE          lowest pool TCP port (default: 53420)\n'
     printf '  AGENT_CHROME_PORT_RANGE         number of ports in the pool (default: 1000)\n'
-    printf '  AGENT_BROWSER_POOL_WAIT         acquire block timeout, seconds (default: 600)\n'
+    printf '  AGENT_BROWSER_POOL_WAIT         acquire/boot block timeout, seconds (default: 600)\n'
     printf '  AGENT_CHROME_HEADLESS           launch Chrome headless if set (1/true/yes/on)\n'
     printf '  AGENT_CHROME_ALLOW_SLOW_COPY    permit non-btrfs (slow) copies if set (1/true/yes/on)\n'
+    printf '  ABPOOL_OWNER                    override owner identity: auto (default) or caller\n'
+    printf '                                  (caller = each subprocess gets its own lane)\n'
+    printf '  ABPOOL_LANE                     pin this lane number for every command (fails\n'
+    printf '                                  hard if the lane is live under a foreign owner)\n'
+    printf '  AGENT_BROWSER_POOL_HARNESSES    extra recognized harness command names\n'
+    printf '                                  (comma-separated; appended to pi/claude/codex/agy)\n'
+    printf '  AGENT_CHROME_PROFILE            force a Chrome --profile-directory for lanes\n'
     printf '\n'
     printf "Run 'agent-browser-pool doctor' to verify your setup.\n"
     return 0

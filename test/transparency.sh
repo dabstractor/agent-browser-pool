@@ -581,11 +581,18 @@ _abpool_run_transparency_suite() {
         # all reaps it.
         _transparency_reap_bg
         "$ABPOOL_ADMIN" release all >/dev/null 2>&1 || true
+        # Also reap orphan dirs/Chromes (validation issue #3): a driving wrapper killed
+        # between Chrome launch and the chrome-id lease write leaves a lease with
+        # chrome_pid=0 → `release all` (lease-driven) can miss the live Chrome. `reap`
+        # sweeps orphan dirs via pgrep/pkill on user-data-dir — the exact backstop needed.
+        "$ABPOOL_ADMIN" reap >/dev/null 2>&1 || true
         [[ -n "${ABPOOL_CUR_OWNER:-}" ]] && _transparency_kill_owner "$ABPOOL_CUR_OWNER"
         ABPOOL_CUR_OWNER=""
         _transparency_reap_all_sim_owners
     done
     teardown
+    "$ABPOOL_ADMIN" release all >/dev/null 2>&1 || true
+    "$ABPOOL_ADMIN" reap >/dev/null 2>&1 || true
     _transparency_reap_all_sim_owners    # final backstop after teardown
     printf '\n%d passed, %d failed\n' "$ABPOOL_PASS" "$ABPOOL_FAIL"
     if (( ABPOOL_FAIL > 0 )); then

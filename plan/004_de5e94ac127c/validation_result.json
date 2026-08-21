@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 9,
+  "summary": "2 major bugs (stuck provisional lane permanently blocks a live owner; AGENT_CHROME_MASTER code default contradicts PRD/README/SKILL/help), 1 intermittent Chrome leak in test/transparency.sh after PASSING, plus 6 minor doc/spec/dead-code/race findings; all lint + 4 test suites + 86 hermetic E2E checks otherwise green."
+}
