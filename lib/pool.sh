@@ -4587,6 +4587,15 @@ pool_admin_reap() {
 #
 # The literal "lane(s)" handles both singular and plural (do not special-case N=1).
 #
+#   - NEW (BUG-003, fix_design §4 seam 2): a PRESENT-BUT-CORRUPT lanes/N.json (file
+#     exists, pool_lease_exists rc 1) is treated as RELEASABLE: inline teardown
+#     (anchored user-data-dir cmdline sweep — lease ids untrustworthy; prefix-guarded
+#     rm of $POOL_EPHEMERAL_ROOT/N; rm of the lease file) → 'Released lane N (corrupt
+#     lease cleared).' rc 0. The shared kernel (_pool_release_lane_internals) cannot
+#     do this — it early-returns 0 on unreadable JSON. `release all` still no-ops on
+#     corrupt leases (pool_lanes_list does not validate JSON; NOT in scope) — use
+#     `release N` (or reap, once its dir is gone) for corrupt leases.
+#
 # CONTRACT:
 #   - DELEGATE: ALL teardown logic lives in pool_release_lane. This function does NOT
 #     re-implement any of it. It classifies + probes existence + delegates + reports.
@@ -4607,6 +4616,8 @@ pool_admin_reap() {
 #   - pool_lease_exists returns rc 1 on missing/corrupt/non-numeric → a BARE call
 #     ABORTS under set -e. ALWAYS `if pool_lease_exists "$lane"; then …; else …; fi`
 #     (rc 1 falls into else, errexit-exempt). This is the SAME hazard as pool_lane_is_stale.
+#     pool_lease_exists now ALSO appears in the corrupt-lease probe if-condition (same
+#     errexit-exempt idiom); pgrep -f rc 1 (no match) is likewise if-guarded.
 #   - pool_release_lane returns rc 0 ALWAYS → a BARE call (after the probe passes) is
 #     set -e-safe. NO `if !` guard.
 #   - pool_lanes_list returns rc 0 ALWAYS → the `mapfile -t lanes < <(pool_lanes_list)`
@@ -4626,6 +4637,7 @@ pool_admin_release() {
     local target="${1:-}"
     local -a lanes
     local lane
+    local dir
 
     # --- a. config + state init (rc 0 or pool_die — no guard needed) -------------
     # Mirrors pool_admin_status (lib/pool.sh:3604-3606) + pool_admin_reap
@@ -4667,6 +4679,43 @@ pool_admin_release() {
 
     elif [[ "$target" =~ ^[0-9]+$ ]]; then
         # --- (b)/(d) numeric: PROBE existence BEFORE delegating (the key guard) ---
+        # --- BUG-003 (fix_design §4 seam 2): CORRUPT-lease branch — BEFORE the clean/absent
+        #     probe. pool_lease_exists rc 1 means missing OR corrupt; the [[ -f ]] pre-probe
+        #     distinguishes them: file present + invalid JSON = a corrupt lease the shared
+        #     kernel can NEVER clean (_pool_release_lane_internals step (1) early-returns 0
+        #     on unreadable JSON, and its id-based kill is unreachable without parseable ids).
+        #     Left alone it burns the lane number forever (pool_find_free_lane's deliberate
+        #     [[ -f ]] collision check treats it as occupied; pool_lane_is_stale rc 2 skips
+        #     it) and status shows a permanent '? ?' STALE row. Reachable via power loss
+        #     (_pool_atomic_write does no fsync by design — fix_design §5). Treat it as
+        #     releasable: tear down DIRECTLY. Lease ids are untrustworthy by definition →
+        #     cmdline-sweep kill (the anchored house idiom), NOT pool_chrome_kill.
+        if [[ -f "$POOL_LANES_DIR/$target.json" ]] && ! pool_lease_exists "$target"; then
+            # (a) Kill any process still on this lane's dir — the anchored pattern from
+            #     _pool_release_lane_internals (3b) / pool_reap_orphan_dirs: `( |$)` anchors
+            #     at the lane-dir boundary so prefix-colliding lanes (3 vs 30/300) never
+            #     match; pgrep rc 1 (no match) is the if-condition (errexit-exempt); pkill
+            #     best-effort; sleep lets renderer/GPU children exit before the force kill.
+            dir="$POOL_EPHEMERAL_ROOT/$target"
+            local pat="user-data-dir=$dir( |\$)"
+            if pgrep -f -- "$pat" >/dev/null 2>&1; then
+                _pool_log "pool_admin_release(corrupt): lane $target cmdline sweep (lease ids untrusted)"
+                pkill    -f -- "$pat" 2>/dev/null || true
+                sleep 0.2
+                pkill -9 -f -- "$pat" 2>/dev/null || true
+            fi
+            # (b) Prefix-guarded rm of the lane dir — RECONSTRUCTED from lane + root (never
+            #     trust the corrupt lease's ephemeral_dir); same 3-condition guard as
+            #     _pool_release_lane_internals step (4). `|| true` (TOCTOU-safe).
+            if [[ -n "$dir" && "$dir" == "$POOL_EPHEMERAL_ROOT"/* && "$dir" != "$POOL_EPHEMERAL_ROOT/" ]]; then
+                rm -rf -- "$dir" 2>/dev/null || true
+            fi
+            # (c) Remove the corrupt lease file — THE reclaim (frees the lane number).
+            rm -f -- "$POOL_LANES_DIR/$target.json" 2>/dev/null || true
+            _pool_log "pool_admin_release(corrupt): cleared corrupt lease + lane $target (BUG-003)"
+            printf 'Released lane %s (corrupt lease cleared).\n' "$target"
+            return 0
+        fi
         # pool_lease_exists is rc 0 (valid lease) / rc 1 (missing/corrupt/non-numeric).
         # A BARE call with rc 1 ABORTS under set -e → the `if` is MANDATORY (rc 1 falls
         # into else, errexit-exempt). This probe is REQUIRED because pool_release_lane is

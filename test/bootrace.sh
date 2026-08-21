@@ -508,6 +508,68 @@ r5_bug003_corrupt_lease_reclaimed() {
     rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/7" 2>/dev/null || true
 }
 
+# R6 — BUG-003 (fix_design §4 seam 2): `release N` must clear a PRESENT-BUT-CORRUPT
+# lease. Two variants: (1) corrupt 7.json + dir 7 present + a LIVE process whose
+# cmdline carries the lane's user-data-dir marker (exec -a sleep — the fake-chrome
+# fixture execs python3, which REPLACES cmdline and would make the kill assertion
+# vacuous) → rc 0, lease gone, dir gone, ZERO survivors on the anchored pattern
+# (the sweep verifiably killed); (2) corrupt 7.json, NO dir (the shape reap can
+# never reach — pool_reap_orphan_dirs iterates $EPH/*/) → rc 0, lease gone.
+r6_bug003_release_corrupt_lease() {
+    local rc lease7 dir7 pat survivors rc_all
+    _br_spawn_owner                 # a live owner so the pool verbs run normally
+    lease7="$AGENT_BROWSER_POOL_STATE/lanes/7.json"
+    dir7="$AGENT_CHROME_EPHEMERAL_ROOT/7"
+    pat="user-data-dir=$dir7( |\$)"
+
+    # --- variant 1: corrupt lease + dir + LIVE marker process ---
+    mkdir -p -- "$AGENT_BROWSER_POOL_STATE/lanes" "$dir7"
+    printf 'not json {{{' >"$lease7"
+    printf 'orphan-marker\n' >"$dir7/Preferences"
+    bash -c 'exec -a "$1" sleep 300' _ "user-data-dir=$dir7 lane7" >/dev/null 2>&1 &
+    local mp=$!
+    sleep 0.3                       # let the marker process settle into /proc
+    rc=0
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release 7 >/dev/null 2>&1 || rc=$?
+    sleep 0.3                       # let the sweep's TERM/0.2s/KILL land
+    # --- snapshot observable state BEFORE cleanup ---
+    survivors="$(pgrep -f -- "$pat" 2>/dev/null || true)"
+    # --- cleanup FIRST (always runs) ---
+    kill "$mp" 2>/dev/null || true
+    wait "$mp" 2>/dev/null || true
+    rm -f -- "$lease7" 2>/dev/null || true
+    rm -rf -- "$dir7" 2>/dev/null || true
+    # --- assertions on snapshots ---
+    rc_all=0
+    if (( rc != 0 )); then
+        _fail "R6: release 7 on corrupt lease rc=$rc (expected 0)" || rc_all=1
+    fi
+    if [[ -e "$lease7" ]]; then
+        _fail "R6: corrupt lease 7.json survived release (BUG-003 reproduced)" || rc_all=1
+    fi
+    if [[ -e "$dir7" ]]; then
+        _fail "R6: lane dir 7 survived release" || rc_all=1
+    fi
+    if [[ -n "$survivors" ]]; then
+        _fail "R6: live process on lane 7 dir survived the sweep: $survivors" || rc_all=1
+    fi
+
+    # --- variant 2: corrupt lease, NO dir (reap can never reach this shape) ---
+    printf 'not json {{{' >"$lease7"
+    rc=0
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release 7 >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        _fail "R6: release 7 on corrupt lease (no dir) rc=$rc (expected 0)" || rc_all=1
+    fi
+    if [[ -e "$lease7" ]]; then
+        _fail "R6: corrupt lease (no dir) survived release" || rc_all=1
+    fi
+    # Self-cleanup (belt-and-suspenders; happy path already cleared everything).
+    rm -f -- "$lease7" 2>/dev/null || true
+    rm -rf -- "$dir7" 2>/dev/null || true
+    return "$rc_all"
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
@@ -515,7 +577,7 @@ _br_run_suite() {
     for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e \
               r3_control_delayed_boot_succeeds r3_bug002_race_e2e \
               r3_neg_dead_ids_release_still_kills r4_bug002_preport_race \
-              r5_bug003_corrupt_lease_reclaimed; do
+              r5_bug003_corrupt_lease_reclaimed r6_bug003_release_corrupt_lease; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi

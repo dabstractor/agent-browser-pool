@@ -254,9 +254,13 @@ Removed 1 orphan dir(s).
 
 Explicitly tear down one lane by number, or every lane. With no/invalid argument it prints a
 usage block to stderr and exits 1.
+A corrupt or unparseable `lanes/<N>.json` is also cleared (killing any Chrome still
+on that lane's profile dir — the lease contents can't be trusted), freeing the lane
+number. (`release all` does not clear corrupt leases; use `release N` or `reap`.)
 
 ```
 Released lane 1.
+Released lane 7 (corrupt lease cleared).
 ```
 ```
 Released 2 lane(s).
