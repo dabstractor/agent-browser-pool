@@ -267,14 +267,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Final changeset regression gate",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Single verification pass over everything the changeset touched: static checks, all repo suites, the bootrace regression matrix, and the now-fixed plan/004_de5e94ac127c/validate.sh executed from the repo root per its own usage. Isolated sandbox, hard timeouts, zero orphans.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Run the complete matrix in an isolated sandbox and record the summary",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

@@ -1,0 +1,25 @@
+== preflight 2026-08-21T19:07:04Z
+HEAD: 03e4e25
+-- git status --short:
+ M plan/004_de5e94ac127c/bugfix/001_ee35a7227ee8/tasks.json
+?? plan/004_de5e94ac127c/bugfix/001_ee35a7227ee8/P1M3T1S1/research/preflight.txt
+-- greps:
+5251:    printf '                                  (comma-separated; replaces the default pi,claude,codex,agy,antigravity; empty/unset -> default)\n'
+2
+28:ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
+1
+775:              r8_bug005_help_harnesses_contract r9_bug007_lock_timeout_grace \
+9
+-- bootrace case list:
+r1_bug001_guard_fs_agnostic() {
+r2_bug001_recovery_e2e() {
+r3_control_delayed_boot_succeeds() {
+r3_bug002_race_e2e() {
+r3_neg_dead_ids_release_still_kills() {
+r4_bug002_preport_race() {
+r5_bug003_corrupt_lease_reclaimed() {
+r6_bug003_release_corrupt_lease() {
+r7_bug004_doctor_fresh_install() {
+r8_bug005_help_harnesses_contract() {
+r9_bug007_lock_timeout_grace() {
+r10_bug009_pin_corrupt_lease_sweep() {
