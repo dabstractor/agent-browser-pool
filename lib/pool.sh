@@ -1292,11 +1292,29 @@ pool_copy_master() {
 
     # Ensure the PARENT of target_dir exists (cp needs it; the ephemeral root may not
     # exist on a first run). mkdir -p is idempotent. Do NOT mkdir the target itself
-    # (cp creates it; mkdir-ing it would trigger the nesting hazard). `|| pool_die` so a
+    # (cp creates it; mkdir-ing it would trigger the nesting hazard; the BUG-001 guard
+    #  below removes a pre-existing target). `|| pool_die` so a
     # real FS error is a clean fatal (not a set -e abort).
     parent="$(dirname -- "$target_dir")"
     mkdir -p -- "$parent" \
         || pool_die "pool_copy_master: cannot create parent dir: $parent"
+
+    # Crash-recovery guard (BUG-001): a previous boot may have died between the
+    # copy and the port write (crash/kill mid-boot — the lease stays port=0 with the
+    # copied dir present; the wrapper's stuck-lane recovery then re-boots this lane).
+    # GNU cp with an EXISTING dst dir copies the source INTO it (dst/<basename-src>/…)
+    # → the lane would silently run a FRESH EMPTY profile (no top-level Local State).
+    # Remove ANY pre-existing target so the cp below always sees a non-existent
+    # destination (idempotent: any target state → clean copy; the reflink re-copy is
+    # ~instant). `|| pool_die`: a stale dir we cannot remove must be LOUD, not a
+    # silent nest. target_dir is validated non-empty + absolute above.
+    # (This also covers the slow-copy retry below — cp -a nests identically — and
+    #  makes a concurrent second boot's copy a clean refresh once T2.S2 serializes
+    #  boots. Do NOT mkdir the target itself: the guard + cp create it.)
+    if [[ -e "$target_dir" ]]; then
+        rm -rf -- "$target_dir" 2>/dev/null \
+            || pool_die "pool_copy_master: cannot remove stale target dir: $target_dir"
+    fi
 
     # (a) reflink CoW copy — instant on btrfs. 2>/dev/null suppresses the per-file
     # "Operation not supported" flood on non-btrfs (research §1.1). `if !` is
