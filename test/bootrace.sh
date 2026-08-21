@@ -34,9 +34,10 @@
 #   P1.M1.T2.S4 (release sweep widening — leak-assertion cases)
 #   P1.M2 (R5–R8 minor-bug cases)
 #
-# KNOWN-RED: r3_bug002_race_e2e is EXPECTED TO FAIL until T2.S3 lands the
-# pool_ensure_connected fix (T2.S2's boot lock drives R4 green, not R3) —
-# the suite therefore exits 1 in this state (TDD: the harness proves the bug exists).
+# KNOWN-GREEN (post T2.S2 + T2.S3): r3_bug002_race_e2e now EXPECTED TO PASS —
+# ensure_connected serializes on the lane boot lock, re-reads the lease under it,
+# and gates relaunch on a confirmed-dead /proc/<chrome_pid> — so the suite exits 0
+# with ALL cases passing (control, R1, R2, R3-control, R3, R4).
 # r3_control_delayed_boot_succeeds is the harness's own green gate; if THAT fails, the
 # fixtures are wrong, not the pool.
 
@@ -307,6 +308,9 @@ r3_bug002_race_e2e() {
     # --- snapshot observable state ---
     n="$(wc -l <"$FAKE_CHROME_COUNT_FILE" 2>/dev/null || printf 0)"
     lease_pid="$(jq -r '.chrome_pid // 0' "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || echo 0)"
+    # chrome liveness must be snapshotted BEFORE the cleanup kills it (R4 idiom).
+    local pid_live=0
+    [[ "$lease_pid" != "0" && -d "/proc/$lease_pid" ]] && pid_live=1
     # --- cleanup FIRST (always runs, even when assertions would fail) ---
     timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
     pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
@@ -324,7 +328,7 @@ r3_bug002_race_e2e() {
         _fail "R3: expected exactly 1 chrome launch, got $n (double-launch)" || rc_all=1
     fi
     count_pids="$(awk '{print $1}' "$FAKE_CHROME_COUNT_FILE" 2>/dev/null | tr '\n' ' ' || true)"
-    if [[ "$lease_pid" == "0" ]] || [[ ! -d "/proc/$lease_pid" ]] \
+    if (( pid_live != 1 )) \
        || [[ " ${count_pids} " != *" $lease_pid "* ]]; then
         _fail "R3: lease chrome_pid=$lease_pid not live / not the launched pid (clobbered lease; launched: ${count_pids:-none})" || rc_all=1
     fi

@@ -358,7 +358,14 @@ pool_check_master() {
 _pool_atomic_write() {
     local filepath="$1" content="${2:-}"
     local tmp
-    tmp="${filepath}.tmp"
+    # UNIQUE tmp name per writer (T2.S3 / BUG-002): the fixed "${filepath}.tmp" let
+    # two CONCURRENT writers to the same lease (e.g. a booting peer's chrome-id
+    # write racing our heartbeat's last_seen_at write) clobber each other's tmp —
+    # one mv fails → pool_die → spurious command failure. $$+RANDOM still lives in
+    # the target's directory (same FS → rename stays atomic); a crash between write
+    # and mv leaves a uniquely-named orphan .tmp (harmless — glob consumers read
+    # *.json only).
+    tmp="${filepath}.$$.${RANDOM}.tmp"
     # printf '%s' preserves the EXACT bytes (no added newline) so file bytes ==
     # content arg. The `if !` makes a write failure a controlled branch so the
     # cleanup rm runs before pool_die exits.
@@ -1641,7 +1648,12 @@ pool_chrome_launch() {
     # Launch: setsid makes Chrome its own session/group leader (pgid==pid). The redirection
     # captures Chrome's combined stdout/stderr to the per-lane log. `&` backgrounds it; $!
     # is Chrome's pid (setsid exec'd it — research §1). Backgrounding is errexit-exempt.
-    setsid -- "$POOL_CHROME_BIN" "${flags[@]}" >"$log_file" 2>&1 &
+    # `8>&-` (T2.S3): NEVER let Chrome inherit fd 8 — the per-lane boot/connect lock
+    # (pool_lane_boot_lock, held by pool_boot_lane / pool_ensure_connected callers). A
+    # long-lived child holding the lock fd keeps the flock after the holder exits,
+    # wedging every later boot/connect on that lane behind `flock -w 20` timeouts.
+    # Harmless when fd 8 is not open in the caller.
+    setsid -- "$POOL_CHROME_BIN" "${flags[@]}" >"$log_file" 2>&1 8>&- &
     POOL_CHROME_PID=$!; declare -g POOL_CHROME_PID
 
     # Capture the process-group id. GUARDED (research §5): `ps -o pgid= -p $PID` returns
@@ -2803,7 +2815,31 @@ _pool_boot_lane_locked() {
 # is BROKEN on agent-browser 0.28.0 (auto-launches strays — P1.M4.T3.S1 research §2), so
 # the connected check is the SIDE-EFFECT-FREE pool_daemon_connected + curl /json/version.
 
-# pool_ensure_connected LANE
+# pool_ensure_connected LANE — the LOCK-FREE wrapper (T2.S3, BUG-002 terminal fix).
+#
+# LOCK SCOPE:
+#   - Step b fast path (connected==true && pool_daemon_connected → heartbeat → 0) is
+#     LOCK-FREE and unchanged: it runs on EVERY driving command — adding an
+#     open+flock there would tax the hot path and serialize healthy commands.
+#   - Everything MUTATIVE (curl probe → identity gate → reconnect → relaunch
+#     finalize) runs inside `_pool_ensure_connected_locked` under the SAME per-lane
+#     boot lock as pool_boot_lane (pool_lane_boot_lock, fd 8 — NEVER fd 9/
+#     POOL_LOCK_FILE, self-deadlock). Boot and connect are mutually exclusive, so
+#     two same-owner commands racing during the boot window (BUG-002 / R3) serialize;
+#     the loser's IN-LOCK LEASE RE-READ sees the winner's completed boot and takes
+#     the reconnect path — NEVER relaunching over a live Chrome.
+#
+#   - Dead-pid gate (PRD h2.5): the relaunch branch fires ONLY after the recorded
+#     chrome_pid is confirmed dead via `[[ ! -e /proc/$chrome_pid ]]` (NEVER kill -0 —
+#     ESRCH/EPERM ambiguity). A live-but-still-booting Chrome gets a bounded
+#     pool_wait_cdp + rebind instead of a second launch.
+#   - `flock -w 20` timeout → subshell exit-code 99 sentinel (T2.S2 scheme) →
+#     _pool_log + best-effort UNLOCKED run of the same body (pre-fix behavior);
+#     never hangs, timeout ≠ genuine failure.
+#   - Subshell-locality: POOL_CHROME_PID/POOL_CHROME_PGID set by pool_chrome_launch
+#     inside the flock subshell DO NOT escape it — verified nothing after this
+#     function's return consumes them; the LEASE (chrome_pid/chrome_pgid via
+#     pool_lease_update) is the authoritative outward channel.
 #
 # LOGIC (CONTRACT a→d):
 #   a. Read the lease → session, port, ephemeral_dir, connected (+ chrome_pid). Lease
@@ -2843,6 +2879,7 @@ pool_ensure_connected() {
     local lane="${1:-}"
     local json session port ephemeral_dir connected chrome_pid now
     local -a _f
+    local lock_rc
 
     # Validate lane.
     [[ "$lane" =~ ^[0-9]+$ ]] \
@@ -2876,10 +2913,12 @@ pool_ensure_connected() {
     # / stale / pre-boot lane) preserves the legacy connect-to-whatever-answers behavior.
     [[ "$chrome_pid" =~ ^[0-9]+$ ]] || chrome_pid=0
 
-    # A not-booted (provisional) lane has port:0 — ensure_connected is for BOOTED lanes.
-    # Reconstruct session/ephemeral_dir defensively if the lease fields are empty.
-    [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
-        || { _pool_log "pool_ensure_connected: lane $lane not booted (port='$port')"; return 1; }
+    # A not-booted (provisional) lane has port:0. Reconstruct session/ephemeral_dir
+    # defensively if the lease fields are empty. NOTE (T2.S3): a port<=0 read here may
+    # be a PEER MID-BOOT (provisional lease, port not yet published) — do NOT fail
+    # fast; the locked body re-reads the lease (bounded wait on the peer's boot lock)
+    # and only then decides "not booted". The lock-free fast path below is gated on
+    # port>0, so a provisional lane never probes a bogus port.
     [[ -n "$session" ]]      || session="abpool-$lane"
     [[ -n "$ephemeral_dir" && "$ephemeral_dir" == /* ]] || ephemeral_dir="$POOL_EPHEMERAL_ROOT/$lane"
 
@@ -2892,29 +2931,96 @@ pool_ensure_connected() {
     # rebind the next driving command needs. When connected==false, short-circuit past this
     # early-exit and fall through to the curl reconnect (step c) → pool_daemon_connect rebinds.
     # `[[ ]] && probe` is errexit-exempt (left operand of && in an if-condition).
-    if [[ "$connected" == "true" ]] && pool_daemon_connected "$session" "$port"; then
+    if [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
+        && [[ "$connected" == "true" ]] && pool_daemon_connected "$session" "$port"; then
         pool_lease_update "$lane" last_seen_at "$now"   # observability heartbeat
         return 0
     fi
 
-    # --- c. NOT connected. Chrome alive? curl /json/version (NOT kill -0 — research §2). ---
-    # BUG-1 identity hardening (Issue #3, S1): a successful curl only proves SOMETHING answers on
-    # $port — not that it is THIS lane's Chrome. Before rebinding the daemon, verify identity via
-    # pool_cdp_is_ours (socket-owner PID == our chrome_pid, else cmdline fallback). A foreign
-    # Chrome on our port (narrow race: daemon restart + our Chrome dead + foreign Chrome grabbed
-    # the port) must NOT be rebound — fall through to the relaunch branch below instead. The guard
-    # `chrome_pid -gt 0` enforces identity ONLY for lanes with a valid pid; old/provisional lanes
-    # (chrome_pid=0) preserve the legacy connect-to-whatever-answers behavior (no silent break of
-    # stale lanes). pool_cdp_is_ours is NON-FATAL (returns 1, never pool_die) → `! pool_cdp_is_ours`
-    # is a clean set -e branch. Mirrors the acquire path's pool_wait_cdp identity check (BUG-1).
+    # --- c/e (mutative). Serialized against pool_boot_lane + peer connects on the
+    # SAME per-lane boot lock. MAIN-SHELL flock (not a subshell): the locked body runs
+    # in THIS shell so callers' function stubs / lease side effects stay coherent,
+    # and POOL_CHROME_PID etc. keep their pre-fix visibility. `exec 8>>` opens the
+    # lock, `flock -w 20 8` is the bounded acquire (rc 1 = TIMEOUT — distinguished
+    # from a genuine body failure), `exec 8>&-` releases on EVERY path. Long-lived
+    # children can't hold the lock: pool_chrome_launch closes fd 8 (8>&-) and the
+    # pool_daemon_connect calls below run under `8>&-` (a persistent agent-browser
+    # daemon must never inherit the lock fd).
+    lock_rc=0
+    if ! exec 8>>"$(pool_lane_boot_lock "$lane")" 2>/dev/null; then
+        _pool_log "pool_ensure_connected: cannot open boot lock for lane $lane; proceeding unlocked (best effort)"
+        lock_rc=99
+    elif flock -w 20 8; then
+        _pool_ensure_connected_locked "$lane"
+        lock_rc=$?
+    else
+        lock_rc=99   # flock TIMEOUT (busy >20s) — never a hang; ≠ genuine failure
+    fi
+    exec 8>&- 2>/dev/null || true
+    if (( lock_rc == 99 )); then
+        _pool_log "pool_ensure_connected: boot lock busy >20s for lane $lane; proceeding unlocked (best effort)"
+        _pool_ensure_connected_locked "$lane"
+        return $?
+    fi
+    return "$lock_rc"
+}
+
+# _pool_ensure_connected_locked LANE — the mutative body (T2.S3). Runs ONLY from
+# inside pool_ensure_connected's flock(1) subshell (or its timeout fallback).
+# IN-LOCK ORDER (critical):
+#   1. RE-READ the lease (pre-lock field values are stale by definition — a peer
+#      boot may have completed while we waited on the lock; relaunching over it is
+#      the exact BUG-002 symptom).
+#   2. fast-path re-check (connected && daemon_connected → heartbeat → 0)
+#   3. curl probe → pool_cdp_is_ours identity gate → pool_daemon_connect → 0/1
+#   4. dead-pid gate (/proc/<chrome_pid>, NEVER kill -0): chrome ALIVE → bounded
+#      pool_wait_cdp + rebind, NEVER relaunch; pid<=0 with a cmdline match on
+#      user-data-dir=$ephemeral_dir → same alive treatment.
+#   5. confirmed dead → relaunch (verbatim pre-T2.S3 relaunch block).
+# Same return-1 / never-pool_die-soft / never-drop-lane semantics as the wrapper.
+_pool_ensure_connected_locked() {
+    local lane="${1:-}"
+    local json session port ephemeral_dir connected chrome_pid now foreign=0
+    local -a _f
+
+    # --- 1. RE-READ the lease under the lock (peer boot may now be complete). ---
+    if ! json="$(pool_lease_read "$lane" 2>/dev/null)"; then
+        _pool_log "pool_ensure_connected: lease vanished for lane $lane"
+        return 1
+    fi
+    mapfile -t _f < <(jq -r '.session, .port, .ephemeral_dir, .connected, .chrome_pid' <<<"$json")
+    session="${_f[0]:-}"
+    port="${_f[1]:-}"
+    ephemeral_dir="${_f[2]:-}"
+    connected="${_f[3]:-true}"
+    chrome_pid="${_f[4]:-}"
+    [[ "$connected" == "true" || "$connected" == "false" ]] || connected=true
+    [[ "$chrome_pid" =~ ^[0-9]+$ ]] || chrome_pid=0
+
+    [[ "$port" =~ ^[0-9]+$ && "$port" -gt 0 ]] \
+        || { _pool_log "pool_ensure_connected: lane $lane not booted (port='$port')"; return 1; }
+    [[ -n "$session" ]]      || session="abpool-$lane"
+    [[ -n "$ephemeral_dir" && "$ephemeral_dir" == /* ]] || ephemeral_dir="$POOL_EPHEMERAL_ROOT/$lane"
+
+    now="$(_pool_now)"
+
+    # --- 2. fast-path RE-CHECK (peer finished while we waited on the lock). ---
+    if [[ "$connected" == "true" ]] && pool_daemon_connected "$session" "$port"; then
+        pool_lease_update "$lane" last_seen_at "$now"
+        return 0
+    fi
+
+    # --- 3. curl probe + identity gate + reconnect (pre-T2.S3 step c, verbatim
+    #     except the `foreign` flag + `8>&-` fd guards). `8>&-` on the daemon-facing
+    #     calls: a persistent agent-browser daemon spawned by connect must NEVER
+    #     inherit the lane lock fd (fd 8) and hold the flock past our return. ---
     if curl -sf "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
-        # Something answers on $port. Is it OUR Chrome? (Only check when we have a valid pid.)
         if [[ "$chrome_pid" =~ ^[0-9]+$ && "$chrome_pid" -gt 0 ]] \
             && ! pool_cdp_is_ours "$port" "$ephemeral_dir" "$chrome_pid"; then
-            # NOT ours (foreign Chrome) → do NOT rebind. Fall through to the relaunch branch below.
             _pool_log "pool_ensure_connected: lane $lane foreign Chrome on port $port → relaunch"
-        elif pool_daemon_connect "$session" "$port"; then
-            # Ours (or no valid pid → legacy) → the daemon just lost its binding. RECONNECT.
+            foreign=1   # identity PROVED the answerer is not ours → straight to
+                        # relaunch; the dead-pid gate below is for the no-answerer case
+        elif pool_daemon_connect "$session" "$port" 8>&-; then
             pool_lease_update "$lane" connected true
             pool_lease_update "$lane" last_seen_at "$now"
             _pool_log "pool_ensure_connected: lane $lane reconnected (same chrome, port=$port)"
@@ -2926,7 +3032,53 @@ pool_ensure_connected() {
         fi
     fi
 
-    # --- c. Chrome DEAD → RELAUNCH on the SAME dir+port (PRD §2.15 "Chrome crash mid-task"). ---
+    # --- 4. DEAD-PID GATE (BUG-002 / PRD h2.5): verify the recorded chrome pid is
+    # ACTUALLY DEAD before relaunching. /proc existence ONLY — NEVER kill -0
+    # (ESRCH/EPERM ambiguity, AGENTS.md §4). ALIVE means Chrome is merely still
+    # booting (CDP not open yet) → bounded wait + rebind; NEVER a second launch.
+    if [[ "$foreign" != 1 ]] \
+       && [[ "$chrome_pid" =~ ^[0-9]+$ && "$chrome_pid" -gt 0 && -e "/proc/$chrome_pid" ]]; then
+        # Chrome ALIVE — CDP merely not open yet (peer boot / slow start).
+        if pool_wait_cdp "$port" "$ephemeral_dir" "$chrome_pid" 8>&-; then
+            if pool_daemon_connect "$session" "$port" 8>&-; then
+                pool_lease_update "$lane" connected true
+                pool_lease_update "$lane" last_seen_at "$now"
+                _pool_log "pool_ensure_connected: lane $lane waited for live chrome pid=$chrome_pid; reconnected"
+                return 0
+            fi
+            pool_lease_update "$lane" connected false
+            pool_lease_update "$lane" last_seen_at "$now"
+            return 1
+        fi
+        # wait_cdp timeout — soft fail, existing semantics (never drops the lane).
+        _pool_log "pool_ensure_connected: lane $lane chrome pid=$chrome_pid alive but CDP never opened"
+        pool_lease_update "$lane" connected false
+        pool_lease_update "$lane" last_seen_at "$now"
+        return 1
+    fi
+    # pid<=0: only relaunch if NOTHING matches our user-data-dir on the cmdline.
+    # (pgrep rc 1 when no match — errexit-safe inside `if`.)
+    if [[ "$foreign" != 1 && ( ! "$chrome_pid" =~ ^[0-9]+$ || "$chrome_pid" -le 0 ) ]] \
+        && pgrep -f -- "user-data-dir=$ephemeral_dir( |$)" >/dev/null 2>&1; then
+        # An unrecorded chrome with our udd exists — treat as ALIVE (wait + rebind).
+        if pool_wait_cdp "$port" "$ephemeral_dir" "" 8>&-; then
+            if pool_daemon_connect "$session" "$port" 8>&-; then
+                pool_lease_update "$lane" connected true
+                pool_lease_update "$lane" last_seen_at "$now"
+                _pool_log "pool_ensure_connected: lane $lane waited for unrecorded chrome (udd match); reconnected"
+                return 0
+            fi
+            pool_lease_update "$lane" connected false
+            pool_lease_update "$lane" last_seen_at "$now"
+            return 1
+        fi
+        _pool_log "pool_ensure_connected: lane $lane unrecorded chrome (udd match) never opened CDP"
+        pool_lease_update "$lane" connected false
+        pool_lease_update "$lane" last_seen_at "$now"
+        return 1
+    fi
+
+    # --- 5. Confirmed dead → RELAUNCH on the SAME dir+port (verbatim pre-T2.S3). ---
     # Singleton cleanup BEFORE launch (research §3 / pool_copy_master pattern): defeats the
     # PID-recycle false-alive that would make Chrome exit without binding. Safe: curl just
     # proved the chrome is dead. SingletonSocket is AF_UNIX — rm -f handles all three.
@@ -2959,7 +3111,7 @@ pool_ensure_connected() {
     # CDP ready → re-bind the daemon. rc 1 = the (alive) chrome won't bind — set
     # connected:false, return 1. (We do NOT kill the live chrome here — ensure_connected
     # never drops the lane; the next ensure_connected / reaper handles it.)
-    if ! pool_daemon_connect "$session" "$port"; then
+    if ! pool_daemon_connect "$session" "$port" 8>&-; then
         _pool_log "pool_ensure_connected: lane $lane relaunch connect FAILED (cdp up, connect rc 1)"
         pool_lease_update "$lane" connected false
         pool_lease_update "$lane" last_seen_at "$now"

@@ -80,7 +80,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "pool_ensure_connected: lock the connect/relaunch path, re-read lease under lock, verify recorded chrome pid is dead before relaunching",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S2"

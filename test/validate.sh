@@ -679,9 +679,12 @@ source "$1/lib/pool.sh"
 pool_config_init
 pool_state_init
 # Lease: connected=false, port 53420, ephemeral_dir $2/active/1. Model Chrome DEAD so the
-# reconnect branch is skipped and the RELAUNCH branch fires (curl→1).
+# reconnect branch is skipped and the RELAUNCH branch fires (curl→1). chrome_pid is
+# DELIBERATELY above kernel.pid_max (max 2^22) — T2.S3's dead-pid gate checks
+# /proc/<pid>, and a small fixture pid (e.g. 200) can collide with a LIVE kernel
+# thread and nondeterministically divert into the alive-wait branch.
 #   args: LANE EPHEMERAL_DIR PORT SESSION OWNER_PID OWNER_COMM OWNER_STARTTIME CWD CHROME_PID CHROME_PGID CONNECTED
-pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 1000 "$2" 200 201 false
+pool_lease_write 1 "$2/active/1" 53420 abpool-1 1 pi 1000 "$2" 99999999 99999999 false
 # Stubs:
 curl()                { return 1; }   # Chrome DEAD → skip reconnect → RELAUNCH branch
 pool_daemon_connect() { return 0; }   # relaunch rebind succeeds → connected=true, return 0
