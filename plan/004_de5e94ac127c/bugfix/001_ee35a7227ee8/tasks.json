@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Major fixes: boot-path master-copy nesting and same-owner boot race (BUG-001, BUG-002)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Make pool_copy_master idempotent against an existing target dir so crash-recovery re-boots cannot nest the master copy; introduce a per-lane boot/connect mutex so concurrent driving commands from one owner serialize instead of double-launching Chrome; verify the recorded chrome pid is actually dead before relaunching; widen the release cmdline sweep so clobbered ids cannot leak a live Chrome past release. Add the test/bootrace.sh regression suite (fake chrome with a startup-delay knob + launch counter) and gate the milestone on all existing suites staying green with zero leaks.",
           "tasks": [
             {
@@ -114,14 +114,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Major-fix integration gate: full regression matrix + all repo suites green in an isolated sandbox",
-              "status": "Researching",
+              "status": "Complete",
               "description": "Verification-only gate for the major fixes: run test/bootrace.sh R1-R4 plus all four existing repo suites (validate, release_reaper, transparency, concurrency) inside an isolated sandbox with hard timeouts, plus static checks (bash -n + shellcheck on every touched shell file), and confirm zero leaked processes / temp trees afterwards. No new product code.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Run R1-R4 + 4 repo suites + static checks in an isolated sandbox; zero-orphan leak sweep",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S3",
@@ -157,7 +157,7 @@
                   "type": "Subtask",
                   "id": "P1.M2.T1.S1",
                   "title": "pool_reap_orphan_dirs: also remove a present-but-invalid lanes/N.json in the orphan branch",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: read architecture/fix_design.md §4 and system_context.md §7. pool_reap_orphan_dirs = lib/pool.sh:3131-3202; the orphan branch fires when `pool_lease_exists \"$base\"` is rc 1 (lease file MISSING **or corrupt** — 968-983 = [[ -f ]] + _pool_json_valid); it rm -rf's the dir (prefix-guarded) but never touches lanes/N.json. pool_lane_is_stale rc 2 (1189-1225) and pool_find_free_lane's [[ -f ]] (1126-1135, deliberate collision safety, comment 1108-1110) must stay UNTOUCHED. _pool_atomic_write (302-345) does no fsync by design — the fsync decision is documented in fix_design.md §4 (no code change; comment only if needed).\n2. INPUT: no code dependencies on other subtasks (may land in parallel with M1). Interfaces: pool_lease_exists LANE (rc 0 valid / 1 missing-or-corrupt), _pool_json_valid FILE, POOL_LANES_DIR/POOL_EPHEMERAL_ROOT globals, the existing orphan branch at ~3147-3185.\n3. LOGIC: Implement PRD h2.5 recommendation 'reap_orphan_dirs also removes an unparseable lanes/N.json after its dir is gone': in the orphan branch, after the prefix-guarded rm -rf of the dir, add: if the lease file exists AND pool_lease_exists fails (i.e. present-but-invalid — reaching this branch with the file present means it is corrupt), `rm -f -- \"$POOL_LANES_DIR/$base.json\"` with a `_pool_log \"pool_reap(orphan): removed corrupt lease $POOL_LANES_DIR/$base.json\"` line and a BUG-003 comment. Guard every rc-1 call under set -e (`if !` / `[[ ]]`). TDD: R5 in test/bootrace.sh — seed `printf 'not json {{{' > $STATE/lanes/7.json` + orphan dir 7 with a marker file → run `reap` → assert BOTH the dir and the lease are gone, the next acquire can take lane 7, and `status` no longer shows a row for lane 7 (mirror the PRD h3.2 repro; redirect HOME/state/ephemeral; no real chrome).\n4. OUTPUT: `reap` fully clears a corrupt-lease+orphan-dir lane. Consumed by P1.M2.T1.S2 (the release-side seam complements it) and documented by P1.M3.T2.S1.\n5. DOCS: [Mode A] Update the `reap` section of README.md (§ '### `reap`', ~line 236) with one sentence: corrupt/unparseable lease files are also cleared once their lane dir is gone — rides WITH this subtask. Do not create a separate docs task.",
