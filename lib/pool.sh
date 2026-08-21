@@ -5211,8 +5211,8 @@ pool_admin_help() {
     printf '                                  (caller = each subprocess gets its own lane)\n'
     printf '  ABPOOL_LANE                     pin this lane number for every command (fails\n'
     printf '                                  hard if the lane is live under a foreign owner)\n'
-    printf '  AGENT_BROWSER_POOL_HARNESSES    extra recognized harness command names\n'
-    printf '                                  (comma-separated; appended to pi/claude/codex/agy)\n'
+    printf '  AGENT_BROWSER_POOL_HARNESSES    recognized harness command names\n'
+    printf '                                  (comma-separated; replaces the default pi,claude,codex,agy,antigravity; empty/unset -> default)\n'
     printf '  AGENT_CHROME_PROFILE            force a Chrome --profile-directory for lanes\n'
     printf '\n'
     printf "Run 'agent-browser-pool doctor' to verify your setup.\n"

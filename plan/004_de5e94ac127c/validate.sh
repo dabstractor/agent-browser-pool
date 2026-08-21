@@ -18,10 +18,14 @@
 # Chromes + simulated owners and removes the sandbox; suites only run when their
 # prerequisites exist; `--fast` skips the real-Chrome suites.
 #
+# Usage: bash plan/004_de5e94ac127c/validate.sh [--fast]
+#   May be invoked from any CWD; the script cds to the repo root itself.
+#   --fast skips the real-Chrome suites.
+#
 # Exit 0 iff every check passes. Failures print "FAIL:" lines with stable names.
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../.." && pwd)"
 cd "$ROOT"
 
 PASS=0; FAIL=0

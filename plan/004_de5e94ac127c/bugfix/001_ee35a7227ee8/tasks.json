@@ -143,7 +143,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor fixes: corrupt-lease reclaim, doctor fresh-install probe, help text, validation artifact bootstrap (BUG-003..BUG-006)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Four independent minor fixes: make corrupt lanes/N.json reclaimable by reap and release (BUG-003); fix doctor's findmnt probe so a fresh install on btrfs reports OK instead of FAIL(unknown) (BUG-004); correct the AGENT_BROWSER_POOL_HARNESSES help text to replace-semantics with the 5-harness default (BUG-005); fix plan/004_de5e94ac127c/validate.sh's ROOT so the committed validation artifact runs green as shipped (BUG-006). Each carries its own regression case in test/bootrace.sh.",
           "tasks": [
             {
@@ -235,14 +235,14 @@
               "type": "Task",
               "id": "P1.M2.T4",
               "title": "BUG-006: fix plan/004_de5e94ac127c/validate.sh ROOT so the committed validation artifact runs green as shipped",
-              "status": "Planned",
+              "status": "Complete",
               "description": "The validation suite resolves ROOT to its own directory and cds there, then invokes the system under test via repo-relative paths (bash bin/agent-browser-pool, bash install.sh, bash test/validate.sh) — 64 of 89 checks fail rc-127 when run per its usage. The underlying checks are green (88/0 when paths resolve), so only the bootstrap is broken.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T4.S1",
                   "title": "ROOT walks ../../ to the repo root + R9 path check",
-                  "status": "Planned",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: read architecture/fix_design.md §6 and system_context.md §10. plan/004_de5e94ac127c/validate.sh:24-25: `ROOT=\"$(cd \"$(dirname \"$(readlink -f \"${BASH_SOURCE[0]}\")\")\" && pwd)\"; cd \"$ROOT\"`. Repo-relative invocations: lint loop :43, `bash bin/agent-browser-pool` :73/:278/:448/:482/:496/:540/:550, `bash install.sh` :310, `bash test/validate.sh` :153. Only ROOT exists (no REPO_ROOT). The script lives at <repo>/plan/004_de5e94ac127c/validate.sh → repo root = dirname/../.. — the one-line fix; everything downstream already assumes repo-root CWD after cd. NOTE: plan/**/tasks.json, PRD.md, prd_snapshot.md, prd_index.txt are orchestrator/human-owned — validate.sh is NOT in that list and this fix is explicitly mandated by the PRD. Do not modify anything else under plan/.\n2. INPUT: no code dependencies. Interfaces: the script's own ROOT variable + its `--fast` flag (line 31).\n3. LOGIC: Change line 24 to append `/../..` inside the cd (keep readlink -f for symlink safety): `ROOT=\"$(cd \"$(dirname \"$(readlink -f \"${BASH_SOURCE[0]}\")\")/../..\" && pwd)\"`. Add/refresh a 2-3 line usage comment at the top stating it runs from anywhere: `bash plan/004_de5e94ac127c/validate.sh [--fast]`. Sanity-check the relative invocations still resolve (they will — ROOT is now the repo root and line 25 cds there). TDD: R9 — from the repo root, `timeout`-bounded `bash plan/004_de5e94ac127c/validate.sh --fast` must complete its P1/P2 phases with ZERO 'No such file or directory' failures (grep the output; the full 89-check run is P1.M3.T1.S1's job, still under AGENTS.md isolation rules — if you run it here at all, run it --fast in an isolated temp tree, never against live HOME).\n4. OUTPUT: the committed artifact is runnable as shipped; consumed by P1.M3.T1.S1 which re-runs it to completion as the changeset's reproducible validation record.\n5. DOCS: none — the usage comment rides with the work; no repo-level doc surfaces this script's invocation contract beyond itself.",
@@ -267,14 +267,14 @@
               "type": "Task",
               "id": "P1.M3.T1",
               "title": "Final changeset regression gate",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Single verification pass over everything the changeset touched: static checks, all repo suites, the bootrace regression matrix, and the now-fixed plan/004_de5e94ac127c/validate.sh executed from the repo root per its own usage. Isolated sandbox, hard timeouts, zero orphans.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M3.T1.S1",
                   "title": "Run the complete matrix in an isolated sandbox and record the summary",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T1.S1",

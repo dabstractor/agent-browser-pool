@@ -629,6 +629,39 @@ r7_bug004_doctor_fresh_install() {
     return "$rc_all"
 }
 
+r8_bug005_help_harnesses_contract() {
+    local rc=0 help actual withovr
+    # (a) help text contract — bounded, hermetic (help only printfs; suite env redirects state)
+    help="$(timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" help 2>/dev/null || true)"
+    if ! grep -qi 'antigravity' <<<"$help"; then
+        _fail "R8: help omits antigravity" || rc=1
+    fi
+    if ! grep -qi 'replaces' <<<"$help"; then
+        _fail "R8: help lacks 'replaces'" || rc=1
+    fi
+    if grep -qi 'appended' <<<"$help"; then
+        _fail "R8: help still says 'appended'" || rc=1
+    fi
+    # (b) help-vs-code: default list cited in help == actual default
+    # shellcheck disable=SC2016  # $POOL_HARNESSES expands in the child
+    actual="$(cd "$ABPOOL_REPO" && env -u AGENT_BROWSER_POOL_HARNESSES bash -c \
+        'source lib/pool.sh; pool_config_init; printf "%s" "$POOL_HARNESSES"' 2>/dev/null || true)"
+    if [[ "$actual" != "pi,claude,codex,agy,antigravity" ]]; then
+        _fail "R8: actual default is [$actual]" || rc=1
+    fi
+    if ! grep -qi 'pi,claude,codex,agy,antigravity' <<<"$help"; then
+        _fail "R8: help default list != actual default ($actual)" || rc=1
+    fi
+    # (c) replace-semantics behavior check
+    # shellcheck disable=SC2016  # $POOL_HARNESSES expands in the child
+    withovr="$(cd "$ABPOOL_REPO" && AGENT_BROWSER_POOL_HARNESSES=myagent bash -c \
+        'source lib/pool.sh; pool_config_init; printf "%s" "$POOL_HARNESSES"' 2>/dev/null || true)"
+    if [[ "$withovr" != "myagent" ]]; then
+        _fail "R8: override produced [$withovr], expected myagent (replace)" || rc=1
+    fi
+    return "$rc"
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
@@ -637,7 +670,8 @@ _br_run_suite() {
               r3_control_delayed_boot_succeeds r3_bug002_race_e2e \
               r3_neg_dead_ids_release_still_kills r4_bug002_preport_race \
               r5_bug003_corrupt_lease_reclaimed r6_bug003_release_corrupt_lease \
-              r7_bug004_doctor_fresh_install; do
+              r7_bug004_doctor_fresh_install \
+              r8_bug005_help_harnesses_contract; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi
