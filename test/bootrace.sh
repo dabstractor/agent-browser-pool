@@ -12,6 +12,29 @@
 #     fake chrome + fake agent-browser only; no operator state touched.
 #
 # Invocation: bash test/bootrace.sh   (exit 0 iff all cases pass)
+#
+# --- BUG-002 fixture contract (added by T2.S1) -----------------------------------
+# FAKE_CHROME_DELAY       seconds the fake chrome sleeps BEFORE opening the CDP
+#                         listener (default 0; validated ^[0-9]+$ inside the fake).
+#                         During the delay `curl /json/version` FAILS = the race window
+#                         that mis-sends pool_ensure_connected down the relaunch path.
+# FAKE_CHROME_COUNT_FILE  path; the fake chrome appends one line "pid port dir" on EVERY
+#                         launch, BEFORE the delay sleep (launches killed mid-delay
+#                         still count). Suite default: $BR_T/chrome-launches.log; each
+#                         case resets it with `: >`.
+# _bootrace_setup         ONE suite setup: sandbox + env redirects + fixtures + trap.
+# _bootrace_teardown      trap target: kill owners (+wait), pkill fake patterns, rm tree.
+#
+# Consumers of this harness (add cases here, do not fork the file):
+#   P1.M1.T2.S2 (boot lock — R4-style pre-port-race cases)
+#   P1.M1.T2.S3 (ensure_connected hardening — drives R3 GREEN)
+#   P1.M1.T2.S4 (release sweep widening — leak-assertion cases)
+#   P1.M2 (R5–R8 minor-bug cases)
+#
+# KNOWN-RED: r3_bug002_race_e2e is EXPECTED TO FAIL until T2.S2/S3 land the lib fixes —
+# the suite therefore exits 1 in this state (TDD: the harness proves the bug exists).
+# r3_control_delayed_boot_succeeds is the harness's own green gate; if THAT fails, the
+# fixtures are wrong, not the pool.
 
 set -euo pipefail
 
@@ -37,41 +60,62 @@ assert_eq() {
 }
 
 # --- sandbox setup (ONE call for the whole suite) -------------------------------
+# Contract names _bootrace_setup/_bootrace_teardown (T2.S1 item contract §4); thin
+# wrappers over the _br_* core so both naming schemes stay valid. ONE setup call.
 # -p "$HOME": keep the temp tree on the real (btrfs) FS so lanes exercise real cp.
-BR_T="$(mktemp -d -p "$HOME" -t abpool-bootrace.XXXXXX)"
-mkdir -p -- "$BR_T/home" "$BR_T/state" "$BR_T/active" "$BR_T/master/Default" \
-         "$BR_T/bin" "$BR_T/profile-home/.local/bin"
+_bootrace_setup() {
+    BR_T="$(mktemp -d -p "$HOME" -t abpool-bootrace.XXXXXX)"
+    mkdir -p -- "$BR_T/home" "$BR_T/state" "$BR_T/active" "$BR_T/master/Default" \
+             "$BR_T/bin" "$BR_T/profile-home/.local/bin"
 
-# A minimal VALID master (pool_check_master requires content — 'Local State' + Default/):
-printf '{"user-experience-enrollment":{"prevalence":0}}\n' >"$BR_T/master/Local State"
-printf '{"marker":"trusted-identity"}\n' >"$BR_T/master/Default/Preferences"
-# TRUSTED-PROFILE MARKER for R2: must land at the lane top level after recovery.
-printf 'master-marker\n' >"$BR_T/master/Default/master-marker.txt"
+    # A minimal VALID master (pool_check_master requires content — 'Local State' + Default/):
+    printf '{"user-experience-enrollment":{"prevalence":0}}\n' >"$BR_T/master/Local State"
+    printf '{"marker":"trusted-identity"}\n' >"$BR_T/master/Default/Preferences"
+    # TRUSTED-PROFILE MARKER for R2: must land at the lane top level after recovery.
+    printf 'master-marker\n' >"$BR_T/master/Default/master-marker.txt"
 
-trap '_br_teardown' EXIT INT TERM
+    trap '_bootrace_teardown' EXIT INT TERM
 
-HOME="$BR_T/home"
-export HOME
-AGENT_BROWSER_POOL_STATE="$BR_T/state"
-AGENT_CHROME_EPHEMERAL_ROOT="$BR_T/active"
-AGENT_CHROME_MASTER="$BR_T/master"
-AGENT_CHROME_BIN="$BR_T/bin/fake-chrome"
-AGENT_BROWSER_REAL="$BR_T/bin/fake-agent-browser"
-AGENT_CHROME_ALLOW_SLOW_COPY=1
-export AGENT_BROWSER_POOL_STATE AGENT_CHROME_EPHEMERAL_ROOT AGENT_CHROME_MASTER \
-       AGENT_CHROME_BIN AGENT_BROWSER_REAL AGENT_CHROME_ALLOW_SLOW_COPY
+    HOME="$BR_T/home"
+    export HOME
+    AGENT_BROWSER_POOL_STATE="$BR_T/state"
+    AGENT_CHROME_EPHEMERAL_ROOT="$BR_T/active"
+    AGENT_CHROME_MASTER="$BR_T/master"
+    AGENT_CHROME_BIN="$BR_T/bin/fake-chrome"
+    AGENT_BROWSER_REAL="$BR_T/bin/fake-agent-browser"
+    AGENT_CHROME_ALLOW_SLOW_COPY=1
+    export AGENT_BROWSER_POOL_STATE AGENT_CHROME_EPHEMERAL_ROOT AGENT_CHROME_MASTER \
+           AGENT_CHROME_BIN AGENT_BROWSER_REAL AGENT_CHROME_ALLOW_SLOW_COPY
+
+    # BUG-002 launch counter (suite default; cases reset with `: >`).
+    FAKE_CHROME_COUNT_FILE="$BR_T/chrome-launches.log"
+    export FAKE_CHROME_COUNT_FILE
+    : >"$FAKE_CHROME_COUNT_FILE"
+}
 
 # --- fixtures -------------------------------------------------------------------
 
 _br_make_fake_chrome() {
     cat >"$BR_T/bin/fake-chrome" <<'EOF'
 #!/usr/bin/env bash
-# fake chrome: parse --remote-debugging-port from argv; serve /json/version; block.
-port=""
+# fake chrome: parse --remote-debugging-port/--user-data-dir from argv; append one
+# "pid port dir" line to $FAKE_CHROME_COUNT_FILE (BEFORE the delay — launches killed
+# mid-delay still count); sleep ${FAKE_CHROME_DELAY:-0} (the race window: CDP not up
+# yet); then serve /json/version and block forever.
+port="" dir=""
 for a in "$@"; do
-    [[ "$a" == --remote-debugging-port=* ]] && port="${a##*=}"
+    case "$a" in
+        --remote-debugging-port=*) port="${a##*=}" ;;
+        --user-data-dir=*)         dir="${a##*=}"  ;;
+    esac
 done
 [[ "$port" =~ ^[0-9]+$ ]] || exit 1
+if [[ -n "${FAKE_CHROME_COUNT_FILE:-}" ]]; then
+    printf '%s %s %s\n' "$$" "$port" "${dir:-<no-dir>}" >>"$FAKE_CHROME_COUNT_FILE" 2>/dev/null || true
+fi
+if [[ "${FAKE_CHROME_DELAY:-0}" =~ ^[0-9]+$ && "${FAKE_CHROME_DELAY:-0}" -gt 0 ]]; then
+    sleep "$FAKE_CHROME_DELAY"
+fi
 d="$(mktemp -d -t fake-cdp.XXXXXX)"
 mkdir -p -- "$d/json"
 printf '{"Browser":"FakeChrome/1.0","webSocketDebuggerUrl":"ws://127.0.0.1:%s/devtools/browser/fake"}\n' "$port" \
@@ -86,9 +130,26 @@ EOF
 _br_make_fake_ab() {
     cat >"$BR_T/bin/fake-agent-browser" <<'EOF'
 #!/usr/bin/env bash
-# fake agent-browser: satisfy pool_daemon_connect (`--session X connect P` → rc 0)
-# and the final exec (any args → rc 0).
-exit 0
+# fake agent-browser — satisfies pool_daemon_connect / pool_daemon_connected /
+# terminal exec (lib/pool.sh contract):
+#   `--session S connect P`            → rc 0 (pool_daemon_connect only checks rc)
+#   `--session S --json session list`  → {"success":true,"data":{"sessions":[S]}}
+#       (pool_daemon_connected pipes this through
+#        jq -e --arg s S '.data.sessions | index($s)' — reporting the QUERIED session
+#        makes the check pass: stateless-yet-"connected" after connect)
+#   anything else (terminal exec: open/get/…) → rc 0
+session="" prev=""
+for a in "$@"; do
+    [[ "$prev" == "--session" ]] && session="$a"
+    prev="$a"
+done
+case " $* " in
+    *" session list "*)
+        printf '{"success":true,"data":{"sessions":["%s"]}}\n' "${session:-abpool-1}"
+        exit 0
+        ;;
+    *) exit 0 ;;
+esac
 EOF
     chmod +x -- "$BR_T/bin/fake-agent-browser"
 }
@@ -166,11 +227,89 @@ r2_bug001_recovery_e2e() {
     rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
 }
 
+# R3-control — BUG-002 harness green gate: a SINGLE open with a slow-booting chrome
+# (FAKE_CHROME_DELAY=4) must succeed — pool_wait_cdp waits past the delay, the lane
+# connects through the fakes, exactly ONE chrome launch. If this fails, the FIXTURES
+# are wrong (fake contract mismatch), not the pool.
+r3_control_delayed_boot_succeeds() {
+    local rc n connected
+    _br_spawn_owner
+    : >"$FAKE_CHROME_COUNT_FILE"
+    rc=0
+    FAKE_CHROME_DELAY=4 timeout 60 "$ABPOOL_REPO/bin/agent-browser-pool" open about:blank >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        _fail "R3-control: delayed single open rc=$rc (expected 0)"
+    fi
+    n="$(wc -l <"$FAKE_CHROME_COUNT_FILE" 2>/dev/null || printf 0)"
+    connected="$(jq -r '.connected // "null"' "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || echo null)"
+    # --- cleanup FIRST (always runs) ---
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+    pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || true
+    rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
+    # --- assertions on snapshots ---
+    if (( rc != 0 )); then return 1; fi
+    if [[ "$n" != "1" ]]; then
+        _fail "R3-control: expected exactly 1 launch, got $n"; return 1
+    fi
+    if [[ "$connected" != "true" ]]; then
+        _fail "R3-control: lease connected=$connected (expected true)"; return 1
+    fi
+}
+
+# R3 — BUG-002 race e2e (KNOWN-RED until T2.S2/S3): FAKE_CHROME_DELAY=4, cmd A bg, cmd B
+# at 0.8s. Assertions snapshot-then-clean-then-assert (cleanup always runs, even red).
+r3_bug002_race_e2e() {
+    local rc2 n lease_pid survivors dir_gone count_pids rc_all
+    _br_spawn_owner
+    : >"$FAKE_CHROME_COUNT_FILE"
+    # cmd A backgrounded (its own timeout bounds it).
+    FAKE_CHROME_DELAY=4 timeout 60 "$ABPOOL_REPO/bin/agent-browser-pool" open about:blank >/dev/null 2>&1 &
+    local apid=$!
+    sleep 0.8
+    # cmd B: the racing second command.
+    rc2=0
+    timeout 60 "$ABPOOL_REPO/bin/agent-browser-pool" get cdp-url >/dev/null 2>&1 || rc2=$?
+    wait "$apid" 2>/dev/null || true
+    # --- snapshot observable state ---
+    n="$(wc -l <"$FAKE_CHROME_COUNT_FILE" 2>/dev/null || printf 0)"
+    lease_pid="$(jq -r '.chrome_pid // 0' "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || echo 0)"
+    # --- cleanup FIRST (always runs, even when assertions would fail) ---
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+    pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+    sleep 0.3
+    survivors="$(pgrep -af "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true)"
+    dir_gone=1; [[ -e "$AGENT_CHROME_EPHEMERAL_ROOT/1" ]] && dir_gone=0
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || true
+    rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
+    # --- assertions on snapshots (each a named, grep-able R3: FAIL line) ---
+    rc_all=0
+    if (( rc2 != 0 )); then
+        _fail "R3: second command rc=$rc2 (spurious failure — race hit)" || rc_all=1
+    fi
+    if [[ "$n" != "1" ]]; then
+        _fail "R3: expected exactly 1 chrome launch, got $n (double-launch)" || rc_all=1
+    fi
+    count_pids="$(awk '{print $1}' "$FAKE_CHROME_COUNT_FILE" 2>/dev/null | tr '\n' ' ' || true)"
+    if [[ "$lease_pid" == "0" ]] || [[ ! -d "/proc/$lease_pid" ]] \
+       || [[ " ${count_pids} " != *" $lease_pid "* ]]; then
+        _fail "R3: lease chrome_pid=$lease_pid not live / not the launched pid (clobbered lease; launched: ${count_pids:-none})" || rc_all=1
+    fi
+    if [[ -n "$survivors" ]]; then
+        _fail "R3: leaked chrome processes after release all: $survivors" || rc_all=1
+    fi
+    if (( dir_gone != 1 )); then
+        _fail "R3: lane dir survived release all" || rc_all=1
+    fi
+    return "$rc_all"
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
     local fn
-    for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e; do
+    for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e \
+              r3_control_delayed_boot_succeeds r3_bug002_race_e2e; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi
@@ -187,13 +326,20 @@ _br_teardown() {
     [[ "${BR_TEARDOWN_FINAL:-0}" == 1 ]] || return 0
     BR_TEARDOWN_FINAL=0
     for pid in "${BR_OWNERS[@]:-}"; do kill "$pid" 2>/dev/null || true; done 2>/dev/null || true
+    for pid in "${BR_OWNERS[@]:-}"; do wait "$pid" 2>/dev/null || true; done 2>/dev/null || true
     pkill -f -- 'fake-cdp\.' 2>/dev/null || true
     pkill -f -- "user-data-dir=$BR_T/active" 2>/dev/null || true
     pkill -f -- 'http.server' 2>/dev/null || true
     [[ -n "${BR_T:-}" ]] && rm -rf -- "$BR_T" 2>/dev/null || true
 }
 
+# Contract-name teardown (T2.S1 §4) — thin wrapper over the _br_* core.
+_bootrace_teardown() {
+    _br_teardown "@"
+}
+
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    _bootrace_setup          # ONE setup for the whole suite (never per-case)
     _br_make_fake_chrome
     _br_make_fake_ab
     BR_TEARDOWN_FINAL=1
