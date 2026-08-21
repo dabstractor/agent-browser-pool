@@ -4968,6 +4968,15 @@ pool_admin_doctor() {
     # SOURCE not the mount tree and exits 1 even on btrfs). `|| true` neutralizes a
     # missing-path exit-1 → fstype becomes "" → "not btrfs".
     printf '[filesystem]\n'
+    # BUG-004 (fix_design §3): the ephemeral root may not exist yet on a fresh install
+    # (install.sh pre-creates only the state dir; the root is first created by
+    # pool_copy_master at first acquire). findmnt -T on a MISSING path exits 1 EMPTY →
+    # fstype "" → false "not btrfs". Mirror pool_copy_master: ensure the dir, then probe
+    # it — the probe is exact on the FIRST run and repeat runs, and the diagnostic
+    # self-heals (creating the documented root is a safe, user-visible side effect).
+    # NON-fatal (`|| true`): doctor never aborts mid-report; a genuine mkdir failure
+    # (perms/RO-FS) leaves the path absent → fstype "" → a TRUE failure below.
+    mkdir -p -- "$POOL_EPHEMERAL_ROOT" 2>/dev/null || true
     fstype="$(findmnt -nno FSTYPE -T "$POOL_EPHEMERAL_ROOT" 2>/dev/null || true)"
     if [[ "$fstype" == "btrfs" ]]; then
         printf '  %-22s OK (btrfs)\n' "$POOL_EPHEMERAL_ROOT"

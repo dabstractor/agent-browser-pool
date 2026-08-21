@@ -570,6 +570,65 @@ r6_bug003_release_corrupt_lease() {
     return "$rc_all"
 }
 
+# R7 — BUG-004 (fix_design §3): doctor must not false-FAIL [filesystem] when the
+# ephemeral root does not exist yet (fresh install: install.sh pre-creates only the
+# STATE dir; the root is first created by pool_copy_master at first acquire).
+# findmnt -T on a MISSING path exits 1 EMPTY → fstype "" → false "not btrfs".
+# Fix under test: doctor mkdir -p's the root before probing (pre-create, non-fatal).
+# Three variants:
+#   (1) MISSING root on the harness's btrfs tree → 'OK (btrfs)' + dir created + rc 0
+#       (every other doctor check is green in the harness env, so rc reflects ONLY
+#       real findings);
+#   (2) existing tmpfs (non-btrfs) root + suite-default ALLOW_SLOW_COPY=1 → WARN
+#       (proves the WARN branch still fires);
+#   (3) same root + ALLOW_SLOW_COPY=0 → FAIL + rc≠0 (proves a GENUINE non-btrfs
+#       finding still fails — the false-FAIL is gone, the true one stays).
+r7_bug004_doctor_fresh_install() {
+    local rc out root_missing root_tmpfs rc_all
+    root_missing="$BR_T/active-missing"
+    root_tmpfs="$(mktemp -d -p /dev/shm -t abpool-r7-nonbtrfs.XXXXXX)"
+    rc_all=0
+
+    # --- variant 1: MISSING root → OK (btrfs) + dir created + rc 0 ---
+    # Prefix assignment overrides the suite-exported AGENT_CHROME_EPHEMERAL_ROOT for
+    # this ONE subprocess (plain assignment after `local` = SC2155-safe).
+    rc=0
+    out="$(AGENT_CHROME_EPHEMERAL_ROOT="$root_missing" \
+           timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" doctor 2>&1)" || rc=$?
+    if (( rc != 0 )); then
+        _fail "R7: doctor rc=$rc with missing ephemeral root (BUG-004 reproduced)" || rc_all=1
+    fi
+    if ! grep -qF -- "$root_missing OK (btrfs)" <<<"$out"; then
+        _fail "R7: [filesystem] expected 'OK (btrfs)' for missing root: $root_missing" || rc_all=1
+    fi
+    if [[ ! -d "$root_missing" ]]; then
+        _fail "R7: doctor did not create the missing ephemeral root" || rc_all=1
+    fi
+
+    # --- variant 2: existing NON-btrfs (tmpfs) + ALLOW_SLOW_COPY=1 → WARN ---
+    rc=0
+    out="$(AGENT_CHROME_EPHEMERAL_ROOT="$root_tmpfs" \
+           timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" doctor 2>&1)" || rc=$?
+    if ! grep -qF -- "$root_tmpfs WARN (tmpfs; slow-copy allowed)" <<<"$out"; then
+        _fail "R7: expected 'WARN (tmpfs; slow-copy allowed)' for $root_tmpfs" || rc_all=1
+    fi
+
+    # --- variant 3: same root + ALLOW_SLOW_COPY=0 → FAIL + rc 1 ---
+    rc=0
+    out="$(AGENT_CHROME_EPHEMERAL_ROOT="$root_tmpfs" AGENT_CHROME_ALLOW_SLOW_COPY=0 \
+           timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" doctor 2>&1)" || rc=$?
+    if (( rc == 0 )); then
+        _fail "R7: doctor rc=0 on genuine non-btrfs without slow-copy (expected 1)" || rc_all=1
+    fi
+    if ! grep -qF -- "$root_tmpfs FAIL (tmpfs; not btrfs)" <<<"$out"; then
+        _fail "R7: expected 'FAIL (tmpfs; not btrfs)' for $root_tmpfs" || rc_all=1
+    fi
+
+    # --- cleanup (unconditional; AGENTS.md §3) ---
+    rm -rf -- "$root_missing" "$root_tmpfs" 2>/dev/null || true
+    return "$rc_all"
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
@@ -577,7 +636,8 @@ _br_run_suite() {
     for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e \
               r3_control_delayed_boot_succeeds r3_bug002_race_e2e \
               r3_neg_dead_ids_release_still_kills r4_bug002_preport_race \
-              r5_bug003_corrupt_lease_reclaimed r6_bug003_release_corrupt_lease; do
+              r5_bug003_corrupt_lease_reclaimed r6_bug003_release_corrupt_lease \
+              r7_bug004_doctor_fresh_install; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi

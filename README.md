@@ -278,7 +278,10 @@ Diagnose the pool. Checks dependencies, the real binary, the filesystem (btrfs),
 source/master profile, and reconciles leases against live Chromes and ephemeral dirs. Exits
 `0` if healthy, `1` only if a blocking infrastructure check **fails**. `WARN`s are advisory
 cruft — orphan dirs, dead Chrome, a disconnected daemon, a provisional lease — that `reap`
-and `release` recover from; they do **not** affect the exit code. Sections, in order:
+and `release` recover from; they do **not** affect the exit code. If the ephemeral root
+directory does not exist yet, `doctor` creates it — so the btrfs check is exact on fresh
+installs (the root is otherwise first created at your first `open`/`connect`).
+Sections, in order:
 
 ```
 [dependencies]   flock, setsid, pgrep, pkill, cp, curl, jq, findmnt, chrome → OK / MISSING;

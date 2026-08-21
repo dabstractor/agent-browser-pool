@@ -189,14 +189,14 @@
               "type": "Task",
               "id": "P1.M2.T2",
               "title": "BUG-004: doctor filesystem probe must not false-FAIL when the ephemeral root does not exist yet",
-              "status": "Researching",
+              "status": "Complete",
               "description": "pool_admin_doctor probes `findmnt -nno FSTYPE -T \"$POOL_EPHEMERAL_ROOT\"`; findmnt -T on a nonexistent path exits 1 with empty output, so a 100% btrfs fresh install reports '[filesystem] FAIL (unknown; not btrfs)' and install.sh prints 'doctor: found problems'. Mirror pool_copy_master's ensure-parent-then-probe pattern so doctor is correct before the first acquire.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T2.S1",
                   "title": "Doctor: mkdir -p the ephemeral root before the findmnt probe (pool_copy_master pattern) + R7",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: read architecture/fix_design.md §3 and system_context.md §8. The probe is at lib/pool.sh:4649 inside pool_admin_doctor's [filesystem] block (4643-4661): `fstype=\"$(findmnt -nno FSTYPE -T \"$POOL_EPHEMERAL_ROOT\" 2>/dev/null || true)\"`. The pattern to mirror: pool_copy_master mkdir's the parent then probes it (1295-1300, 1321). It is the ONLY doctor probe conflating 'absent' with 'not btrfs' (deps use command -v; master uses -d + ls -A). install.sh (line 98 pool_state_init; 103-111 doctor subprocess) needs NO change — fixing doctor also fixes bare `agent-browser-pool doctor` on a cloned-but-uninstalled tree. findmnt -T is MANDATORY (bare findmnt \"$dir\" breaks on this host — GOTCHA at 1268). Do NOT touch pool_check_btrfs (acquire-time gate; its GOTCHA comments at 268-271 explain why).\n2. INPUT: no code dependencies. Interfaces: POOL_EPHEMERAL_ROOT / POOL_ALLOW_SLOW_COPY globals (frozen by pool_config_init), the doctor ok/warn/fail counters and message formats.\n3. LOGIC: Implement PRD h2.3/h3.3 (recommendation offers ancestor-probe OR pre-create; fix_design.md §3 CHOSE pre-create so repeat runs are exact and the diagnostic self-heals): immediately before the fstype capture, add `mkdir -p -- \"$POOL_EPHEMERAL_ROOT\" 2>/dev/null || true` with a BUG-004 comment (fresh install: root first created by pool_copy_master at first acquire; findmnt -T on a missing path exits 1 EMPTY → false 'not btrfs'). Keep the OK/WARN/FAIL branches and message formats identical; only the empty-string case disappears. TDD: R7 — fresh temp tree with AGENT_CHROME_EPHEMERAL_ROOT=$T/active-missing (nonexistent) → `doctor` → the [filesystem] line is OK (btrfs) on a btrfs host (WARN when POOL_ALLOW_SLOW_COPY=1 on non-btrfs), doctor's overall rc reflects real findings only, and the dir now exists; negative control: a genuinely non-btrfs existing path still FAILs.\n4. OUTPUT: doctor correct on fresh installs; ephemeral root created as a side effect (documented). Consumed by P1.M3.T2.S1 (README doctor section) and P1.M3.T1.S1.\n5. DOCS: [Mode A] README.md § '### `doctor`' (~line 269): one sentence — doctor creates the ephemeral root if absent (so the btrfs check is exact on fresh installs). Rides WITH this subtask.",
@@ -212,14 +212,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "BUG-005: fix the AGENT_BROWSER_POOL_HARNESSES help text (replace semantics, 5-harness default)",
-              "status": "Planned",
+              "status": "Researching",
               "description": "The built-in help says AGENT_BROWSER_POOL_HARNESSES is 'appended to pi/claude/codex/agy' but pool_config_init REPLACES the set (and the cited default omits antigravity) — the first place users look misdocuments the variable that can silently disable every default harness. Code matches PRD §2.11 and both docs; only help is wrong.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Rewrite the two help printf lines + help-vs-code contract case R8",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: read architecture/fix_design.md §5 and system_context.md §9. The wrong lines are lib/pool.sh:4879-4880 inside pool_admin_help (4806-4890): 'extra recognized harness command names' / '(comma-separated; appended to pi/claude/codex/agy)'. Ground truth: pool_config_init lib/pool.sh:207-213 — `${AGENT_BROWSER_POOL_HARNESSES:-pi,claude,codex,agy,antigravity}`, lowercased, comma-squeezed, empty→default = REPLACE semantics. README.md:320 and .agents/skills/agent-browser-pool/references/configuration.md:28 already document replace correctly — this is a TEXT-ONLY fix; do not touch pool_config_init.\n2. INPUT: no code dependencies. Interfaces: pool_admin_help's printf block (follow its column alignment: descriptions start at the same column, ~38-char env-var column).\n3. LOGIC: Rewrite the two lines to state replace semantics and the full 5-item default, e.g. 'recognized harness command names (comma-separated;' / '(replaces the default pi,claude,codex,agy,antigravity; empty/unset → default)'. Keep the two-line layout and alignment. TDD: R8 — a contract probe in test/bootrace.sh: `agent-browser-pool help` output contains 'antigravity' and 'replaces' (case-insensitive ok), does NOT contain 'appended', and the default list it cites equals the actual default set (cross-check by sourcing lib/pool.sh in a subshell with the var unset and printing $POOL_HARNESSES — the PRD h3.4 repro steps 1-3).\n4. OUTPUT: help matches code/docs. Consumed by P1.M3.T2.S2 (skill-doc consistency sweep verifies against the new help text).\n5. DOCS: none beyond the help text itself — the help IS the user-facing doc being fixed (Mode A by construction); README/configuration.md are already correct and need no change here.",
