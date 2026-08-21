@@ -11,7 +11,7 @@
           "type": "Milestone",
           "id": "P1.M1",
           "title": "Major fixes: boot-path master-copy nesting and same-owner boot race (BUG-001, BUG-002)",
-          "status": "Planned",
+          "status": "Researching",
           "description": "Make pool_copy_master idempotent against an existing target dir so crash-recovery re-boots cannot nest the master copy; introduce a per-lane boot/connect mutex so concurrent driving commands from one owner serialize instead of double-launching Chrome; verify the recorded chrome pid is actually dead before relaunching; widen the release cmdline sweep so clobbered ids cannot leak a live Chrome past release. Add the test/bootrace.sh regression suite (fake chrome with a startup-delay knob + launch counter) and gate the milestone on all existing suites staying green with zero leaks.",
           "tasks": [
             {
@@ -42,7 +42,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "BUG-002: serialize same-owner lane boot/connect, verify dead pid before relaunch, widen release sweep",
-              "status": "Ready",
+              "status": "Complete",
               "description": "There is no same-owner boot synchronization: a second concurrent driving command during boot finds the live lease (port>0, connected=false), pool_ensure_connected's curl probe fails only because CDP is not open yet, and it falls through to a SECOND Chrome launch — the second command spuriously fails after a 15s wait_cdp timeout, the lease ids are clobbered to the doomed second Chrome, and a later release all leaks the REAL Chrome past teardown (the (3b) sweep at lib/pool.sh:2083-2101 only fires when both ids are <=0). Introduce a per-lane flock (new file, never fd 9 on acquire.lock), double-check the lease under the lock, verify the recorded chrome pid is actually dead before relaunching, and widen the release sweep.",
               "subtasks": [
                 {
@@ -96,7 +96,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S4",
                   "title": "Widen the (3b) mid-boot cmdline sweep in _pool_release_lane_internals so positive-but-dead ids cannot leak a live Chrome",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"
@@ -114,14 +114,14 @@
               "type": "Task",
               "id": "P1.M1.T3",
               "title": "Major-fix integration gate: full regression matrix + all repo suites green in an isolated sandbox",
-              "status": "Planned",
+              "status": "Researching",
               "description": "Verification-only gate for the major fixes: run test/bootrace.sh R1-R4 plus all four existing repo suites (validate, release_reaper, transparency, concurrency) inside an isolated sandbox with hard timeouts, plus static checks (bash -n + shellcheck on every touched shell file), and confirm zero leaked processes / temp trees afterwards. No new product code.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M1.T3.S1",
                   "title": "Run R1-R4 + 4 repo suites + static checks in an isolated sandbox; zero-orphan leak sweep",
-                  "status": "Planned",
+                  "status": "Researching",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S3",

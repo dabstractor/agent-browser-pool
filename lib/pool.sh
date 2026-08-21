@@ -2143,16 +2143,23 @@ _pool_release_lane_internals() {
     # (3) Kill the Chrome process group (idempotent; handles 0/0 provisional lease).
     pool_chrome_kill "$chrome_pid" "$chrome_pgid"
 
-    # (3b) MID-BOOT KILL RACE fallback (validation issue #3): the lease's chrome ids are
-    #      written only AFTER launch returns (_pool_boot_write_chrome_ids), so a wrapper
-    #      killed inside that window holds chrome_pid=0/pgid=0 — pool_chrome_kill is a
-    #      no-op and the rm -rf below leaves a LIVE Chrome that recreates its
-    #      user-data-dir. When the lease has no trusted ids, sweep by cmdline (mirrors
-    #      pool_reap_orphan_dirs: pattern anchored at the lane-dir boundary with `( |$)`
-    #      so prefix-colliding lanes are never hit; pgrep rc 1 → no kill; best-effort).
+    # (3b) MID-BOOT KILL RACE fallback (validation issue #3) — WIDENED per BUG-002
+    #      (fix_design §2c): the id-based kill at (3) cannot be trusted whenever the
+    #      recorded ids were never written (mid-boot 0/0 window), are DEAD
+    #      (BUG-002 clobber: /proc gone → pool_chrome_kill was a no-op and the rm -rf
+    #      would leave a LIVE Chrome on a deleted user-data-dir), or are ALIVE-BUT-
+    #      FOREIGN (cmdline lacks this lane's dir). Skip the sweep ONLY when the
+    #      recorded pid is confirmed alive-and-matching (it was the id-kill's target;
+    #      sweeping again would be redundant). Mirrors pool_reap_orphan_dirs: pattern
+    #      anchored at the lane-dir boundary with `( |$)` so prefix-colliding lanes
+    #      are never hit; pgrep rc 1 → no kill; best-effort.
     dir="$POOL_EPHEMERAL_ROOT/$lane"
-    if [[ ! ( "$chrome_pid"  =~ ^[0-9]+$ && "$chrome_pid"  -gt 0 )
-          && ! ( "$chrome_pgid" =~ ^[0-9]+$ && "$chrome_pgid" -gt 0 ) ]]; then
+    local pid_cmd=""
+    if [[ "$chrome_pid" =~ ^[0-9]+$ ]] && (( chrome_pid > 0 )) \
+       && [[ -d "/proc/$chrome_pid" ]]; then
+        pid_cmd="$(tr '\0' ' ' < "/proc/$chrome_pid/cmdline" 2>/dev/null || true)"
+    fi
+    if [[ "$pid_cmd" != *"user-data-dir=$dir"* ]]; then
         local pat="user-data-dir=$dir( |\$)"
         if pgrep -f -- "$pat" >/dev/null 2>&1; then
             _pool_log "pool_acquire(reap): lane $lane chrome ids untrusted → cmdline sweep"

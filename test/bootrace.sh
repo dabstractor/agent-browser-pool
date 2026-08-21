@@ -341,6 +341,58 @@ r3_bug002_race_e2e() {
     return "$rc_all"
 }
 
+# R3-neg — BUG-002 negative control for the WIDENED (3b) sweep (T2.S4): the lease
+# holds positive-but-DEAD ids (the clobber state) while a LIVE chrome runs on the
+# lane dir. The old gate (fire only when BOTH ids <=0) skipped the sweep → leak.
+# With the widened gate (skip only when the recorded pid is alive-and-matching),
+# release must still kill the live chrome. KNOWN-RED pre-fix, GREEN post-fix.
+r3_neg_dead_ids_release_still_kills() {
+    local rc dp survivors dir_gone rc_all
+    _br_spawn_owner
+    # Harvest a REAL dead positive pid: kill + wait reaps it → /proc/$dp gone.
+    sleep 300 &
+    dp=$!
+    kill "$dp" 2>/dev/null || true
+    wait "$dp" 2>/dev/null || true
+    # Boot one lane normally (no fake delay; rc must be 0 else fixtures are broken).
+    rc=0
+    timeout 60 "$ABPOOL_REPO/bin/agent-browser-pool" open about:blank >/dev/null 2>&1 || rc=$?
+    if (( rc != 0 )); then
+        _fail "R3-neg: fixture problem — single open rc=$rc"
+        timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+        pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+        rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || true
+        rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
+        return 1
+    fi
+    # Simulate the BUG-002 clobber: rewrite the lease ids to the dead pid while the
+    # fake chrome (recorded in FAKE_CHROME_COUNT_FILE) is still LIVE.
+    jq --argjson pid "$dp" --argjson pgid "$dp" \
+       '.chrome_pid=$pid | .chrome_pgid=$pgid' \
+       "$AGENT_BROWSER_POOL_STATE/lanes/1.json" >"$BR_T/r3neg.lease.json" 2>/dev/null \
+       && cat "$BR_T/r3neg.lease.json" >"$AGENT_BROWSER_POOL_STATE/lanes/1.json"
+    rm -f "$BR_T/r3neg.lease.json" 2>/dev/null || true
+    # Release with the lying lease ids.
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+    sleep 0.3
+    # --- snapshot observable state ---
+    survivors="$(pgrep -af "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true)"
+    dir_gone=1; [[ -e "$AGENT_CHROME_EPHEMERAL_ROOT/1" ]] && dir_gone=0
+    # --- cleanup FIRST (always runs) ---
+    pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || true
+    rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
+    # --- assertions on snapshots ---
+    rc_all=0
+    if [[ -n "$survivors" ]]; then
+        _fail "R3-neg: live chrome on lane 1 survived release with dead lease ids: $survivors" || rc_all=1
+    fi
+    if (( dir_gone != 1 )); then
+        _fail "R3-neg: lane dir survived release all" || rc_all=1
+    fi
+    return "$rc_all"
+}
+
 # R4 — BUG-002 PRE-PORT race (T2.S2 green gate): cmd B fires while cmd A is provably
 # mid-COPY (before the port write — deterministic via the PATH-shimmed slow cp).
 # With the per-lane boot lock: B blocks on <1>.boot.lock, A finishes, B's in-lock
@@ -417,7 +469,8 @@ r4_bug002_preport_race() {
 _br_run_suite() {
     local fn
     for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e \
-              r3_control_delayed_boot_succeeds r3_bug002_race_e2e r4_bug002_preport_race; do
+              r3_control_delayed_boot_succeeds r3_bug002_race_e2e \
+              r3_neg_dead_ids_release_still_kills r4_bug002_preport_race; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi
