@@ -384,6 +384,14 @@ Lane lifecycle ordering (`pool_wrapper_main`):
    `AGENT_BROWSER_SESSION=abpool-<N>`;
 8. `exec` the real `agent-browser` with the cleaned args — terminal step.
 
+**Boot serialization & crash recovery.** A lane's boot and any later reconnect/relaunch are
+serialized by a short-lived per-lane boot lock (`lanes/<N>.boot.lock`), so two same-owner
+commands cannot race two Chromes onto one lane — a reconnect waits (up to ~20s) rather than
+launching alongside an in-flight boot. When a crashed lane is re-booted (its lease still says
+port 0 — the boot never finished), `pool_copy_master` first wipes any stale partial dir left at
+`active/<N>` and re-copies fresh from the master, so the lane always boots trusted master
+contents — never a half-copied leftover.
+
 **Release** happens when the owning harness process exits (the next acquire reaps it), on
 explicit `agent-browser-pool release`, or on pool-exhaustion force-reap: kill the Chrome
 **process group**, `rm -rf` the ephemeral dir, drop the lease. There is **no idle TTL**. A
@@ -462,7 +470,10 @@ agents.
 `agent-browser-pool reap` (tears down stale-owner lanes **and** removes orphan dirs), or
 `release <N>` / `release all` (explicit teardown of leased lanes). `doctor` exits `1` only on
 a blocking `FAIL` (missing deps / binary / btrfs / master); `WARN`s are advisory cruft that
-`reap`/`release` clear and do not change the exit code. See PRD.md §2.15.
+`reap`/`release` clear and do not change the exit code. Corrupt leases are reclaimable too:
+`reap` removes a corrupt `lanes/<N>.json` once its lane dir is gone, and `release <N>` clears
+it — killing any Chrome still on that lane's profile dir even when the lease's recorded ids are
+dead (`release all` skips corrupt leases; use `release <N>` or `reap`). See PRD.md §2.15.
 
 ## Repository layout
 
@@ -485,7 +496,8 @@ agent-browser-pool/
     ├── validate.sh            ← test framework (assertions, owner sim, hermetic setup/teardown)
     ├── concurrency.sh         ← N agents → N distinct lanes, no collision
     ├── release_reaper.sh      ← release + stale reaper + crash simulation
-    └── transparency.sh        ← dispatch + classification contract checks
+    ├── transparency.sh        ← dispatch + classification contract checks
+    └── bootrace.sh            ← boot-race regression harness (serialized lane boot, guarded master copy, crash recovery)
 ```
 
 Runtime state is **not** in the repo — it is created at install / on first run and is
