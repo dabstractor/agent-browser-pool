@@ -3424,6 +3424,22 @@ pool_reap_orphan_dirs() {
                 rm -rf -- "$dir" 2>/dev/null || true
             fi
             _pool_log "pool_reap(orphan): removed orphan dir $dir (no lease)"
+            # BUG-003 (fix_design §4 seam 1): ALSO remove a present-but-INVALID lease file.
+            # Reaching this branch with the file present means it is corrupt (pool_lease_exists
+            # rc 1 = missing OR corrupt; the dir is now gone) — definitionally unowned AND
+            # unreclaimable by any other verb (pool_lane_is_stale rc 2 skips it; release
+            # refuses; pool_find_free_lane's [[ -f ]] DELIBERATELY treats it as occupied for
+            # collision safety) → reap is the designated reclaimer. Removing the FILE (not
+            # weakening the guards) frees the lane number. The [[ -f ]] short-circuits the
+            # common missing-file orphan (zero extra forks); the second pool_lease_exists call
+            # re-probes only to confirm corrupt-vs-missing. Both sit in the `if` condition
+            # (errexit-exempt — rc 1 is a signal, not an error). $base is ^[0-9]+$-validated
+            # upstream → injection-safe. NOT counted in $orphans (dirs only — the admin report
+            # "Removed N orphan dir(s)." stays honest).
+            if [[ -f "$POOL_LANES_DIR/$base.json" ]] && ! pool_lease_exists "$base"; then
+                rm -f -- "$POOL_LANES_DIR/$base.json"
+                _pool_log "pool_reap(orphan): removed corrupt lease $POOL_LANES_DIR/$base.json (BUG-003)"
+            fi
             orphans=$((orphans + 1))
         fi
     done

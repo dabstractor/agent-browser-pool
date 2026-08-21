@@ -238,7 +238,9 @@ dropped) · `STALE` (lease row missing/corrupt — fields show `?`).
 Tear down lanes whose owning harness process has died (kill the Chrome process group, delete the
 ephemeral profile dir, remove the lease) **and** remove orphan ephemeral dirs (numeric
 `active/<N>/` directories left by an interrupted boot or a crashed release that have no
-lease and no live owner — killing any orphaned Chrome still pointed at them). Always exits 0.
+lease and no live owner — killing any orphaned Chrome still pointed at them). A
+corrupt/unparseable `lanes/<N>.json` left behind after its lane dir is gone is also
+removed, freeing the lane number. Always exits 0.
 
 ```
 No stale lanes or orphan dirs found.

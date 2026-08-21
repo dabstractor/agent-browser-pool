@@ -464,13 +464,58 @@ r4_bug002_preport_race() {
     return "$rc_all"
 }
 
+# R5 — BUG-003: reap must ALSO remove a present-but-invalid lanes/N.json once its
+# orphan dir is gone. Before the fix, `reap` removed the dir but left the corrupt
+# lease → pool_find_free_lane's [[ -f ]] treated lane 7 as occupied forever (deliberate
+# collision safety — the FILE must be removed, not the guard weakened) and status
+# showed a permanent '? ? … STALE' row. PRD h2.3/h3.2 repro + fix_design §4 test
+# contract. No chrome launch: the orphan branch's pgrep matches nothing (rc 1 → no kill).
+r5_bug003_corrupt_lease_reclaimed() {
+    # Seed: lane 7 = the BUG-003 state (corrupt lease + orphan dir with a marker file).
+    # (lanes 1-6 are seeded AFTER the reap — the stale pass would reap their valid-but-
+    # dead leases, and file presence is ALL pool_find_free_lane checks.)
+    local n lease7
+    mkdir -p -- "$AGENT_BROWSER_POOL_STATE/lanes" "$AGENT_CHROME_EPHEMERAL_ROOT/7"
+    printf 'not json {{{' >"$AGENT_BROWSER_POOL_STATE/lanes/7.json"
+    printf 'orphan-marker\n' >"$AGENT_CHROME_EPHEMERAL_ROOT/7/Preferences"
+    # Run reap through the real admin CLI (house style: timeout; rc 0 always).
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" reap >/dev/null 2>&1 || true
+    # 1) BOTH artifacts gone: the dir AND the corrupt lease.
+    if [[ -e "$AGENT_CHROME_EPHEMERAL_ROOT/7" ]]; then
+        _fail "R5: orphan dir 7 still present after reap"; return 1
+    fi
+    lease7="$AGENT_BROWSER_POOL_STATE/lanes/7.json"
+    if [[ -e "$lease7" ]]; then
+        _fail "R5: corrupt lease 7.json still present after reap (BUG-003 reproduced)"; return 1
+    fi
+    # 2) Lane number un-burned: with 1-6 now occupied, find_free_lane must return 7.
+    mkdir -p -- "$AGENT_BROWSER_POOL_STATE/lanes"
+    for n in 1 2 3 4 5 6; do
+        printf '{"port":%d}' "$((53400 + n))" >"$AGENT_BROWSER_POOL_STATE/lanes/$n.json"
+    done
+    n="$( ( trap - EXIT INT TERM; source "$ABPOOL_REPO/lib/pool.sh" && \
+            pool_config_init && pool_find_free_lane ) 2>/dev/null || true )"
+    if [[ "$n" != "7" ]]; then
+        _fail "R5: pool_find_free_lane returned '${n:-<empty>}' (expected 7 — lane still burned)"; return 1
+    fi
+    # 3) status no longer shows a row for lane 7.
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/"[1-6].json 2>/dev/null || true
+    if timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" status 2>/dev/null | grep -qE '^ *7 '; then
+        _fail "R5: status still shows a row for lane 7"; return 1
+    fi
+    # Self-cleanup (lanes 1-6 seeds; 7 is already gone on the happy path).
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/"[1-6].json 2>/dev/null || true
+    rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/7" 2>/dev/null || true
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
     local fn
     for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e \
               r3_control_delayed_boot_succeeds r3_bug002_race_e2e \
-              r3_neg_dead_ids_release_still_kills r4_bug002_preport_race; do
+              r3_neg_dead_ids_release_still_kills r4_bug002_preport_race \
+              r5_bug003_corrupt_lease_reclaimed; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi
