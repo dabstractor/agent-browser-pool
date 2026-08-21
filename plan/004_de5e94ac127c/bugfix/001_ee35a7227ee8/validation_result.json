@@ -1,0 +1,5 @@
+{
+  "hasIssues": true,
+  "issueCount": 3,
+  "summary": "All 6 PRD bugs verified fixed (4 fully; BUG-002/006 with residuals), but 3 new issues found: pool_boot_lane's 20s lock-timeout fallback is dead code (lock_rc=$? swallowed by if/fi) causing a false rc 0 + 40s stall + spurious 'not connected' failure for same-owner commands racing >20s boots; the committed plan/004 validation artifact is red as shipped (e2e12 counts the fix's own N.boot.lock files as lanes, 87/88) and never lints/runs test/bootrace.sh; pin-acquire over a corrupt lease skips the cmdline sweep so a live Chrome survives on a deleted user-data-dir."
+}

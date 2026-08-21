@@ -662,6 +662,107 @@ r8_bug005_help_harnesses_contract() {
     return "$rc"
 }
 
+# R9 — BUG-007: a same-owner second command racing a peer boot that holds the
+# lane's boot lock LONGER than the 20s `flock -w 20` (here: PATH-shimmed cp with
+# FAKE_CP_DELAY=25). Pre-fix: the `if ( … )` swallowed the subshell's exit 99 →
+# pool_boot_lane returned a FALSE rc 0, the fallback log never fired, and cmd B
+# stalled ~40s in ensure_connected before dying 'not connected'. Post-fix:
+# fallback fires (busy log), cmd B waits (bounded) for the peer boot, then
+# re-checks → rc 0, exactly ONE chrome launch, no double-copy.
+r9_bug007_lock_timeout_grace() {
+    local rc_a rc_b n busy_log count_pids lease_pid rc_all _
+    _br_spawn_owner
+    _br_make_fake_cp
+    : >"$FAKE_CHROME_COUNT_FILE"
+    : >"$BR_T/r9-boot.log"
+    rc_all=0
+    # cmd A backgrounded: 25s copy (>20s lock budget) — bounded by timeout.
+    rc_a=0
+    FAKE_CP_DELAY=25 FAKE_CP_MARKER="$BR_T/r9-copy.marker" PATH="$BR_T/bin:$PATH" \
+        timeout 120 "$ABPOOL_REPO/bin/agent-browser-pool" open about:blank \
+        >"$BR_T/r9-boot.log" 2>&1 &
+    local apid=$!
+    # cmd B at ~+1.5s: races into A's pre-port window, will exceed the 20s lock.
+    sleep 1.5
+    rc_b=0
+    timeout 120 "$ABPOOL_REPO/bin/agent-browser-pool" get cdp-url >/dev/null 2>&1 || rc_b=$?
+    wait "$apid" 2>/dev/null || rc_a=$?
+    # --- snapshot observable state BEFORE cleanup ---
+    n="$(wc -l <"$FAKE_CHROME_COUNT_FILE" 2>/dev/null || printf 0)"
+    lease_pid="$(jq -r '.chrome_pid // 0' "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || echo 0)"
+    count_pids="$(awk '{print \$1}' "$FAKE_CHROME_COUNT_FILE" 2>/dev/null | tr '\n' ' ' || true)"
+    busy_log=0
+    grep -q 'boot lock busy' "$AGENT_BROWSER_POOL_STATE/pool.log" 2>/dev/null && busy_log=1
+    # --- cleanup FIRST (always runs) ---
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+    pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || true
+    rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
+    # --- assertions on snapshots ---
+    if (( rc_a != 0 )); then
+        _fail "R9: first command rc=$rc_a (expected 0)" || rc_all=1
+    fi
+    if (( rc_b != 0 )); then
+        _fail "R9: second command rc=$rc_b (BUG-007 reproduced: >20s lock race spurious failure)" || rc_all=1
+    fi
+    if (( busy_log != 1 )); then
+        _fail "R9: 'boot lock busy' fallback log never fired (dead fallback / rc swallowed)" || rc_all=1
+    fi
+    if [[ "$n" != "1" ]]; then
+        _fail "R9: expected exactly 1 chrome launch, got $n (double-launch)" || rc_all=1
+    fi
+    if [[ -n "$lease_pid" && "$lease_pid" != "0" ]] \
+       && [[ " ${count_pids} " != *" $lease_pid "* ]]; then
+        _fail "R9: lease chrome_pid=$lease_pid not among launched (${count_pids:-none})" || rc_all=1
+    fi
+    return "$rc_all"
+}
+
+# R10 — BUG-009: pin-acquire over a CORRUPT lease whose dir still hosts a LIVE
+# process on the lane's user-data-dir must SWEET that process (anchored cmdline
+# kill, same as release/reap corrupt branches) BEFORE rm -rf'ing the dir and
+# booting — pre-fix the live process survived on deleted inodes while a fresh
+# Chrome booted the same lane number.
+r10_bug009_pin_corrupt_lease_sweep() {
+    local rc lease5 dir5 pat survivors rc_all
+    _br_spawn_owner
+    lease5="$AGENT_BROWSER_POOL_STATE/lanes/5.json"
+    dir5="$AGENT_CHROME_EPHEMERAL_ROOT/5"
+    pat="user-data-dir=$dir5( |\$)"
+    rc_all=0
+    # fixture: corrupt lease + dir + LIVE marker process (exec -a sleep — the
+    # fake-chrome fixture execs python3 and would make the kill vacuous).
+    mkdir -p -- "$AGENT_BROWSER_POOL_STATE/lanes" "$dir5"
+    printf 'not json {{{' >"$lease5"
+    printf 'rogue\n' >"$dir5/Preferences"
+    bash -c 'exec -a "$1" sleep 300' _ "user-data-dir=$dir5 lane5" >/dev/null 2>&1 &
+    local mp=$!
+    sleep 0.3
+    # pin-acquire over the corrupt lease: must sweep + reclaim + boot cleanly.
+    rc=0
+    AGENT_BROWSER_POOL_OWNER_PID="$AGENT_BROWSER_POOL_OWNER_PID" \
+    AGENT_BROWSER_POOL_OWNER_STARTTIME="$AGENT_BROWSER_POOL_OWNER_STARTTIME" \
+    ABPOOL_LANE=5 timeout 90 "$ABPOOL_REPO/bin/agent-browser-pool" open about:blank >/dev/null 2>&1 || rc=$?
+    sleep 0.3                       # let any sweep TERM/0.2s/KILL land
+    # --- snapshot observable state BEFORE cleanup ---
+    survivors="$(pgrep -f -- "$pat" 2>/dev/null || true)"
+    # --- cleanup FIRST (always runs) ---
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+    pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+    kill "$mp" 2>/dev/null || true
+    wait "$mp" 2>/dev/null || true
+    rm -f -- "$lease5" 2>/dev/null || true
+    rm -rf -- "$dir5" 2>/dev/null || true
+    # --- assertions on snapshots ---
+    if (( rc != 0 )); then
+        _fail "R10: pin over corrupt lease rc=$rc (expected 0)" || rc_all=1
+    fi
+    if [[ -n "$survivors" ]]; then
+        _fail "R10: live process on lane 5 dir survived the pin sweep (BUG-009 reproduced): $survivors" || rc_all=1
+    fi
+    return "$rc_all"
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
@@ -671,7 +772,8 @@ _br_run_suite() {
               r3_neg_dead_ids_release_still_kills r4_bug002_preport_race \
               r5_bug003_corrupt_lease_reclaimed r6_bug003_release_corrupt_lease \
               r7_bug004_doctor_fresh_install \
-              r8_bug005_help_harnesses_contract; do
+              r8_bug005_help_harnesses_contract r9_bug007_lock_timeout_grace \
+              r10_bug009_pin_corrupt_lease_sweep; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi

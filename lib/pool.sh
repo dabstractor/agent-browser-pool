@@ -2368,10 +2368,22 @@ _pool_acquire_critical_section() {
             # (4) LIVE + FOREIGN → hard error (isolation, §2.14). No fallback.
             pool_die "pinned lane $POOL_LANE_PIN is held by a live owner (pid $o_pid, comm $o_comm); a pinned lane is never a takeover — unset ABPOOL_LANE or choose a free lane"
         else
-            # (1) rc 2 — NO lease. If a leaseless $POOL_EPHEMERAL_ROOT/$N dir survives, it is
-            #     stale debris internals won't remove (it bails at the missing lease): rm it
-            #     with the same prefix-guard so the pin lands on a clean lane, then claim.
+            # (1) rc 2 — NO lease (missing OR corrupt). If a leaseless
+            #     $POOL_EPHEMERAL_ROOT/$N dir survives, it is stale debris internals
+            #     won't remove (it bails at the missing lease): kill any process still
+            #     on the dir with the anchored cmdline sweep (BUG-009 — same idiom as
+            #     pool_admin_release's corrupt-lease branch: a corrupt lease's ids are
+            #     untrusted, so a live Chrome here would otherwise survive on deleted
+            #     inodes while a fresh boot claims the same lane), then rm with the
+            #     same prefix-guard so the pin lands on a clean lane, then claim.
             dir="$POOL_EPHEMERAL_ROOT/$N"
+            local pinpat="user-data-dir=$dir( |\$)"
+            if pgrep -f -- "$pinpat" >/dev/null 2>&1; then
+                _pool_log "pool_acquire(pin): lane $N cmdline sweep before reclaim (BUG-009)"
+                pkill    -f -- "$pinpat" 2>/dev/null || true
+                sleep 0.2
+                pkill -9 -f -- "$pinpat" 2>/dev/null || true
+            fi
             if [[ -n "$dir" && "$dir" == "$POOL_EPHEMERAL_ROOT"/* && "$dir" != "$POOL_EPHEMERAL_ROOT/" ]]; then
                 rm -rf -- "$dir" 2>/dev/null || true
             fi
@@ -2685,11 +2697,12 @@ _pool_launch_and_verify() {
 #   Two same-owner commands racing into the pre-port boot window serialize; the
 #   loser's post-lock idempotent re-check (inside _pool_boot_lane_locked) sees
 #   port>0 + CDP alive and returns 0 WITHOUT re-copying or re-launching. The lock
-#   is BOUNDED (`flock -w 20`) — on timeout the wrapper logs and proceeds UNLOCKED
-#   (previous behavior) so a stuck peer can never hang a driving command.
+#   is BOUNDED (`flock -w 20`) — on timeout (BUG-007) the wrapper logs and then
+#   WAITS (bounded grace, ~40s) for the peer boot instead of double-booting
+#   unlocked, so a stuck peer can never hang a driving command nor make it lie.
 pool_boot_lane() {
     local lane="${1:-}"
-    local lock_rc
+    local lock_rc recheck_port
 
     # Validate lane.
     [[ "$lane" =~ ^[0-9]+$ ]] \
@@ -2699,18 +2712,41 @@ pool_boot_lane() {
     # `exit 99`s on flock TIMEOUT only, so a genuine body failure (rc 1 / pool_die)
     # is never mistaken for a busy peer. Subshell rc == body rc otherwise; stdout
     # propagates through $(...) as usual.
-    if ( flock -w 20 8 || exit 99; _pool_boot_lane_locked "$lane" ) \
-            8>"$(pool_lane_boot_lock "$lane")"; then
+    # BUG-007: the rc MUST be captured with `|| rc=$?` on the subshell itself —
+    # wrapping it in `if ( … ); then return 0; fi` swallows the failure rc (a false
+    # if-statement returns 0), turning every timeout/body failure into a FALSE
+    # rc 0 while the lane is still port=0.
+    lock_rc=0
+    ( flock -w 20 8 || exit 99; _pool_boot_lane_locked "$lane" ) \
+        8>"$(pool_lane_boot_lock "$lane")" || lock_rc=$?
+    if (( lock_rc == 0 )); then
         return 0
     fi
-    lock_rc=$?
     if (( lock_rc == 99 )); then
         # Peer still held the lock after 20s (crashed holder is impossible — flock
-        # releases on fd close — so this is a genuinely stuck/slow boot). Never
-        # hang the wrapper: fall back to the pre-T2.S2 unlocked behavior.
-        _pool_log "pool_boot_lane: boot lock busy >20s for lane $lane; proceeding unlocked"
-        _pool_boot_lane_locked "$lane"
-        return $?
+        # releases on fd close — so this is a genuinely stuck/slow boot, e.g. a
+        # multi-GB non-btrfs master copy or a wedged Chrome inside the lock).
+        # BUG-007: NEVER fall through to an unlocked boot — the unlocked
+        # double-boot would re-copy over the peer's in-progress dir (BUG-001
+        # guard) and launch a second Chrome. Instead WAIT (bounded) for the peer
+        # to finish: poll the lease/CDP exactly like _pool_boot_lane_locked's
+        # idempotent re-check. If the peer boots within the grace window this is
+        # a no-op refresh (rc 0, no double launch, no spurious failure — BUG-002's
+        # contract); only a genuinely stuck peer fails, and then a clear rc 1
+        # (never the false rc 0 the pre-fix code returned).
+        _pool_log "pool_boot_lane: boot lock busy >20s for lane $lane; waiting (bounded) for peer boot"
+        local deadline=$(( SECONDS + 40 ))
+        while (( SECONDS < deadline )); do
+            if recheck_port="$(pool_lease_field "$lane" port 2>/dev/null)" \
+               && [[ "$recheck_port" =~ ^[0-9]+$ && "$recheck_port" -gt 0 ]] \
+               && curl -sf --max-time 2 "http://127.0.0.1:$recheck_port/json/version" >/dev/null 2>&1; then
+                _pool_log "pool_boot_lane: lane $lane booted by peer (port=$recheck_port) after lock timeout; skipping re-boot"
+                return 0
+            fi
+            sleep 0.25
+        done
+        _pool_log "pool_boot_lane: lane $lane still unbooted after lock timeout + 40s grace; giving up (peer boot stuck?)"
+        return 1
     fi
     return "$lock_rc"
 }

@@ -44,7 +44,7 @@ section() { printf '\n== %s\n' "$1"; }
 # =============================================================================
 section "P1 lint (bash -n + shellcheck)"
 for f in bin/agent-browser-pool lib/pool.sh install.sh \
-         test/validate.sh test/concurrency.sh test/release_reaper.sh test/transparency.sh; do
+         test/validate.sh test/bootrace.sh test/concurrency.sh test/release_reaper.sh test/transparency.sh; do
     if timeout 60 bash -n "$f" 2>/dev/null; then ok "syntax: $f"; else bad "syntax: $f"; fi
     # SC1091 (source not followed) is informational; count errors+warnings only.
     sc_errs="$(timeout 120 shellcheck -s bash "$f" 2>/dev/null | grep -cE 'level=[0-9]+.*(error|warning)' || true)"
@@ -155,6 +155,9 @@ run_suite() { # NAME TIMEOUT CMD...
 }
 
 run_suite test/validate.sh-selftest 420 bash test/validate.sh
+# BUG-008 fix: also run (and lint, P1 above) the BUG-002 regression suite — hermetic
+# (fake chrome), so safe in --fast mode too.
+run_suite test/bootrace.sh 600 bash test/bootrace.sh
 
 HAVE_CHROME=0
 command -v google-chrome-stable >/dev/null 2>&1 && HAVE_CHROME=1
@@ -471,7 +474,7 @@ for i in 1 2; do
 done
 wait "${caller_pids[@]}"   # wait ONLY for these jobs (bare `wait` would also block
                             # on the 300s sim-owner sleeps → spurious hang)
-lanes_live="$(ls "$V_STATE/lanes" 2>/dev/null | wc -l)"
+lanes_live="$(find "$V_STATE/lanes" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l)"
 (( lanes_live == 2 )) && ok "e2e12 two caller-mode children → 2 distinct lanes" \
     || bad "e2e12 caller-mode lanes: $lanes_live (want 2)"
 out="$(pool reap 2>&1)"; rc=$?
