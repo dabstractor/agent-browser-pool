@@ -41,6 +41,11 @@ Behind the scenes it:
 After that, **every** driving call in your session routes to that same lane/browser/profile.
 You do not reconnect between calls.
 
+Concurrent commands from your session are safe: lane boots and reconnects are serialized
+per lane, so parallel calls wait for each other rather than racing two browsers onto one
+lane — and a lane that crashed mid-boot re-copies a clean profile from the master on the
+next attempt.
+
 ### Connection rules (don't fight the pool)
 
 - **Do not pass a port or CDP URL.** The pool owns the connection. If you type

@@ -173,6 +173,14 @@ reclaimed, and that a recycled PID can never hijack your lane. In caller mode (`
 **PID + starttime** identity keys on the invoking subprocess instead of the harness ancestor —
 the same staleness/reuse guarantees apply.
 
+**Boot serialization & crash recovery.** A lane's boot and any later reconnect/relaunch are
+serialized by a short-lived per-lane boot lock (`lanes/<N>.boot.lock`) — a second command
+from the same owner waits (up to ~20s) rather than racing a second Chrome onto the lane.
+When a crashed lane is re-booted (its lease still says port 0 — the boot never finished),
+`pool_copy_master` first wipes any stale partial dir left at `active/<N>` and re-copies
+fresh from the master, so the lane always boots trusted master contents — never a
+half-copied leftover.
+
 ## Release lifecycle (teardown)
 
 Release happens when **any** of these occurs:
@@ -201,8 +209,8 @@ dir survive for reuse within the session.
 | `close` didn't free my lane / Chrome still running | By design — `close` is disconnect-only; lane survives for reuse | End your session to release; or ask the operator to run `release <N>` |
 | Session logins/cookies didn't persist | Ephemeral profile is deleted on release, never written to master | By design — re-establish each session |
 | `status` shows my lane as `disconnected` | Daemon dropped but Chrome alive | Your next driving command re-binds automatically |
-| `status` shows my lane as `STALE` / field `?` | Owner process died or lease is corrupt | The reaper will reclaim it; the operator can run `reap` |
-| `doctor` reports WARN lines | Cruft from crashed agents (orphan dirs, dead Chrome, stale leases, disconnected daemon) | Operator-only: `agent-browser-pool reap` clears stale lanes **and** orphan dirs; `release <N>` / `release all` for explicit teardown |
+| `status` shows my lane as `STALE` / field `?` | Owner process died or lease is corrupt | The reaper will reclaim it; the operator can run `reap` (which also removes a corrupt `lanes/<N>.json` once its lane dir is gone) or `release <N>` (which clears a corrupt lease — and any Chrome still on its profile dir — even while the dir is still present; `release all` skips corrupt leases) |
+| `doctor` reports WARN lines | Cruft from crashed agents (orphan dirs, dead Chrome, stale leases, disconnected daemon) | Operator-only: `agent-browser-pool reap` clears stale lanes, orphan dirs, **and** corrupt leases; `release <N>` / `release all` for explicit teardown |
 | Pinned-lane call dies: "pinned lane N is held by a live owner (pid …, comm …); a pinned lane is never a takeover — unset ABPOOL_LANE or choose a free lane" | `ABPOOL_LANE=N` but lane N has a live lease owned by another process | By design — a pinned lane is never a takeover and never waits; unset `ABPOOL_LANE`, pick a free lane, or wait for that owner to release |
 | Pool dies at startup: "agent-browser-pool: ABPOOL_LANE must be a positive integer, got: '<raw>'" | `ABPOOL_LANE` is malformed (non-numeric, `0`, negative, leading zeros) | Fix the value to a positive integer or unset it (auto-assign) |
 | Caller-mode call dies: "agent-browser-pool: ABPOOL_OWNER=caller requires a live parent process (got ppid …); invoke agent-browser-pool as a child of the long-lived orchestrator process" | The invoking subprocess's parent is dead/reparented (an instantly-stale owner) | Invoke `agent-browser-pool` as a child of the long-lived orchestrator process |
@@ -220,6 +228,6 @@ agent-browser-pool status
 agent-browser-pool reap            # tear down stale-owner lanes + remove orphan dirs
 agent-browser-pool release 1       # explicit teardown of one lane
 agent-browser-pool release all     # clear the whole pool
-agent-browser-pool doctor          # diagnose the pool (exits 1 on a blocking FAIL only; WARNs are advisory)
+agent-browser-pool doctor          # diagnose the pool (exits 1 on a blocking FAIL only; WARNs are advisory; creates the ephemeral root if missing, so the btrfs check is exact on fresh installs)
 agent-browser-pool help            # aliases: --help, -h
 ```
