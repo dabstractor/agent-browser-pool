@@ -143,7 +143,7 @@
           "type": "Milestone",
           "id": "P1.M2",
           "title": "Minor fixes: corrupt-lease reclaim, doctor fresh-install probe, help text, validation artifact bootstrap (BUG-003..BUG-006)",
-          "status": "Researching",
+          "status": "Complete",
           "description": "Four independent minor fixes: make corrupt lanes/N.json reclaimable by reap and release (BUG-003); fix doctor's findmnt probe so a fresh install on btrfs reports OK instead of FAIL(unknown) (BUG-004); correct the AGENT_BROWSER_POOL_HARNESSES help text to replace-semantics with the 5-harness default (BUG-005); fix plan/004_de5e94ac127c/validate.sh's ROOT so the committed validation artifact runs green as shipped (BUG-006). Each carries its own regression case in test/bootrace.sh.",
           "tasks": [
             {
@@ -212,14 +212,14 @@
               "type": "Task",
               "id": "P1.M2.T3",
               "title": "BUG-005: fix the AGENT_BROWSER_POOL_HARNESSES help text (replace semantics, 5-harness default)",
-              "status": "Researching",
+              "status": "Complete",
               "description": "The built-in help says AGENT_BROWSER_POOL_HARNESSES is 'appended to pi/claude/codex/agy' but pool_config_init REPLACES the set (and the cited default omits antigravity) — the first place users look misdocuments the variable that can silently disable every default harness. Code matches PRD §2.11 and both docs; only help is wrong.",
               "subtasks": [
                 {
                   "type": "Subtask",
                   "id": "P1.M2.T3.S1",
                   "title": "Rewrite the two help printf lines + help-vs-code contract case R8",
-                  "status": "Researching",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [],
                   "context_scope": "CONTRACT DEFINITION:\n1. RESEARCH NOTE: read architecture/fix_design.md §5 and system_context.md §9. The wrong lines are lib/pool.sh:4879-4880 inside pool_admin_help (4806-4890): 'extra recognized harness command names' / '(comma-separated; appended to pi/claude/codex/agy)'. Ground truth: pool_config_init lib/pool.sh:207-213 — `${AGENT_BROWSER_POOL_HARNESSES:-pi,claude,codex,agy,antigravity}`, lowercased, comma-squeezed, empty→default = REPLACE semantics. README.md:320 and .agents/skills/agent-browser-pool/references/configuration.md:28 already document replace correctly — this is a TEXT-ONLY fix; do not touch pool_config_init.\n2. INPUT: no code dependencies. Interfaces: pool_admin_help's printf block (follow its column alignment: descriptions start at the same column, ~38-char env-var column).\n3. LOGIC: Rewrite the two lines to state replace semantics and the full 5-item default, e.g. 'recognized harness command names (comma-separated;' / '(replaces the default pi,claude,codex,agy,antigravity; empty/unset → default)'. Keep the two-line layout and alignment. TDD: R8 — a contract probe in test/bootrace.sh: `agent-browser-pool help` output contains 'antigravity' and 'replaces' (case-insensitive ok), does NOT contain 'appended', and the default list it cites equals the actual default set (cross-check by sourcing lib/pool.sh in a subshell with the var unset and printing $POOL_HARNESSES — the PRD h3.4 repro steps 1-3).\n4. OUTPUT: help matches code/docs. Consumed by P1.M3.T2.S2 (skill-doc consistency sweep verifies against the new help text).\n5. DOCS: none beyond the help text itself — the help IS the user-facing doc being fixed (Mode A by construction); README/configuration.md are already correct and need no change here.",
