@@ -264,6 +264,36 @@ pool_state_init() {
     return 0
 }
 
+# pool_lane_boot_lock N — echo the per-lane boot/connect lock path (creates nothing,
+# validates nothing — callers validate the lane).
+#
+# Contract: echoes "$POOL_LANES_DIR/<N>.boot.lock". The file is an EMPTY advisory
+# flock target — it is created by the caller's `8>"$(pool_lane_boot_lock N)"`
+# redirect, never by this helper.
+#
+# fd CHOICE — fd 8, exclusively. fd 9 / POOL_LOCK_FILE (acquire.lock) is RESERVED
+#   for pool_acquire_locked: opening a fresh open-file-description on it from a
+#   process tree that may already hold it SELF-DEADLOCKS (flock(2) semantics — see
+#   the warning in the pool_wait_for_lane design note). NEVER point this helper at
+#   POOL_LOCK_FILE and never take the boot lock on fd 9.
+#
+# glob-SAFETY: `*.boot.lock` is invisible to every existing lanes-dir consumer —
+#   pool_lanes_list globs `*.json`, pool_find_free_lane tests `<N>.json`, and
+#   pool_reap_orphan_dirs iterates ephemeral-root directories (`*/`), never files.
+#
+# stale-file HARMLESSNESS: the lock is an advisory flock held on the OPEN fd — a
+# leftover file from a crashed process carries no lock and is re-used as-is; never
+# cleaned, never aged out.
+#
+# Consumers: pool_boot_lane (T2.S2 — serializes copy/port/launch/connect per lane
+# with a post-lock idempotent re-boot check) and pool_ensure_connected (T2.S3 —
+# takes the SAME lock on fd 8 via this helper so connect and boot are mutually
+# exclusive). Both wrap their body in:
+#     ( flock -w 20 8 && <body> ) 8>"$(pool_lane_boot_lock "$lane")"
+pool_lane_boot_lock() {
+    printf '%s\n' "$POOL_LANES_DIR/$1.boot.lock"
+}
+
 # pool_check_btrfs has been REMOVED (dead code — zero call sites; validation issue #5).
 # The non-btrfs refusal happens de facto via `cp --reflink=always` failing in
 # pool_copy_master (steps b/c), plus doctor's own findmnt probe — PRD §2.15 behavior is
@@ -2631,13 +2661,63 @@ _pool_launch_and_verify() {
 # Reads POOL_EPHEMERAL_ROOT, POOL_LANES_DIR (via helpers), POOL_REAL_BIN (via
 # pool_daemon_connect), POOL_CHROME_PID/PGID (via _pool_boot_write_chrome_ids). No new globals.
 # PRECONDITION: pool_config_init + pool_state_init + a PROVISIONAL lease for LANE (from S1).
+# SERIALIZATION (T2.S2 — BUG-002 lock half): the body runs under the per-lane boot
+#   lock (pool_lane_boot_lock, fd 8 — NEVER fd 9/POOL_LOCK_FILE, self-deadlock).
+#   Two same-owner commands racing into the pre-port boot window serialize; the
+#   loser's post-lock idempotent re-check (inside _pool_boot_lane_locked) sees
+#   port>0 + CDP alive and returns 0 WITHOUT re-copying or re-launching. The lock
+#   is BOUNDED (`flock -w 20`) — on timeout the wrapper logs and proceeds UNLOCKED
+#   (previous behavior) so a stuck peer can never hang a driving command.
 pool_boot_lane() {
     local lane="${1:-}"
-    local ephemeral_dir port now
+    local lock_rc
 
     # Validate lane.
     [[ "$lane" =~ ^[0-9]+$ ]] \
         || pool_die "pool_boot_lane: lane must be a non-negative integer, got: '$lane'"
+
+    # Bounded per-lane mutual exclusion (fd 8 on the NEW lock file). The subshell
+    # `exit 99`s on flock TIMEOUT only, so a genuine body failure (rc 1 / pool_die)
+    # is never mistaken for a busy peer. Subshell rc == body rc otherwise; stdout
+    # propagates through $(...) as usual.
+    if ( flock -w 20 8 || exit 99; _pool_boot_lane_locked "$lane" ) \
+            8>"$(pool_lane_boot_lock "$lane")"; then
+        return 0
+    fi
+    lock_rc=$?
+    if (( lock_rc == 99 )); then
+        # Peer still held the lock after 20s (crashed holder is impossible — flock
+        # releases on fd close — so this is a genuinely stuck/slow boot). Never
+        # hang the wrapper: fall back to the pre-T2.S2 unlocked behavior.
+        _pool_log "pool_boot_lane: boot lock busy >20s for lane $lane; proceeding unlocked"
+        _pool_boot_lane_locked "$lane"
+        return $?
+    fi
+    return "$lock_rc"
+}
+
+# _pool_boot_lane_locked LANE — the boot body (verbatim from the pre-T2.S2
+# pool_boot_lane) + the post-lock IDEMPOTENT RE-CHECK. Runs ONLY from inside
+# pool_boot_lane's flock(1) subshell (or its timeout fallback). Same contract /
+# failure semantics as pool_boot_lane documented above.
+_pool_boot_lane_locked() {
+    local lane="${1:-}"
+    local ephemeral_dir port now
+
+    # IDEMPOTENT RE-CHECK (T2.S2) — MUST run after acquiring the lock, before
+    # pool_copy_master. A concurrent winner (or a crash-recovery re-boot of a lane
+    # whose port was already bound) already provisioned this lane: if the lease
+    # holds port>0 AND CDP answers, this boot is a NO-OP refresh (no re-copy, no
+    # second Chrome, no clobbered chrome_pid/pgid). Guarded capture — a corrupt /
+    # missing lease (pool_lease_field rc 1) MUST fall through to a normal boot, not
+    # abort. NEVER use kill -0 for the aliveness half (ESRCH/EPERM ambiguity).
+    local recheck_port
+    if recheck_port="$(pool_lease_field "$lane" port 2>/dev/null)" \
+       && [[ "$recheck_port" =~ ^[0-9]+$ && "$recheck_port" -gt 0 ]] \
+       && curl -sf --max-time 2 "http://127.0.0.1:$recheck_port/json/version" >/dev/null 2>&1; then
+        _pool_log "pool_boot_lane: lane $lane already booted (port=$recheck_port); skipping re-boot"
+        return 0
+    fi
 
     ephemeral_dir="$POOL_EPHEMERAL_ROOT/$lane"
 

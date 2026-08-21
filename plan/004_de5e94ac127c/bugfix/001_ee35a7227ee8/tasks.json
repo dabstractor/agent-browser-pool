@@ -42,7 +42,7 @@
               "type": "Task",
               "id": "P1.M1.T2",
               "title": "BUG-002: serialize same-owner lane boot/connect, verify dead pid before relaunch, widen release sweep",
-              "status": "Planned",
+              "status": "Ready",
               "description": "There is no same-owner boot synchronization: a second concurrent driving command during boot finds the live lease (port>0, connected=false), pool_ensure_connected's curl probe fails only because CDP is not open yet, and it falls through to a SECOND Chrome launch — the second command spuriously fails after a 15s wait_cdp timeout, the lease ids are clobbered to the doomed second Chrome, and a later release all leaks the REAL Chrome past teardown (the (3b) sweep at lib/pool.sh:2083-2101 only fires when both ids are <=0). Introduce a per-lane flock (new file, never fd 9 on acquire.lock), double-check the lease under the lock, verify the recorded chrome pid is actually dead before relaunching, and widen the release sweep.",
               "subtasks": [
                 {
@@ -63,7 +63,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S2",
                   "title": "Per-lane boot lock: pool_lane_boot_lock helper + serialize pool_boot_lane with idempotent re-check",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T1.S1",
@@ -80,7 +80,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S3",
                   "title": "pool_ensure_connected: lock the connect/relaunch path, re-read lease under lock, verify recorded chrome pid is dead before relaunching",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 2,
                   "dependencies": [
                     "P1.M1.T2.S2"
@@ -96,7 +96,7 @@
                   "type": "Subtask",
                   "id": "P1.M1.T2.S4",
                   "title": "Widen the (3b) mid-boot cmdline sweep in _pool_release_lane_internals so positive-but-dead ids cannot leak a live Chrome",
-                  "status": "Planned",
+                  "status": "Ready",
                   "story_points": 1,
                   "dependencies": [
                     "P1.M1.T2.S2"

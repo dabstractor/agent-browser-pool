@@ -22,6 +22,9 @@
 #                         launch, BEFORE the delay sleep (launches killed mid-delay
 #                         still count). Suite default: $BR_T/chrome-launches.log; each
 #                         case resets it with `: >`.
+# FAKE_CP_DELAY (R4)         seconds a PATH-shimmed `cp` (in $BR_T/bin) sleeps BEFORE
+#                         copying into the ephemeral root — makes "second command
+#                         during the copy, before the port write" DETERMINISTIC.
 # _bootrace_setup         ONE suite setup: sandbox + env redirects + fixtures + trap.
 # _bootrace_teardown      trap target: kill owners (+wait), pkill fake patterns, rm tree.
 #
@@ -31,7 +34,8 @@
 #   P1.M1.T2.S4 (release sweep widening — leak-assertion cases)
 #   P1.M2 (R5–R8 minor-bug cases)
 #
-# KNOWN-RED: r3_bug002_race_e2e is EXPECTED TO FAIL until T2.S2/S3 land the lib fixes —
+# KNOWN-RED: r3_bug002_race_e2e is EXPECTED TO FAIL until T2.S3 lands the
+# pool_ensure_connected fix (T2.S2's boot lock drives R4 green, not R3) —
 # the suite therefore exits 1 in this state (TDD: the harness proves the bug exists).
 # r3_control_delayed_boot_succeeds is the harness's own green gate; if THAT fails, the
 # fixtures are wrong, not the pool.
@@ -169,6 +173,35 @@ _br_spawn_owner() {
     BR_LAST_OWNER_COMM="$(cat "/proc/$pid/comm" 2>/dev/null || true)"
 }
 
+# Deterministic copy-phase delay for R4: a PATH shim ahead of the real cp that
+# sleeps $FAKE_CP_DELAY only when the destination is under the ephemeral root
+# (other cp calls pass through untouched, reflink semantics preserved). While
+# sleeping it touches $FAKE_CP_MARKER — the "provably pre-port" signal R4 polls
+# (the lane dir itself only appears once cp actually runs, i.e. AFTER the sleep).
+_br_make_fake_cp() {
+    cat >"$BR_T/bin/cp" <<'EOF'
+#!/usr/bin/env bash
+# cp shim (R4): sleep FAKE_CP_DELAY when copying into the ephemeral root, then exec
+# the REAL cp with identical argv. Never used unless a case prepends $BR_T/bin to PATH.
+for a in "$@"; do
+    case "$a" in
+        --*) ;;
+        *)  if [[ "$a" == "$AGENT_CHROME_EPHEMERAL_ROOT"/* ]]; then
+                if [[ "${FAKE_CP_DELAY:-0}" =~ ^[0-9]+$ && "${FAKE_CP_DELAY:-0}" -gt 0 ]]; then
+                    if [[ -n "${FAKE_CP_MARKER:-}" ]]; then
+                        : >"$FAKE_CP_MARKER" 2>/dev/null || true
+                    fi
+                    sleep "$FAKE_CP_DELAY"
+                fi
+                break
+            fi ;;
+    esac
+done
+exec /usr/bin/cp "$@"
+EOF
+    chmod +x -- "$BR_T/bin/cp"
+}
+
 # --- regression cases -------------------------------------------------------------
 
 # R1 — BUG-001 guard, FS-agnostic: pre-existing junk dir must be replaced by a clean
@@ -304,12 +337,83 @@ r3_bug002_race_e2e() {
     return "$rc_all"
 }
 
+# R4 — BUG-002 PRE-PORT race (T2.S2 green gate): cmd B fires while cmd A is provably
+# mid-COPY (before the port write — deterministic via the PATH-shimmed slow cp).
+# With the per-lane boot lock: B blocks on <1>.boot.lock, A finishes, B's in-lock
+# re-check sees port>0 + CDP alive → returns 0 with NO re-copy / NO second launch.
+# Assertions: both rc 0; exactly ONE chrome launch; no master* nesting inside the
+# lane dir; lease chrome_pid == the live fake chrome pid.
+r4_bug002_preport_race() {
+    local rc_a rc_b n lease_pid nested count_pids rc_all _
+    _br_spawn_owner
+    _br_make_fake_cp
+    : >"$FAKE_CHROME_COUNT_FILE"
+    # cmd A backgrounded: slow copy (3s) then slow chrome (4s) — bounded by timeout.
+    rc_a=0
+    FAKE_CP_DELAY=3 FAKE_CHROME_DELAY=4 \
+        FAKE_CP_MARKER="$BR_T/copy-phase.marker" PATH="$BR_T/bin:$PATH" \
+        timeout 90 "$ABPOOL_REPO/bin/agent-browser-pool" open about:blank >/dev/null 2>&1 &
+    local apid=$!
+    rm -f -- "$BR_T/copy-phase.marker" 2>/dev/null || true
+    # DETERMINISTIC pre-port trigger: poll (bounded) until the cp shim's MARKER appears
+    # — it is touched at sleep START, so the marker proves cmd A is mid-copy, BEFORE
+    # the port write (which happens only after cp completes; the lane dir itself only
+    # comes into existence with the real copy).
+    for _ in $(seq 1 200); do
+        [[ -f "$BR_T/copy-phase.marker" ]] && break
+        sleep 0.05
+    done
+    if [[ ! -f "$BR_T/copy-phase.marker" ]]; then
+        kill "$apid" 2>/dev/null || true
+        wait "$apid" 2>/dev/null || true
+        _fail "R4: copy-phase marker never appeared — cmd A never reached the copy (fixture broken)"
+        return 1
+    fi
+    # cmd B: the racing second command, provably pre-port.
+    rc_b=0
+    timeout 90 "$ABPOOL_REPO/bin/agent-browser-pool" get cdp-url >/dev/null 2>&1 || rc_b=$?
+    wait "$apid" 2>/dev/null || rc_a=$?
+    # --- snapshot observable state (BEFORE cleanup) ---
+    n="$(wc -l <"$FAKE_CHROME_COUNT_FILE" 2>/dev/null || printf 0)"
+    lease_pid="$(jq -r '.chrome_pid // 0' "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || echo 0)"
+    nested=""
+    [[ -d "$AGENT_CHROME_EPHEMERAL_ROOT/1/master" ]] && nested=1
+    # chrome liveness must be snapshotted BEFORE the cleanup kills it.
+    local pid_live=0
+    [[ "$lease_pid" != "0" && -d "/proc/$lease_pid" ]] && pid_live=1
+    # --- cleanup FIRST (always runs, even when assertions would fail) ---
+    timeout 30 "$ABPOOL_REPO/bin/agent-browser-pool" release all >/dev/null 2>&1 || true
+    pkill -f -- "user-data-dir=$AGENT_CHROME_EPHEMERAL_ROOT" 2>/dev/null || true
+    rm -f -- "$AGENT_BROWSER_POOL_STATE/lanes/1.json" 2>/dev/null || true
+    rm -rf -- "$AGENT_CHROME_EPHEMERAL_ROOT/1" 2>/dev/null || true
+    # --- assertions on snapshots (each a named, grep-able R4: FAIL line) ---
+    rc_all=0
+    if (( rc_a != 0 )); then
+        _fail "R4: first command rc=$rc_a (expected 0)" || rc_all=1
+    fi
+    if (( rc_b != 0 )); then
+        _fail "R4: second command rc=$rc_b (spurious failure — pre-port race hit)" || rc_all=1
+    fi
+    if [[ "$n" != "1" ]]; then
+        _fail "R4: expected exactly 1 chrome launch, got $n (double-launch)" || rc_all=1
+    fi
+    if [[ -n "$nested" ]]; then
+        _fail "R4: nested master dir inside lane 1 (BUG-001 reproduced via double-copy)" || rc_all=1
+    fi
+    count_pids="$(awk '{print $1}' "$FAKE_CHROME_COUNT_FILE" 2>/dev/null | tr '\n' ' ' || true)"
+    if (( pid_live != 1 )) \
+       || [[ " ${count_pids} " != *" $lease_pid "* ]]; then
+        _fail "R4: lease chrome_pid=$lease_pid not live / not the launched pid (clobbered lease; launched: ${count_pids:-none})" || rc_all=1
+    fi
+    return "$rc_all"
+}
+
 # --- single-setup runner -----------------------------------------------------------
 
 _br_run_suite() {
     local fn
     for fn in r1_bug001_guard_fs_agnostic r2_bug001_recovery_e2e \
-              r3_control_delayed_boot_succeeds r3_bug002_race_e2e; do
+              r3_control_delayed_boot_succeeds r3_bug002_race_e2e r4_bug002_preport_race; do
         printf '== %s\n' "$fn"
         if "$fn"; then BR_PASS=$((BR_PASS+1)); printf '   PASS\n';
         else BR_FAIL=$((BR_FAIL+1)); BR_FAILED+=("$fn"); printf '   FAIL\n' >&2; fi
