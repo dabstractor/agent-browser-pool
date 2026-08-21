@@ -1,0 +1,15 @@
+h1.0 Bug Fix Requirements
+ h2.0 Overview
+ h2.1 Critical Issues (Must Fix)
+ h2.2 Major Issues (Should Fix)
+  h3.0 Issue 1: Re-boot of an existing lane dir nests the master copy inside it — ephemeral profile silently loses the master identity (btrfs)
+  h3.1 Issue 2: Concurrent driving commands from one owner during lane boot: spurious failure, duplicate Chrome, clobbered lease ids, and a leaked Chrome that survives release
+ h2.3 Minor Issues (Nice to Fix)
+  h3.2 Issue 1: A corrupt lease file can never be cleaned by any pool verb — lane number permanently burned, permanent '? STALE' status row
+  h3.3 Issue 2: doctor false-FAILs '[filesystem] not btrfs' on a fresh install because the ephemeral root does not exist yet
+  h3.4 Issue 3: help misdocuments AGENT_BROWSER_POOL_HARNESSES as APPENDING to the default harnesses — code REPLACES the set (silently disabling pi/claude/codex/agy/antigravity)
+  h3.5 Issue 4: Committed validation suite plan/004_de5e94ac127c/validate.sh is path-broken as committed — 64 of 89 checks fail with 'No such file or directory' when run per its own usage
+ h2.4 Testing Summary
+ h2.5 Recommendations
+---
+para:23 list:4
