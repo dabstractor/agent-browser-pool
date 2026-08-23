@@ -4,7 +4,7 @@
       "type": "Phase",
       "id": "P1",
       "title": "Bugfix changeset 001 — harden lane boot, crash recovery, and lifecycle hygiene (BUG-001..BUG-006)",
-      "status": "Ready",
+      "status": "Complete",
       "description": "Fix the 6 bugs found by the end-to-end bug hunt against bugfix commit 7154d99: two majors (BUG-001 re-boot nests the master copy inside an existing lane dir on btrfs → silent fresh untrusted profile; BUG-002 no same-owner boot serialization → spurious concurrent failure, duplicate Chrome, clobbered lease ids, leaked Chrome surviving release) and four minors (BUG-003 corrupt lease permanently burns a lane; BUG-004 doctor false-FAIL on fresh installs; BUG-005 help misdocuments AGENT_BROWSER_POOL_HARNESSES; BUG-006 the committed plan/004_de5e94ac127c/validate.sh is path-broken). All 6 bug reports were independently re-verified against current HEAD during research; fix seams, chosen designs, and the mandated test patterns are recorded in plan/004_de5e94ac127c/bugfix/001_ee35a7227ee8/architecture/{system_context.md,fix_design.md,test_framework.md}. Repo is bash under set -euo pipefail; AGENTS.md safety rules (isolated sandbox, single-setup tests, timeout on every subprocess, zero orphan processes) are mandatory for every subtask.",
       "milestones": [
         {
@@ -260,7 +260,7 @@
           "type": "Milestone",
           "id": "P1.M3",
           "title": "Changeset close-out: final regression gate + changeset-level documentation sync",
-          "status": "Ready",
+          "status": "Complete",
           "description": "Re-run the complete matrix (all four repo suites, the new bootrace suite R1-R9, the fixed validation artifact from the repo root, static checks, leak sweep) to certify the whole changeset, then sync the changeset-level documentation (README feature/troubleshooting sections and the agent-browser-pool skill docs) so the delta ships coherent.",
           "tasks": [
             {
@@ -302,7 +302,7 @@
               "type": "Task",
               "id": "P1.M3.T2",
               "title": "Sync changeset-level documentation",
-              "status": "Ready",
+              "status": "Complete",
               "description": "Mode-B catch-all: sweep the README and the agent-browser-pool skill docs so the whole changeset (boot serialization + crash-recovery hardening, corrupt-lease reclaim, doctor fresh-install behavior) ships with coherent overview-level documentation. Per-subtask doc rides (Mode A) have already landed with their work; this task only reconciles the cross-cutting summaries.",
               "subtasks": [
                 {
@@ -331,7 +331,7 @@
                   "type": "Subtask",
                   "id": "P1.M3.T2.S2",
                   "title": "Skill docs: verify/sync .agents/skills/agent-browser-pool/ (SKILL.md, references/configuration.md) with the same deltas",
-                  "status": "Ready",
+                  "status": "Complete",
                   "story_points": 0.5,
                   "dependencies": [
                     "P1.M3.T2.S1",
